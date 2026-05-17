@@ -75,11 +75,6 @@
   .divider-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--gold); }
   .moms-quote { font-size: 17px; color: var(--text); font-style: italic; line-height: 1.7; margin-bottom: 0.4rem; opacity: 0.9; }
   .moms-attr { font-size: 12px; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 1.8rem; }
-  .personal-line {
-    font-size: 15px; color: var(--gold); font-weight: 500; margin-bottom: 1.8rem;
-    padding: 0.8rem 1.2rem; border: 1px solid var(--border-bright); border-radius: 4px;
-    background: rgba(232,168,48,0.04); display: inline-block;
-  }
   .goal-row { display: flex; justify-content: center; gap: 2.5rem; flex-wrap: wrap; }
   .goal-item { text-align: center; }
   .goal-num { font-family: 'Cinzel', serif; font-size: 22px; font-weight: 600; color: var(--gold); }
@@ -122,6 +117,13 @@
   .sync-status.synced { color: #4A8A5A; }
   .sync-status.syncing { color: var(--gold-deep); }
   .sync-status.error { color: #AA4444; }
+
+  .day-locked-banner {
+    display: none; background: rgba(232,168,48,0.08); border: 1px solid rgba(232,168,48,0.3);
+    border-radius: 6px; padding: 1rem 1.2rem; margin-bottom: 1.5rem;
+    font-size: 14px; color: var(--gold); line-height: 1.5;
+  }
+  .day-locked-banner.show { display: block; }
 
   .day-score-bar-wrap { margin: 0.5rem 0 1.5rem; }
   .score-display { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
@@ -196,7 +198,6 @@
     <div class="divider-ornament"><div class="divider-dot"></div></div>
     <div class="moms-quote">"Timle yo garyeu vane ta ma siddhai xoddinxu"</div>
     <div class="moms-attr">— Mamu</div>
-    <!-- <div class="personal-line">"You only have to get rich once. M4 competition, PS5, Maldives, all follow."</div> -->
     <div class="goal-row">
       <div class="goal-item"><div class="goal-num">$10K</div><div class="goal-label">Monthly goal</div></div>
       <div class="goal-item"><div class="goal-num">75</div><div class="goal-label">Days of war</div></div>
@@ -226,6 +227,11 @@
         <div class="sync-status" id="sync-status">connecting...</div>
       </div>
     </div>
+
+    <div class="day-locked-banner" id="day-locked-banner">
+      ✓ Day already marked complete. Locked score shown above. Start ticking off today's tasks below.
+    </div>
+
     <div class="day-score-bar-wrap">
       <div class="score-display">
         <div class="score-big" id="score-display">0</div>
@@ -235,19 +241,18 @@
     </div>
     <div id="task-list"></div>
     <div class="actions">
-      <button class="btn primary" onclick="markDay('won')">Mark day complete</button>
-      <button class="btn" onclick="markDay('failed')">Mark as failed</button>
-      <button class="btn danger" onclick="showReset()">Reset all data</button>
+      <button class="btn primary" id="mark-complete-btn" onclick="markDayComplete()">Mark day complete</button>
+      <button class="btn danger" onclick="showReset()">Reset today's tasks</button>
     </div>
   </div>
 </div>
 
 <div class="confirm-overlay" id="confirm-overlay">
   <div class="confirm-box">
-    <h3>Reset everything?</h3>
-    <p>This will erase all 75 days of progress. Cannot be undone.</p>
+    <h3>Reset today's tasks?</h3>
+    <p>This will only clear today's checkmarks. Your 75-day history and all past scores are untouched.</p>
     <div class="confirm-btns">
-      <button class="btn danger" onclick="resetAll()">Yes, reset</button>
+      <button class="btn danger" onclick="resetToday()">Yes, reset today</button>
       <button class="btn" onclick="hideReset()">Cancel</button>
     </div>
   </div>
@@ -277,6 +282,14 @@ const TASKS = [
   { id:'t15', name:'No reels. No mindless scrolling.',         pts:7,  group:'Night', critical:true },
 ];
 
+// cache structure per day_key:
+// { day_key, checks, score, locked_score (set when marked complete), status }
+// When a day is marked complete:
+//   - locked_score = current score (this is what the 75-day grid reads)
+//   - checks = {} (cleared so next day starts fresh)
+//   - status = 'won'
+// The grid ALWAYS uses locked_score if present, otherwise calculates from checks.
+
 let cache = {};
 let syncTimer = null;
 
@@ -297,6 +310,13 @@ function dayLabel(n) {
   const d = new Date(START);
   d.setDate(d.getDate() + n - 1);
   return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+}
+
+// Score for grid display: prefer locked_score, fall back to live calc from checks
+function gridScore(row) {
+  if (!row) return 0;
+  if (typeof row.locked_score === 'number') return row.locked_score;
+  return calcScore(row.checks);
 }
 
 function calcScore(checks) {
@@ -346,14 +366,14 @@ async function loadAll() {
   }
 }
 
-async function saveDay(key, checks, score, status) {
-  cache[key] = { day_key: key, checks, score, status };
+async function saveRow(key, data) {
+  cache[key] = { ...cache[key], ...data, day_key: key };
   setSync('syncing', 'saving...');
   try {
     await dbFetch('tracker', {
       method: 'POST',
       prefer: 'resolution=merge-duplicates',
-      body: JSON.stringify({ day_key: key, checks, score, status }),
+      body: JSON.stringify({ day_key: key, ...data }),
     });
     setSync('synced', 'saved');
   } catch(e) {
@@ -361,44 +381,68 @@ async function saveDay(key, checks, score, status) {
   }
 }
 
-async function deleteAll() {
-  await dbFetch('tracker?day_key=neq.null', { method: 'DELETE' });
-  cache = {};
-}
-
 function toggleTask(id) {
   const key = todayKey();
-  const row = cache[key] || { day_key: key, checks: {}, score: 0, status: '' };
-  const checks = { ...row.checks };
+  const row = cache[key] || { checks: {}, locked_score: null };
+
+  // Don't allow ticking if day is already locked (marked complete)
+  // Actually allow it — this becomes tomorrow's progress if same calendar date
+  // But actually we want: if locked, show a fresh checklist for the SAME day re-use
+  // The simplest UX: once locked, checks are always for the "next session" which won't affect locked_score
+  // We store them under checks as normal, but gridScore ignores them once locked_score is set.
+
+  const checks = { ...(row.checks || {}) };
   checks[id] = !checks[id];
-  const score = calcScore(checks);
-  cache[key] = { ...row, checks, score };
+  const liveScore = calcScore(checks);
+
+  cache[key] = { ...row, checks, score: liveScore };
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => saveDay(key, checks, score, cache[key]?.status || ''), 800);
+  syncTimer = setTimeout(() => {
+    const r = cache[key];
+    saveRow(key, { checks, score: liveScore, locked_score: r.locked_score ?? null, status: r.status ?? '' });
+  }, 800);
   render();
 }
 
-async function markDay(status) {
+async function markDayComplete() {
   const key = todayKey();
-  const row = cache[key] || { day_key: key, checks: {}, score: 0, status: '' };
-  await saveDay(key, row.checks, row.score, status);
+  const row = cache[key] || { checks: {}, locked_score: null };
+
+  // If already locked today, don't double-lock
+  if (typeof row.locked_score === 'number') {
+    alert('Today is already marked complete. Score is locked.');
+    return;
+  }
+
+  const score = calcScore(row.checks || {});
+  // Lock the score, clear the checks for fresh start
+  await saveRow(key, {
+    checks: {},          // clear checkmarks
+    score: score,
+    locked_score: score, // permanently lock this score to the grid
+    status: 'won',
+  });
+  cache[key] = { day_key: key, checks: {}, score, locked_score: score, status: 'won' };
+  render();
+}
+
+// Reset today's tasks only — does NOT touch locked_score or any other day
+async function resetToday() {
+  hideReset();
+  const key = todayKey();
+  const row = cache[key] || {};
+  await saveRow(key, {
+    checks: {},
+    score: 0,
+    locked_score: row.locked_score ?? null, // preserve any existing lock
+    status: row.status ?? '',
+  });
+  cache[key] = { ...row, checks: {}, score: 0 };
   render();
 }
 
 function showReset() { document.getElementById('confirm-overlay').classList.add('show'); }
 function hideReset() { document.getElementById('confirm-overlay').classList.remove('show'); }
-
-async function resetAll() {
-  hideReset();
-  setSync('syncing', 'resetting...');
-  try {
-    await deleteAll();
-    setSync('synced', 'reset complete');
-    render();
-  } catch(e) {
-    setSync('error', 'reset failed');
-  }
-}
 
 function buildTaskList(checks) {
   const groups = [...new Set(TASKS.map(t => t.group))];
@@ -431,24 +475,40 @@ function buildTaskList(checks) {
 function render() {
   const dn = dayNum();
   const key = todayKey();
-  const row = cache[key] || { checks: {}, score: 0 };
+  const row = cache[key] || { checks: {}, locked_score: null };
   const checks = row.checks || {};
-  const score = calcScore(checks);
+  const liveScore = calcScore(checks);
+  const isLocked = typeof row.locked_score === 'number';
+
+  // Score bar: show locked score if locked, else live score
+  const displayScore = isLocked ? row.locked_score : liveScore;
 
   const d = new Date();
   document.getElementById('today-heading').textContent =
     'Day ' + dn + ' — ' + d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
 
-  document.getElementById('score-display').textContent = score;
+  document.getElementById('score-display').textContent = displayScore;
   const bar = document.getElementById('score-bar');
-  bar.style.width = score + '%';
-  if (score >= 80) bar.style.background = 'linear-gradient(90deg,#C47D0E,#F5C842)';
-  else if (score >= 60) bar.style.background = 'linear-gradient(90deg,#8C5F0A,#C47D0E)';
-  else if (score >= 40) bar.style.background = 'linear-gradient(90deg,#6B2020,#AA4040)';
+  bar.style.width = displayScore + '%';
+  if (displayScore >= 80) bar.style.background = 'linear-gradient(90deg,#C47D0E,#F5C842)';
+  else if (displayScore >= 60) bar.style.background = 'linear-gradient(90deg,#8C5F0A,#C47D0E)';
+  else if (displayScore >= 40) bar.style.background = 'linear-gradient(90deg,#6B2020,#AA4040)';
   else bar.style.background = '#4A1515';
+
+  // Show locked banner + hide complete button if already locked
+  const banner = document.getElementById('day-locked-banner');
+  const completeBtn = document.getElementById('mark-complete-btn');
+  if (isLocked) {
+    banner.classList.add('show');
+    completeBtn.style.display = 'none';
+  } else {
+    banner.classList.remove('show');
+    completeBtn.style.display = '';
+  }
 
   buildTaskList(checks);
 
+  // Build grid — grid always uses locked_score for past days
   const grid = document.getElementById('day-grid');
   grid.innerHTML = '';
   let won = 0, streak = 0, streakBroken = false;
@@ -456,7 +516,7 @@ function render() {
   for (let i = 1; i <= TOTAL; i++) {
     const k = dayKey(i);
     const r = cache[k];
-    const sc = r ? calcScore(r.checks || {}) : 0;
+    const sc = gridScore(r); // uses locked_score if present
     if (sc >= 80) won++;
     if (!streakBroken && i <= dn) {
       if (sc >= 80) streak++;
