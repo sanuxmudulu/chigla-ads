@@ -442,11 +442,18 @@ function render() {
   document.getElementById('score-display').textContent = displayScore;
   const bar = document.getElementById('score-bar');
   bar.style.width = displayScore + '%';
-  if (displayScore >= WIN_THRESHOLD) bar.style.background = 'linear-gradient(90deg,#C47D0E,#F5C842)';
-  else if (displayScore >= 70) bar.style.background = 'linear-gradient(90deg,#8C5F0A,#C47D0E)';
-  else if (displayScore >= 50) bar.style.background = 'linear-gradient(90deg,#5C3A08,#8C5F0A)';
-  else if (displayScore >= 30) bar.style.background = 'linear-gradient(90deg,#6B2020,#AA4040)';
-  else bar.style.background = '#4A1515';
+
+  if (displayScore >= WIN_THRESHOLD) {
+    bar.style.background = 'linear-gradient(90deg,#C47D0E,#F5C842)';
+  } else if (displayScore >= 70) {
+    bar.style.background = 'linear-gradient(90deg,#8C5F0A,#C47D0E)';
+  } else if (displayScore >= 50) {
+    bar.style.background = 'linear-gradient(90deg,#5C3A08,#8C5F0A)';
+  } else if (displayScore >= 30) {
+    bar.style.background = 'linear-gradient(90deg,#6B2020,#AA4040)';
+  } else {
+    bar.style.background = '#4A1515';
+  }
 
   // Mark complete: always visible
   document.getElementById('mark-complete-btn').style.display = '';
@@ -456,30 +463,53 @@ function render() {
   // 75-day grid
   const grid = document.getElementById('day-grid');
   grid.innerHTML = '';
-  let won = 0, streak = 0, streakBroken = false;
+
+  let won = 0;
+  let streak = 0;
 
   for (let i = 1; i <= TOTAL; i++) {
     const k = dayKey(i);
     const r = cache[k];
     const sc = gridScore(r);
     const isWon = sc >= WIN_THRESHOLD;
+
     if (isWon) won++;
-    if (!streakBroken && i <= dn) {
+
+    // streak = continuous wins up to current day
+    if (i <= dn) {
       if (isWon) streak++;
-      else if (i < dn) streakBroken = true;
+      else streak = 0;
     }
+
     const cell = document.createElement('div');
     const cls = scoreClass(sc);
-    cell.className = 'day-cell' + (cls ? ' ' + cls : '') + (i === dn ? ' today' : '');
-    cell.innerHTML = i + '<span class="tooltip">Day ' + i + ' · ' + dayLabel(i) + (sc > 0 ? ' · ' + sc + 'pts' : '') + '</span>';
+
+    cell.className =
+      'day-cell' +
+      (cls ? ' ' + cls : '') +
+      (i === dn ? ' today' : '');
+
+    cell.innerHTML =
+      i +
+      '<span class="tooltip">Day ' +
+      i +
+      ' · ' +
+      dayLabel(i) +
+      (sc > 0 ? ' · ' + sc + 'pts' : '') +
+      '</span>';
+
     grid.appendChild(cell);
   }
 
   document.getElementById('stat-day').textContent = dn;
   document.getElementById('stat-streak').textContent = streak;
   document.getElementById('stat-won').textContent = won;
-  document.getElementById('stat-left').textContent = TOTAL - won;
-  document.getElementById('grid-progress').textContent = won + ' / ' + TOTAL + ' days won';
+
+  // actual days remaining in challenge
+  document.getElementById('stat-left').textContent = TOTAL - dn;
+
+  document.getElementById('grid-progress').textContent =
+    won + ' / ' + TOTAL + ' days won';
 }
 
 async function init() {
