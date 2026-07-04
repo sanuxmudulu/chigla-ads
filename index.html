@@ -1,1 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Chigla Ads Dashboard</title>
+<style>
+  body {
+    background: #0f0f14;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin-bottom: 16px; }
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  input, button {
+    background: #1a1a22;
+    border: 1px solid #333;
+    color: #eee;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  button {
+    background: #e6006a;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button:hover { background: #c40058; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #2a2a33; font-size: 14px; }
+  th { color: #999; font-weight: 500; }
+  .error-box {
+    background: #2a1414;
+    border: 1px solid #6b1f1f;
+    color: #ff9d9d;
+    padding: 12px;
+    border-radius: 6px;
+    margin-top: 16px;
+    white-space: pre-wrap;
+    font-family: monospace;
+    font-size: 12px;
+    display: none;
+  }
+  .debug-box {
+    background: #14161f;
+    border: 1px solid #333;
+    color: #8a8a8a;
+    padding: 12px;
+    border-radius: 6px;
+    margin-top: 16px;
+    white-space: pre-wrap;
+    font-family: monospace;
+    font-size: 11px;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .status { font-size: 13px; color: #888; margin-top: 8px; }
+</style>
+</head>
+<body>
 
+<h1>Chigla Ads — Glitchy Stats</h1>
+
+<div class="controls">
+  <label>Start: <input type="date" id="startDate" /></label>
+  <label>End: <input type="date" id="endDate" /></label>
+  <button onclick="fetchStats()">Refresh</button>
+</div>
+
+<div class="status" id="status"></div>
+
+<table id="resultsTable" style="display:none;">
+  <thead>
+    <tr>
+      <th>Source</th>
+      <th>Offer</th>
+      <th>Clicks</th>
+      <th>Conversions</th>
+      <th>Payout ($)</th>
+      <th># entries</th>
+    </tr>
+  </thead>
+  <tbody id="resultsBody"></tbody>
+</table>
+
+<div class="error-box" id="errorBox"></div>
+
+<h3 style="margin-top:24px; font-size:14px; color:#888;">Raw debug output (for troubleshooting)</h3>
+<div class="debug-box" id="debugBox">Nothing fetched yet. Click Refresh.</div>
+
+<script>
+  // Default both date fields to today
+  const today = new Date().toISOString().split("T")[0];
+  document.getElementById("startDate").value = today;
+  document.getElementById("endDate").value = today;
+
+  async function fetchStats() {
+    const statusEl = document.getElementById("status");
+    const errorBox = document.getElementById("errorBox");
+    const debugBox = document.getElementById("debugBox");
+    const table = document.getElementById("resultsTable");
+    const tbody = document.getElementById("resultsBody");
+
+    errorBox.style.display = "none";
+    statusEl.textContent = "Fetching...";
+
+    const startDate = document.getElementById("startDate").value;
+    const endDate = document.getElementById("endDate").value;
+
+    try {
+      const res = await fetch(`/.netlify/functions/glitchy-stats?startDate=${startDate}&endDate=${endDate}`);
+      const data = await res.json();
+
+      // Always show the raw response in the debug box — this is what
+      // you screenshot to me if something looks wrong.
+      debugBox.textContent = JSON.stringify(data, null, 2);
+
+      if (!res.ok || data.error) {
+        errorBox.style.display = "block";
+        errorBox.textContent = `ERROR (status ${res.status}):\n${data.error}\n\n${data.details || data.message || ""}`;
+        table.style.display = "none";
+        statusEl.textContent = "Failed — see error box below.";
+        return;
+      }
+
+      // Populate the table
+      tbody.innerHTML = "";
+      (data.sources || []).forEach(row => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${row.source}</td>
+          <td>${row.offer_name || "-"}</td>
+          <td>${row.clicks}</td>
+          <td>${row.conversions}</td>
+          <td>$${row.payout.toFixed(2)}</td>
+          <td>${row.entries_count}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      table.style.display = data.sources && data.sources.length ? "table" : "none";
+      statusEl.textContent = `Done. ${data.raw_entry_count} raw entries, ${data.sources.length} unique sources. (${startDate} to ${endDate})`;
+
+    } catch (err) {
+      errorBox.style.display = "block";
+      errorBox.textContent = `NETWORK / SCRIPT ERROR:\n${err.message}`;
+      statusEl.textContent = "Failed — see error box below.";
+      debugBox.textContent = err.stack || err.message;
+    }
+  }
+</script>
+
+</body>
+</html>
