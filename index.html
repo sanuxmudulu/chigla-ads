@@ -63,9 +63,12 @@
 <h1>Chigla Ads — Glitchy Stats</h1>
 
 <div class="controls">
+  <button onclick="setToday()">Today</button>
+  <button onclick="setYesterday()">Yesterday</button>
   <label>Start: <input type="date" id="startDate" /></label>
   <label>End: <input type="date" id="endDate" /></label>
   <button onclick="fetchStats()">Refresh</button>
+  <button onclick="resetDay()" style="background:#333;">Reset Day</button>
 </div>
 
 <div class="status" id="status"></div>
@@ -79,6 +82,7 @@
       <th>Conversions</th>
       <th>Payout ($)</th>
       <th># entries</th>
+      <th>Reset applied?</th>
     </tr>
   </thead>
   <tbody id="resultsBody"></tbody>
@@ -135,6 +139,7 @@
           <td>${row.conversions}</td>
           <td>$${row.payout.toFixed(2)}</td>
           <td>${row.entries_count}</td>
+          <td>${row.reset_applied ? "✅ yes" : "— no"}</td>
         `;
         tbody.appendChild(tr);
       });
@@ -147,6 +152,53 @@
       errorBox.textContent = `NETWORK / SCRIPT ERROR:\n${err.message}`;
       statusEl.textContent = "Failed — see error box below.";
       debugBox.textContent = err.stack || err.message;
+    }
+  }
+
+  function setToday() {
+    const t = new Date().toISOString().split("T")[0];
+    document.getElementById("startDate").value = t;
+    document.getElementById("endDate").value = t;
+    fetchStats();
+  }
+
+  function setYesterday() {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const y = d.toISOString().split("T")[0];
+    document.getElementById("startDate").value = y;
+    document.getElementById("endDate").value = y;
+    fetchStats();
+  }
+
+  async function resetDay() {
+    const statusEl = document.getElementById("status");
+    const debugBox = document.getElementById("debugBox");
+    const errorBox = document.getElementById("errorBox");
+
+    if (!confirm("This locks in current numbers as the new baseline for today. Sure you want to reset?")) return;
+
+    statusEl.textContent = "Resetting...";
+    errorBox.style.display = "none";
+
+    try {
+      const res = await fetch("/.netlify/functions/reset-day", { method: "POST" });
+      const data = await res.json();
+      debugBox.textContent = JSON.stringify(data, null, 2);
+
+      if (!res.ok || data.error) {
+        errorBox.style.display = "block";
+        errorBox.textContent = `RESET FAILED (status ${res.status}):\n${data.error}\n\n${data.details || ""}`;
+        statusEl.textContent = "Reset failed — see error box.";
+        return;
+      }
+
+      statusEl.textContent = data.message;
+      fetchStats(); // auto-refresh so you see the effect immediately
+    } catch (err) {
+      errorBox.style.display = "block";
+      errorBox.textContent = `RESET NETWORK ERROR:\n${err.message}`;
+      statusEl.textContent = "Reset failed.";
     }
   }
 </script>
