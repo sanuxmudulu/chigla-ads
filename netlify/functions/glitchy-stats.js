@@ -50,29 +50,95 @@ exports.handler = async function (event) {
     // this handles both so we don't crash either way.
     const entries = Array.isArray(data) ? data : data.data || data.results || [data];
 
-    // Group and sum everything by "source" (your ad name or campaign name).
-    const grouped = {};
+    // Group by source AND hour first — we need per-hour totals to apply
+    // the reset baseline correctly (see reset-day.js for why).
+    const bySourceHour = {};
+    const offerNameBySource = {};
 
     for (const entry of entries) {
       const stat = entry.Stat || entry.stat || entry;
       if (!stat || !stat.source) continue;
 
-      const key = stat.source;
-      if (!grouped[key]) {
-        grouped[key] = {
-          source: key,
-          clicks: 0,
-          conversions: 0,
-          payout: 0,
-          offer_name: entry.Offer?.name || entry.offer?.name || null,
-          entries_count: 0,
+      const src = stat.source;
+      const hr = stat.hour;
+      bySourceHour[src] = bySourceHour[src] || {};
+      bySourceHour[src][hr] = bySourceHour[src][hr] || { clicks: 0, conversions: 0, payout: 0, entries: 0 };
+      bySourceHour[src][hr].clicks += Number(stat.clicks || 0);
+      bySourceHour[src][hr].conversions += Number(stat.conversions || 0);
+      bySourceHour[src][hr].payout += Number(stat.payout || 0);
+      bySourceHour[src][hr].entries += 1;
+      offerNameBySource[src] = entry.Offer?.name || entry.offer?.name || offerNameBySource[src] || null;
+    }
+
+    // Pull any saved reset baselines for this date range from Supabase.
+    // If Supabase env vars aren't set yet, just skip this and return raw
+    // totals — don't crash the whole function over it.
+    let baselineBySource = {};
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+
+    if (supabaseUrl && supabaseKey) {
+      const { createClient } = require("@supabase/supabase-js");
+      const supabase = createClient(supabaseUrl, supabaseKey);
+      const { data: baselines, error: baselineError } = await supabase
+        .from("reset_baselines")
+        .select("*")
+        .gte("reset_date", startDate)
+        .lte("reset_date", endDate);
+
+      if (baselineError) {
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Supabase read failed", details: baselineError.message }),
         };
       }
 
-      grouped[key].clicks += Number(stat.clicks || 0);
-      grouped[key].conversions += Number(stat.conversions || 0);
-      grouped[key].payout += Number(stat.payout || 0);
-      grouped[key].entries_count += 1;
+      for (const b of baselines || []) {
+        // If a source has resets on multiple days in range, use the most recent one.
+        if (!baselineBySource[b.source_name] || b.reset_date > baselineBySource[b.source_name].reset_date) {
+          baselineBySource[b.source_name] = b;
+        }
+      }
+    }
+
+    // Now compute final numbers per source, applying the baseline where one exists.
+    const sources = [];
+    for (const src of Object.keys(bySourceHour)) {
+      const hours = bySourceHour[src];
+      const baseline = baselineBySource[src];
+
+      let clicks = 0, conversions = 0, payout = 0, entryCount = 0;
+
+      for (const hr of Object.keys(hours)) {
+        entryCount += hours[hr].entries;
+
+        if (baseline && hr === baseline.reset_hour) {
+          // This is the boundary hour — subtract what already existed at reset time.
+          clicks += Math.max(0, hours[hr].clicks - baseline.clicks_at_reset);
+          conversions += Math.max(0, hours[hr].conversions - baseline.conversions_at_reset);
+          payout += Math.max(0, hours[hr].payout - baseline.payout_at_reset);
+        } else if (baseline && hr < baseline.reset_hour) {
+          // Before the reset point today — already counted in the previous
+          // tracking session, ignore it now.
+          continue;
+        } else {
+          // Either no baseline at all (count everything), or this hour is
+          // fully after the reset point (also count everything).
+          clicks += hours[hr].clicks;
+          conversions += hours[hr].conversions;
+          payout += hours[hr].payout;
+        }
+      }
+
+      sources.push({
+        source: src,
+        offer_name: offerNameBySource[src],
+        clicks,
+        conversions,
+        payout,
+        entries_count: entryCount,
+        reset_applied: !!baseline,
+      });
     }
 
     return {
@@ -81,7 +147,7 @@ exports.handler = async function (event) {
         startDate,
         endDate,
         raw_entry_count: entries.length,
-        sources: Object.values(grouped),
+        sources,
         // Keep the raw data in the response too, for now — helps us debug
         // if grouping looks wrong. We'll remove this once it's stable.
         raw: entries,
