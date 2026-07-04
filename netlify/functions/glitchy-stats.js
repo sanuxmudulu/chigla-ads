@@ -21,7 +21,7 @@ exports.handler = async function (event) {
     const startDate = params.startDate || today;
     const endDate = params.endDate || today;
 
-    const url = `https://api.glitchy.com/v3/stats?rangeTypeValue=Custom&startDate=${startDate}&endDate=${endDate}`;
+    const url = `https://api.glitchy.com/v3/stats?rangeTypeValue=Today&startDate=${startDate}&endDate=${endDate}`;
 
     const response = await fetch(url, {
       headers: {
