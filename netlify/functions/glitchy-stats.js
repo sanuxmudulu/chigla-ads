@@ -1,6 +1,8 @@
 // This runs on Netlify's server, not in the browser.
 // Your Glitchy token stays here — never sent to the frontend.
 
+const { todayEst, resolveSessionRange, summarizeWithBaseline } = require("./_shared/glitchy-session");
+
 exports.handler = async function (event) {
   try {
     const token = process.env.GLITCHY_TOKEN;
@@ -15,13 +17,39 @@ exports.handler = async function (event) {
     }
 
     // Read startDate/endDate from the URL query, e.g. ?startDate=2026-07-04&endDate=2026-07-05
-    // Defaults to today if not provided.
+    // Defaults to today (EST, matching Glitchy's hour field) if not provided.
     const params = event.queryStringParameters || {};
-    const today = new Date().toISOString().split("T")[0];
-    const startDate = params.startDate || today;
-    const endDate = params.endDate || today;
+    const today = todayEst();
+    const requestedStart = params.startDate || today;
+    const requestedEnd = params.endDate || today;
 
-    const url = `https://api.glitchy.com/v3/stats?rangeTypeValue=Today&startDate=${startDate}&endDate=${endDate}`;
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+
+    let effectiveStartDate = requestedStart;
+    let effectiveEndDate = requestedEnd;
+    let baselineBySource = {};
+    let sessionExtended = false;
+
+    if (supabaseUrl && supabaseKey) {
+      const { createClient } = require("@supabase/supabase-js");
+      const supabase = createClient(supabaseUrl, supabaseKey);
+
+      try {
+        const session = await resolveSessionRange(supabase, requestedStart, requestedEnd);
+        effectiveStartDate = session.effectiveStartDate;
+        effectiveEndDate = session.effectiveEndDate;
+        baselineBySource = session.baselineBySource;
+        sessionExtended = session.sessionExtended;
+      } catch (err) {
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Supabase read failed", details: err.message }),
+        };
+      }
+    }
+
+    const url = `https://api.glitchy.com/v3/stats?rangeTypeValue=Today&startDate=${effectiveStartDate}&endDate=${effectiveEndDate}`;
 
     const response = await fetch(url, {
       headers: {
@@ -50,102 +78,16 @@ exports.handler = async function (event) {
     // this handles both so we don't crash either way.
     const entries = Array.isArray(data) ? data : data.data || data.results || [data];
 
-    // Group by source AND hour first — we need per-hour totals to apply
-    // the reset baseline correctly (see reset-day.js for why).
-    const bySourceHour = {};
-    const offerNameBySource = {};
-
-    for (const entry of entries) {
-      const stat = entry.Stat || entry.stat || entry;
-      if (!stat || !stat.source) continue;
-
-      const src = stat.source;
-      const hr = stat.hour;
-      bySourceHour[src] = bySourceHour[src] || {};
-      bySourceHour[src][hr] = bySourceHour[src][hr] || { clicks: 0, conversions: 0, payout: 0, entries: 0 };
-      bySourceHour[src][hr].clicks += Number(stat.clicks || 0);
-      bySourceHour[src][hr].conversions += Number(stat.conversions || 0);
-      bySourceHour[src][hr].payout += Number(stat.payout || 0);
-      bySourceHour[src][hr].entries += 1;
-      offerNameBySource[src] = entry.Offer?.name || entry.offer?.name || offerNameBySource[src] || null;
-    }
-
-    // Pull any saved reset baselines for this date range from Supabase.
-    // If Supabase env vars aren't set yet, just skip this and return raw
-    // totals — don't crash the whole function over it.
-    let baselineBySource = {};
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
-
-    if (supabaseUrl && supabaseKey) {
-      const { createClient } = require("@supabase/supabase-js");
-      const supabase = createClient(supabaseUrl, supabaseKey);
-      const { data: baselines, error: baselineError } = await supabase
-        .from("reset_baselines")
-        .select("*")
-        .gte("reset_date", startDate)
-        .lte("reset_date", endDate);
-
-      if (baselineError) {
-        return {
-          statusCode: 500,
-          body: JSON.stringify({ error: "Supabase read failed", details: baselineError.message }),
-        };
-      }
-
-      for (const b of baselines || []) {
-        // If a source has resets on multiple days in range, use the most recent one.
-        if (!baselineBySource[b.source_name] || b.reset_date > baselineBySource[b.source_name].reset_date) {
-          baselineBySource[b.source_name] = b;
-        }
-      }
-    }
-
-    // Now compute final numbers per source, applying the baseline where one exists.
-    const sources = [];
-    for (const src of Object.keys(bySourceHour)) {
-      const hours = bySourceHour[src];
-      const baseline = baselineBySource[src];
-
-      let clicks = 0, conversions = 0, payout = 0, entryCount = 0;
-
-      for (const hr of Object.keys(hours)) {
-        entryCount += hours[hr].entries;
-
-        if (baseline && hr === baseline.reset_hour) {
-          // This is the boundary hour — subtract what already existed at reset time.
-          clicks += Math.max(0, hours[hr].clicks - baseline.clicks_at_reset);
-          conversions += Math.max(0, hours[hr].conversions - baseline.conversions_at_reset);
-          payout += Math.max(0, hours[hr].payout - baseline.payout_at_reset);
-        } else if (baseline && hr < baseline.reset_hour) {
-          // Before the reset point today — already counted in the previous
-          // tracking session, ignore it now.
-          continue;
-        } else {
-          // Either no baseline at all (count everything), or this hour is
-          // fully after the reset point (also count everything).
-          clicks += hours[hr].clicks;
-          conversions += hours[hr].conversions;
-          payout += hours[hr].payout;
-        }
-      }
-
-      sources.push({
-        source: src,
-        offer_name: offerNameBySource[src],
-        clicks,
-        conversions,
-        payout,
-        entries_count: entryCount,
-        reset_applied: !!baseline,
-      });
-    }
+    const bySource = summarizeWithBaseline(entries, baselineBySource, effectiveEndDate);
+    const sources = Object.keys(bySource).map((src) => ({ source: src, ...bySource[src] }));
 
     return {
       statusCode: 200,
       body: JSON.stringify({
-        startDate,
-        endDate,
+        startDate: effectiveStartDate,
+        endDate: effectiveEndDate,
+        requestedStartDate: requestedStart,
+        session_extended: sessionExtended,
         raw_entry_count: entries.length,
         sources,
         // Keep the raw data in the response too, for now — helps us debug

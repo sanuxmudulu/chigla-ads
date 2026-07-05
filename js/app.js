@@ -1,12 +1,4 @@
-import {
-  mockAccounts,
-  mockSourceProfile,
-  mockSpendForSource,
-  mockHourlySpendCurve,
-  mockHourlyEarningsCurve,
-  mockDayTotals,
-  jitter,
-} from "./mock.js";
+import { mockAccounts, mockSourceProfile } from "./mock.js";
 import {
   fetchGlitchyStats,
   postResetDay,
@@ -31,7 +23,14 @@ function fallbackSources() {
   ];
 }
 
-const todayStr = () => new Date().toISOString().split("T")[0];
+// Glitchy's "hour" field (and reset_baselines) are anchored to EST, so
+// "today" needs to mean the same calendar date the backend uses — otherwise
+// the date picker and the session logic in glitchy-stats.js can disagree
+// right around midnight.
+function todayStr() {
+  const est = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return `${est.getFullYear()}-${String(est.getMonth() + 1).padStart(2, "0")}-${String(est.getDate()).padStart(2, "0")}`;
+}
 const money = (n) => `$${(n || 0).toFixed(2)}`;
 const num = (n) => (n || 0).toLocaleString("en-US");
 
@@ -45,6 +44,7 @@ const state = {
   baseSpendTotal: 0,
   baseEarningsTotal: 0,
   expandedSources: new Set(),
+  sessionInfo: { extended: false },
 };
 
 let lastUpdatedAt = null;
@@ -131,7 +131,7 @@ function wireEvents() {
     const name = document.getElementById("newAccountName").value.trim();
     if (!name) return;
     const accounts = loadAccounts(mockAccounts());
-    accounts.push({ id: `acc_${Date.now()}`, name, region: "—", status: "active" });
+    accounts.push({ id: `acc_${Date.now()}`, name, status: "active" });
     saveAccounts(accounts);
     renderAccounts();
     document.getElementById("addAccountModal").classList.remove("open");
@@ -155,13 +155,6 @@ function startTimers() {
 
   // Auto-refresh real data periodically
   setInterval(() => refreshAll(), 60000);
-
-  // Cosmetic "live" jitter on the mock-derived KPI figures only — never
-  // touches real clicks/conversions/payout, purely a liveliness cue.
-  setInterval(() => {
-    if (!state.sources.length) return;
-    renderKpisJittered();
-  }, 4000);
 }
 
 // ============================== DATA FETCH ==============================
@@ -210,21 +203,33 @@ function applyGlitchyResponse(data, { flagNewConversions }) {
   }
   state.prevConversions = new Map(sources.map((s) => [s.source, s.conversions]));
 
+  // Spend, CPM, CPA (cost per conversion) and CPNC (cost per network click)
+  // all come from TikTok, which isn't connected yet — they stay at 0 rather
+  // than showing invented numbers. Clicks, Earning (payout) and EPC are the
+  // real Glitchy figures.
   const enriched = sources.map((s) => {
     const profile = mockSourceProfile(s.source, dateStr);
-    const spend = mockSpendForSource(s.source, dateStr, s.clicks);
-    const cpc = s.clicks > 0 ? spend / s.clicks : 0;
-    const cpa = s.conversions > 0 ? spend / s.conversions : 0;
+    const spend = 0;
+    const cpm = 0;
+    const cpa = 0;
+    const cpnc = 0;
     const epc = s.clicks > 0 ? s.payout / s.clicks : 0;
-    const roas = spend > 0 ? s.payout / spend : 0;
+    const roas = 0;
     const profit = s.payout - spend;
-    return { ...s, type: profile.type, cpm: profile.cpm, spend, cpc, cpa, epc, roas, profit };
+    return { ...s, type: profile.type, spend, cpm, cpa, cpnc, epc, roas, profit };
   });
 
   state.sources = enriched;
   state.raw = data.raw || [];
   state.baseSpendTotal = enriched.reduce((a, s) => a + s.spend, 0);
   state.baseEarningsTotal = enriched.reduce((a, s) => a + s.payout, 0);
+  // If we haven't clicked Reset Day since before today, glitchy-stats.js
+  // extends the query back to the last reset so the current session's
+  // numbers aren't clipped at midnight — surface that here so the totals
+  // aren't mistaken for a single calendar day.
+  state.sessionInfo = data.session_extended
+    ? { extended: true, startDate: data.startDate, endDate: data.endDate }
+    : { extended: false };
 
   populateChartSourceOptions(enriched);
   renderKpis();
@@ -249,28 +254,14 @@ function populateChartSourceOptions(sources) {
 // ============================== KPI STRIP ==============================
 
 function renderKpis() {
-  const totalSpend = state.baseSpendTotal;
+  const totalSpend = state.baseSpendTotal; // always 0 until TikTok is wired in
   const totalEarnings = state.baseEarningsTotal;
   const netProfit = totalEarnings - totalSpend;
-  const totalConversions = state.sources.reduce((a, s) => a + s.conversions, 0);
-  const roas = totalSpend > 0 ? totalEarnings / totalSpend : 0;
-  const cpa = totalConversions > 0 ? totalSpend / totalConversions : 0;
+  const roas = 0;
+  const cpa = 0;
 
   setKpi("kpiSpend", money(totalSpend));
   setKpi("kpiEarnings", money(totalEarnings));
-  setKpi("kpiProfit", (netProfit >= 0 ? "+" : "-") + money(Math.abs(netProfit)), netProfit >= 0 ? "positive" : "negative");
-  setKpi("kpiRoas", `${roas.toFixed(2)}x`);
-  setKpi("kpiCpa", money(cpa));
-}
-
-function renderKpisJittered() {
-  const jitteredSpend = jitter(state.baseSpendTotal, 0.006);
-  const netProfit = state.baseEarningsTotal - jitteredSpend;
-  const roas = jitteredSpend > 0 ? state.baseEarningsTotal / jitteredSpend : 0;
-  const totalConversions = state.sources.reduce((a, s) => a + s.conversions, 0);
-  const cpa = totalConversions > 0 ? jitteredSpend / totalConversions : 0;
-
-  setKpi("kpiSpend", money(jitteredSpend));
   setKpi("kpiProfit", (netProfit >= 0 ? "+" : "-") + money(Math.abs(netProfit)), netProfit >= 0 ? "positive" : "negative");
   setKpi("kpiRoas", `${roas.toFixed(2)}x`);
   setKpi("kpiCpa", money(cpa));
@@ -298,7 +289,10 @@ function renderTable(newConversionSources) {
   tbody.innerHTML = "";
 
   const sorted = [...state.sources].sort((a, b) => b.profit - a.profit);
-  const bestRoas = sorted.reduce((best, s) => (s.spend > 0 && s.roas > (best?.roas ?? -Infinity) ? s : best), null);
+  // ROAS is 0 for every row until TikTok spend is real, so a "best ROAS"
+  // crown would just be an arbitrary tie — only show it once ROAS can
+  // actually distinguish rows.
+  const bestRoas = sorted.reduce((best, s) => (s.roas > (best?.roas ?? 0) ? s : best), null);
 
   sorted.forEach((s) => {
     const tr = document.createElement("tr");
@@ -309,17 +303,17 @@ function renderTable(newConversionSources) {
       setTimeout(() => tr.classList.remove("new-conversion"), 2500);
     }
 
-    const crown = s === bestRoas ? `<span class="crown" title="Best ROAS today">👑</span>` : "";
+    const crown = bestRoas && s === bestRoas ? `<span class="crown" title="Best ROAS today">👑</span>` : "";
 
     tr.innerHTML = `
       <td><span class="type-badge ${s.type.toLowerCase()}">${s.type}</span></td>
       <td class="source-name"><span class="expand-caret">▸</span>${crown}${escapeHtml(s.source)}</td>
       <td class="num">${money(s.spend)}</td>
-      <td class="num">${num(s.clicks)}</td>
-      <td class="num">${num(s.conversions)}</td>
-      <td class="num">${money(s.cpa)}</td>
-      <td class="num">${money(s.cpc)}</td>
       <td class="num">${money(s.cpm)}</td>
+      <td class="num">${money(s.cpa)}</td>
+      <td class="num">${money(s.cpnc)}</td>
+      <td class="num">${num(s.clicks)}</td>
+      <td class="num">${money(s.payout)}</td>
       <td class="num">${money(s.epc)}</td>
       <td class="num ${s.roas >= 1 ? "positive" : "negative"}">${s.roas.toFixed(2)}x</td>
     `;
@@ -336,7 +330,12 @@ function renderTable(newConversionSources) {
     }
   });
 
-  document.getElementById("tableMeta").textContent = `${sorted.length} sources — ${state.date}`;
+  const metaEl = document.getElementById("tableMeta");
+  if (state.sessionInfo.extended) {
+    metaEl.textContent = `${sorted.length} sources — session since ${state.sessionInfo.startDate} (no Reset Day since then)`;
+  } else {
+    metaEl.textContent = `${sorted.length} sources — ${state.date}`;
+  }
 }
 
 function toggleRowExpand(source) {
@@ -363,9 +362,6 @@ function renderMiniChart(source) {
 
 // Real per-source hourly payout, derived from the raw Glitchy entries the
 // function already returns (not baseline-corrected, but genuinely real data).
-// Falls back to an illustrative mock curve (still totaling the real payout)
-// only when raw entries aren't available at all, e.g. the built-in offline
-// fallback dataset.
 function hourlyPayoutForSource(source) {
   const buckets = Array(24).fill(0);
   for (const entry of state.raw) {
@@ -375,10 +371,6 @@ function hourlyPayoutForSource(source) {
     if (Number.isFinite(hr) && hr >= 0 && hr < 24) buckets[hr] += Number(stat.payout || 0);
   }
   const hours = buckets.map((_, h) => `${String(h).padStart(2, "0")}:00`);
-  if (buckets.every((v) => v === 0)) {
-    const s = state.sources.find((x) => x.source === source);
-    if (s && s.payout > 0) return { hours, values: mockHourlyEarningsCurve(source, state.date, s.payout) };
-  }
   return { hours, values: buckets.map((v) => Math.round(v * 100) / 100) };
 }
 
@@ -402,9 +394,6 @@ function hourlyPayoutCombined() {
     const hr = parseInt(stat.hour, 10);
     if (Number.isFinite(hr) && hr >= 0 && hr < 24) buckets[hr] += Number(stat.payout || 0);
   }
-  if (buckets.every((v) => v === 0) && state.baseEarningsTotal > 0) {
-    return mockHourlyEarningsCurve("__all__", state.date, state.baseEarningsTotal);
-  }
   return buckets;
 }
 
@@ -418,16 +407,16 @@ function renderChart() {
   const limit = currentHourLimit();
   const hourLabels = Array.from({ length: limit }, (_, h) => `${String(h).padStart(2, "0")}:00`);
 
-  let earningsBuckets, spendBuckets;
+  // Spend has no hourly shape until TikTok is connected — a flat 0 line
+  // rather than an invented curve.
+  const spendBuckets = Array(limit).fill(0);
+  let earningsBuckets;
 
   if (state.chartSource === "__all__") {
     earningsBuckets = hourlyPayoutCombined().slice(0, limit);
-    spendBuckets = mockHourlySpendCurve("__all__", state.date, state.baseSpendTotal).slice(0, limit);
   } else {
     const { values } = hourlyPayoutForSource(state.chartSource);
     earningsBuckets = values.slice(0, limit);
-    const s = state.sources.find((x) => x.source === state.chartSource);
-    spendBuckets = mockHourlySpendCurve(state.chartSource, state.date, s ? s.spend : 0).slice(0, limit);
   }
 
   createMainChart(mainChartCanvas, hourLabels, earningsBuckets, spendBuckets);
@@ -438,9 +427,7 @@ function renderChart() {
 function renderAccounts() {
   const accounts = loadAccounts(mockAccounts());
   const list = document.getElementById("accountsList");
-  const select = document.getElementById("accountSelect");
   list.innerHTML = "";
-  select.innerHTML = "";
 
   accounts.forEach((acc) => {
     const item = document.createElement("div");
@@ -449,16 +436,11 @@ function renderAccounts() {
       <span class="status-dot ${acc.status}"></span>
       <div class="account-info">
         <div class="account-name">${escapeHtml(acc.name)}</div>
-        <div class="account-sub">${acc.region} • ${acc.status}</div>
+        <div class="account-sub">${acc.status === "active" ? "Active" : "Suspended"}</div>
       </div>
       <button class="account-remove" data-id="${acc.id}">Remove</button>
     `;
     list.appendChild(item);
-
-    const opt = document.createElement("option");
-    opt.value = acc.id;
-    opt.textContent = acc.name;
-    select.appendChild(opt);
   });
 
   list.querySelectorAll(".account-remove").forEach((btn) => {
@@ -503,13 +485,14 @@ function renderCalendar(daily) {
     year: "numeric",
   });
 
+  // Only real rows from `daily_totals` get colored/labeled — days with no
+  // recorded row (before this dashboard existed, or a gap) render blank
+  // rather than an invented number.
   const computed = [];
   for (let d = 1; d <= daysInMonth; d++) {
     const dateStr = `${year}-${String(mon).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
     const isFuture = dateStr > todayIso;
-    let entry = rowsByDate.get(dateStr);
-    if (!entry && !isFuture) entry = { date: dateStr, ...mockDayTotals(dateStr), mock: true };
-    computed.push({ dateStr, day: d, isFuture, entry });
+    computed.push({ dateStr, day: d, isFuture, entry: rowsByDate.get(dateStr) || null });
   }
 
   const maxAbs = Math.max(1, ...computed.filter((c) => c.entry).map((c) => Math.abs((c.entry.total_earnings || 0) - (c.entry.total_spend || 0))));
@@ -520,13 +503,11 @@ function renderCalendar(daily) {
     grid.appendChild(filler);
   }
 
-  const tooltip = document.getElementById("calTooltip");
-
   computed.forEach(({ dateStr, day, isFuture, entry }, idx) => {
     const cell = document.createElement("div");
     cell.className = "cal-cell" + (isFuture ? " future" : "") + (dateStr === todayIso ? " today" : "");
     cell.style.animationDelay = `${idx * 8}ms`;
-    cell.innerHTML = `<span class="cal-daynum">${day}</span>`;
+    cell.title = dateStr;
 
     if (entry && !isFuture) {
       const profit = (entry.total_earnings || 0) - (entry.total_spend || 0);
@@ -534,18 +515,20 @@ function renderCalendar(daily) {
       cell.style.background = profit >= 0
         ? `color-mix(in srgb, var(--profit) ${pct}%, var(--bg-2))`
         : `color-mix(in srgb, var(--loss) ${pct}%, var(--bg-2))`;
-
-      cell.addEventListener("mousemove", (e) => {
-        tooltip.style.display = "block";
-        tooltip.style.left = `${e.clientX + 14}px`;
-        tooltip.style.top = `${e.clientY + 14}px`;
-        tooltip.innerHTML = `<strong>${dateStr}</strong><br/>Earnings: ${money(entry.total_earnings)}<br/>Spend: ${money(entry.total_spend)}<br/>Profit: ${profit >= 0 ? "+" : ""}${money(profit)}`;
-      });
-      cell.addEventListener("mouseleave", () => (tooltip.style.display = "none"));
+      cell.innerHTML = `<span class="cal-daynum">${day}</span><span class="cal-profit">${compactProfit(profit)}</span>`;
+      cell.title = `${dateStr} — profit ${profit >= 0 ? "+" : ""}${money(profit)}`;
     } else {
       cell.style.background = "var(--bg-2)";
+      cell.innerHTML = `<span class="cal-daynum">${day}</span>`;
     }
 
     grid.appendChild(cell);
   });
+}
+
+function compactProfit(n) {
+  const sign = n >= 0 ? "+" : "-";
+  const abs = Math.abs(n);
+  const body = abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : Math.round(abs).toString();
+  return `${sign}${body}`;
 }

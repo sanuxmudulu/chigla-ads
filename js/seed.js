@@ -1,6 +1,6 @@
-// Deterministic PRNG so mock numbers stay stable across refreshes
-// (same source + same date always produce the same mock spend/CPM/etc)
-// but genuinely differ day to day and source to source.
+// Deterministic PRNG so the mock ABO/CBO type badge stays stable across
+// refreshes (same source + same date always produce the same result) but
+// genuinely differs day to day and source to source.
 
 export function hashString(str) {
   let h = 1779033703 ^ str.length;
@@ -27,10 +27,6 @@ export function seededRng(seedStr) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-export function rngRange(rng, min, max) {
-  return min + rng() * (max - min);
 }
 
 export function rngPick(rng, arr) {

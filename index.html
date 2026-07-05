@@ -7,7 +7,7 @@
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/themes.css" />
 <link rel="stylesheet" href="css/base.css" />
@@ -16,12 +16,10 @@
 
 <div class="ambient ambient-terminal"></div>
 <div class="ambient ambient-vice"></div>
-<div class="ambient ambient-bullion"></div>
 
 <header class="topbar">
   <div class="topbar-left">
     <div class="brand">CHIGLA<span>ADS</span></div>
-    <select id="accountSelect" title="Ad account (cosmetic — TikTok API pending)"></select>
   </div>
 
   <div class="topbar-center">
@@ -35,7 +33,6 @@
     <div class="theme-switcher">
       <button class="theme-btn" data-theme-choice="terminal">Terminal</button>
       <button class="theme-btn" data-theme-choice="vice">Vice</button>
-      <button class="theme-btn" data-theme-choice="bullion">Bullion</button>
     </div>
     <button class="icon-btn" id="manageAccountsBtn">Accounts</button>
   </div>
@@ -64,12 +61,12 @@
     <div class="kpi-card" data-kpi="roas">
       <div class="kpi-label">Overall ROAS</div>
       <div class="kpi-value tabular" id="kpiRoas">0.00x</div>
-      <div class="kpi-sub">earnings ÷ spend</div>
+      <div class="kpi-sub badge-mock">mock — TikTok API pending</div>
     </div>
     <div class="kpi-card" data-kpi="cpa">
       <div class="kpi-label">Overall CPA</div>
       <div class="kpi-value tabular" id="kpiCpa">$0.00</div>
-      <div class="kpi-sub">spend ÷ conversions</div>
+      <div class="kpi-sub badge-mock">mock — TikTok API pending</div>
     </div>
   </section>
 
@@ -95,11 +92,11 @@
             <th>Type</th>
             <th>Source</th>
             <th>Spend</th>
-            <th>Clicks</th>
-            <th>Conv.</th>
-            <th>CPA</th>
-            <th>CPC</th>
             <th>CPM</th>
+            <th>CPA</th>
+            <th>CPNC</th>
+            <th>Clicks</th>
+            <th>Earning</th>
             <th>EPC</th>
             <th>ROAS</th>
           </tr>
@@ -140,8 +137,6 @@
     </div>
   </div>
 </div>
-
-<div class="cal-tooltip" id="calTooltip"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script type="module" src="js/app.js"></script>
