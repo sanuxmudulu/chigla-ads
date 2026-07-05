@@ -44,7 +44,6 @@ const state = {
   baseSpendTotal: 0,
   baseEarningsTotal: 0,
   expandedSources: new Set(),
-  sessionInfo: { extended: false },
 };
 
 let lastUpdatedAt = null;
@@ -142,6 +141,12 @@ function wireEvents() {
     if (!row) return;
     toggleRowExpand(row.dataset.source);
   });
+
+  document.getElementById("calendarDetailBtn").addEventListener("click", openCalendarModal);
+  document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
+  document.getElementById("calendarModal").addEventListener("click", (e) => {
+    if (e.target.id === "calendarModal") closeCalendarModal();
+  });
 }
 
 function startTimers() {
@@ -223,13 +228,6 @@ function applyGlitchyResponse(data, { flagNewConversions }) {
   state.raw = data.raw || [];
   state.baseSpendTotal = enriched.reduce((a, s) => a + s.spend, 0);
   state.baseEarningsTotal = enriched.reduce((a, s) => a + s.payout, 0);
-  // If we haven't clicked Reset Day since before today, glitchy-stats.js
-  // extends the query back to the last reset so the current session's
-  // numbers aren't clipped at midnight — surface that here so the totals
-  // aren't mistaken for a single calendar day.
-  state.sessionInfo = data.session_extended
-    ? { extended: true, startDate: data.startDate, endDate: data.endDate }
-    : { extended: false };
 
   populateChartSourceOptions(enriched);
   renderKpis();
@@ -258,13 +256,11 @@ function renderKpis() {
   const totalEarnings = state.baseEarningsTotal;
   const netProfit = totalEarnings - totalSpend;
   const roas = 0;
-  const cpa = 0;
 
   setKpi("kpiSpend", money(totalSpend));
   setKpi("kpiEarnings", money(totalEarnings));
   setKpi("kpiProfit", (netProfit >= 0 ? "+" : "-") + money(Math.abs(netProfit)), netProfit >= 0 ? "positive" : "negative");
   setKpi("kpiRoas", `${roas.toFixed(2)}x`);
-  setKpi("kpiCpa", money(cpa));
 }
 
 function setKpi(id, text, sentiment) {
@@ -329,13 +325,6 @@ function renderTable(newConversionSources) {
       requestAnimationFrame(() => renderMiniChart(s.source));
     }
   });
-
-  const metaEl = document.getElementById("tableMeta");
-  if (state.sessionInfo.extended) {
-    metaEl.textContent = `${sorted.length} sources — session since ${state.sessionInfo.startDate} (no Reset Day since then)`;
-  } else {
-    metaEl.textContent = `${sorted.length} sources — ${state.date}`;
-  }
 }
 
 function toggleRowExpand(source) {
@@ -463,39 +452,48 @@ function closeDrawer() {
 
 // ============================== PROFIT CALENDAR ==============================
 
+// Cached so the "Detailed View" modal can render instantly from whatever the
+// compact heatmap last drew, without a second fetch.
+let lastDailyData = { month: state.date.slice(0, 7), days: [] };
+
 function renderCalendarFallback() {
   const month = state.date.slice(0, 7);
   renderCalendar({ month, days: [] });
 }
 
-function renderCalendar(daily) {
+function monthGridDays(daily) {
   const month = daily.month || state.date.slice(0, 7);
   const [year, mon] = month.split("-").map(Number);
   const daysInMonth = new Date(year, mon, 0).getDate();
   const firstWeekday = new Date(year, mon - 1, 1).getDay();
   const todayIso = todayStr();
-
   const rowsByDate = new Map((daily.days || []).map((d) => [d.date, d]));
+
+  const days = [];
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = `${year}-${String(mon).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const isFuture = dateStr > todayIso;
+    days.push({ dateStr, day: d, isFuture, isToday: dateStr === todayIso, entry: rowsByDate.get(dateStr) || null });
+  }
+  return { year, mon, month, firstWeekday, days, todayIso };
+}
+
+function renderCalendar(daily) {
+  lastDailyData = daily;
+  const { year, mon, firstWeekday, days } = monthGridDays(daily);
 
   const grid = document.getElementById("calendarGrid");
   grid.innerHTML = "";
 
   document.getElementById("calendarMonthLabel").textContent = new Date(year, mon - 1, 1).toLocaleString("en-US", {
-    month: "long",
+    month: "short",
     year: "numeric",
   });
 
   // Only real rows from `daily_totals` get colored/labeled — days with no
   // recorded row (before this dashboard existed, or a gap) render blank
   // rather than an invented number.
-  const computed = [];
-  for (let d = 1; d <= daysInMonth; d++) {
-    const dateStr = `${year}-${String(mon).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    const isFuture = dateStr > todayIso;
-    computed.push({ dateStr, day: d, isFuture, entry: rowsByDate.get(dateStr) || null });
-  }
-
-  const maxAbs = Math.max(1, ...computed.filter((c) => c.entry).map((c) => Math.abs((c.entry.total_earnings || 0) - (c.entry.total_spend || 0))));
+  const maxAbs = Math.max(1, ...days.filter((c) => c.entry).map((c) => Math.abs((c.entry.total_earnings || 0) - (c.entry.total_spend || 0))));
 
   for (let i = 0; i < firstWeekday; i++) {
     const filler = document.createElement("div");
@@ -503,19 +501,22 @@ function renderCalendar(daily) {
     grid.appendChild(filler);
   }
 
-  computed.forEach(({ dateStr, day, isFuture, entry }, idx) => {
+  days.forEach(({ dateStr, day, isFuture, isToday, entry }, idx) => {
     const cell = document.createElement("div");
-    cell.className = "cal-cell" + (isFuture ? " future" : "") + (dateStr === todayIso ? " today" : "");
+    cell.className = "cal-cell" + (isFuture ? " future" : "") + (isToday ? " today" : "");
     cell.style.animationDelay = `${idx * 8}ms`;
     cell.title = dateStr;
 
     if (entry && !isFuture) {
       const profit = (entry.total_earnings || 0) - (entry.total_spend || 0);
-      const pct = Math.min(85, Math.round((Math.abs(profit) / maxAbs) * 85)) + 10;
+      // Capped lower than the profit/loss colors' full brightness so the
+      // colored $ text on top stays readable against the tinted background.
+      const pct = Math.min(42, Math.round((Math.abs(profit) / maxAbs) * 42)) + 6;
+      const sentiment = profit >= 0 ? "positive" : "negative";
       cell.style.background = profit >= 0
         ? `color-mix(in srgb, var(--profit) ${pct}%, var(--bg-2))`
         : `color-mix(in srgb, var(--loss) ${pct}%, var(--bg-2))`;
-      cell.innerHTML = `<span class="cal-daynum">${day}</span><span class="cal-profit">${compactProfit(profit)}</span>`;
+      cell.innerHTML = `<span class="cal-daynum">${day}</span><span class="cal-profit ${sentiment}">${signedMoney(profit)}</span>`;
       cell.title = `${dateStr} — profit ${profit >= 0 ? "+" : ""}${money(profit)}`;
     } else {
       cell.style.background = "var(--bg-2)";
@@ -526,9 +527,67 @@ function renderCalendar(daily) {
   });
 }
 
-function compactProfit(n) {
-  const sign = n >= 0 ? "+" : "-";
-  const abs = Math.abs(n);
-  const body = abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : Math.round(abs).toString();
-  return `${sign}${body}`;
+function signedMoney(n) {
+  return `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
+}
+
+// ============================== CALENDAR DETAIL MODAL ==============================
+
+function openCalendarModal() {
+  renderDetailedCalendar(lastDailyData);
+  document.getElementById("calendarModal").classList.add("open");
+}
+
+function closeCalendarModal() {
+  document.getElementById("calendarModal").classList.remove("open");
+}
+
+function renderDetailedCalendar(daily) {
+  const { year, mon, firstWeekday, days } = monthGridDays(daily);
+
+  document.getElementById("calendarModalMonthLabel").textContent = new Date(year, mon - 1, 1).toLocaleString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+
+  const withEntries = days.filter((d) => d.entry && !d.isFuture);
+  const totalEarnings = withEntries.reduce((a, d) => a + (d.entry.total_earnings || 0), 0);
+  const totalClicks = withEntries.reduce((a, d) => a + (d.entry.total_clicks || 0), 0);
+  const totalConversions = withEntries.reduce((a, d) => a + (d.entry.total_conversions || 0), 0);
+  const convRate = totalClicks > 0 ? (totalConversions / totalClicks) * 100 : 0;
+
+  document.getElementById("summaryEarnings").textContent = money(totalEarnings);
+  document.getElementById("summaryClicks").textContent = num(totalClicks);
+  document.getElementById("summaryConversions").textContent = num(totalConversions);
+  document.getElementById("summaryConvRate").textContent = `${convRate.toFixed(2)}%`;
+
+  const grid = document.getElementById("calendarGridDetailed");
+  grid.innerHTML = "";
+
+  for (let i = 0; i < firstWeekday; i++) {
+    const filler = document.createElement("div");
+    filler.className = "cal-cell-detailed empty";
+    grid.appendChild(filler);
+  }
+
+  days.forEach(({ dateStr, day, isFuture, isToday, entry }, idx) => {
+    const cell = document.createElement("div");
+    cell.className = "cal-cell-detailed" + (isFuture ? " future" : "") + (isToday ? " today" : "");
+    cell.style.animationDelay = `${idx * 6}ms`;
+    cell.title = dateStr;
+
+    if (entry && !isFuture) {
+      const profit = (entry.total_earnings || 0) - (entry.total_spend || 0);
+      const sentiment = profit >= 0 ? "positive" : "negative";
+      cell.innerHTML = `
+        <span class="cal-d-daynum">${day}</span>
+        <span class="cal-d-amount ${sentiment}">${signedMoney(profit)}</span>
+        <span class="cal-d-clicks">${num(entry.total_clicks || 0)} clicks</span>
+      `;
+    } else {
+      cell.innerHTML = `<span class="cal-d-daynum">${day}</span>`;
+    }
+
+    grid.appendChild(cell);
+  });
 }

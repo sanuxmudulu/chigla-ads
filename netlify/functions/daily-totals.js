@@ -30,14 +30,23 @@ exports.handler = async function (event) {
     const lastDay = new Date(year, mon, 0).getDate();
     const monthEnd = `${month}-${String(lastDay).padStart(2, "0")}`;
 
-    // If today falls inside the requested month, refresh today's row with a
-    // real earnings figure before reading the month back.
+    // If today falls inside the requested month, refresh today's row with
+    // real figures before reading the month back.
     if (token && today >= monthStart && today <= monthEnd) {
       try {
-        const totalEarnings = await fetchTodayEarnings(token, supabase);
+        const summary = await fetchTodaySummary(token, supabase);
         await supabase
           .from("daily_totals")
-          .upsert({ date: today, total_spend: 0, total_earnings: totalEarnings }, { onConflict: "date" });
+          .upsert(
+            {
+              date: today,
+              total_spend: 0,
+              total_earnings: summary.payout,
+              total_clicks: summary.clicks,
+              total_conversions: summary.conversions,
+            },
+            { onConflict: "date" }
+          );
       } catch (_) {
         // Non-fatal — Glitchy hiccup shouldn't block the calendar from
         // rendering whatever is already stored.
@@ -62,6 +71,8 @@ exports.handler = async function (event) {
           date: r.date,
           total_spend: Number(r.total_spend),
           total_earnings: Number(r.total_earnings),
+          total_clicks: Number(r.total_clicks || 0),
+          total_conversions: Number(r.total_conversions || 0),
         })),
       }),
     };
@@ -73,10 +84,11 @@ exports.handler = async function (event) {
   }
 };
 
-// Sums today's real payout across all sources, using the same session-aware
-// range + baseline correction glitchy-stats.js uses, so this total agrees
-// with the KPI strip on the main dashboard even mid-session.
-async function fetchTodayEarnings(token, supabase) {
+// Sums today's real payout, clicks, and conversions across all sources, using
+// the same session-aware range + baseline correction glitchy-stats.js uses,
+// so these totals agree with the KPI strip on the main dashboard even
+// mid-session.
+async function fetchTodaySummary(token, supabase) {
   const today = todayEst();
   const session = await resolveSessionRange(supabase, today, today);
 
@@ -90,7 +102,11 @@ async function fetchTodayEarnings(token, supabase) {
   const entries = Array.isArray(data) ? data : data.data || data.results || [data];
 
   const bySource = summarizeWithBaseline(entries, session.baselineBySource, session.effectiveEndDate);
-  let total = 0;
-  for (const src of Object.keys(bySource)) total += bySource[src].payout;
-  return Math.round(total * 100) / 100;
+  let payout = 0, clicks = 0, conversions = 0;
+  for (const src of Object.keys(bySource)) {
+    payout += bySource[src].payout;
+    clicks += bySource[src].clicks;
+    conversions += bySource[src].conversions;
+  }
+  return { payout: Math.round(payout * 100) / 100, clicks, conversions };
 }
