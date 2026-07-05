@@ -1,207 +1,150 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="terminal">
 <head>
 <meta charset="UTF-8" />
-<title>Chigla Ads Dashboard</title>
-<style>
-  body {
-    background: #0f0f14;
-    color: #eee;
-    font-family: system-ui, sans-serif;
-    padding: 24px;
-  }
-  h1 { font-size: 20px; margin-bottom: 16px; }
-  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
-  input, button {
-    background: #1a1a22;
-    border: 1px solid #333;
-    color: #eee;
-    padding: 8px 10px;
-    border-radius: 6px;
-    font-size: 14px;
-  }
-  button {
-    background: #e6006a;
-    border: none;
-    cursor: pointer;
-    font-weight: 600;
-  }
-  button:hover { background: #c40058; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #2a2a33; font-size: 14px; }
-  th { color: #999; font-weight: 500; }
-  .error-box {
-    background: #2a1414;
-    border: 1px solid #6b1f1f;
-    color: #ff9d9d;
-    padding: 12px;
-    border-radius: 6px;
-    margin-top: 16px;
-    white-space: pre-wrap;
-    font-family: monospace;
-    font-size: 12px;
-    display: none;
-  }
-  .debug-box {
-    background: #14161f;
-    border: 1px solid #333;
-    color: #8a8a8a;
-    padding: 12px;
-    border-radius: 6px;
-    margin-top: 16px;
-    white-space: pre-wrap;
-    font-family: monospace;
-    font-size: 11px;
-    max-height: 400px;
-    overflow-y: auto;
-  }
-  .status { font-size: 13px; color: #888; margin-top: 8px; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chigla Ads — Dashboard</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/themes.css" />
+<link rel="stylesheet" href="css/base.css" />
 </head>
 <body>
 
-<h1>Chigla Ads — Glitchy Stats</h1>
+<div class="ambient ambient-terminal"></div>
+<div class="ambient ambient-vice"></div>
+<div class="ambient ambient-bullion"></div>
 
-<div class="controls">
-  <button onclick="setToday()">Today</button>
-  <button onclick="setYesterday()">Yesterday</button>
-  <label>Start: <input type="date" id="startDate" /></label>
-  <label>End: <input type="date" id="endDate" /></label>
-  <button onclick="fetchStats()">Refresh</button>
-  <button onclick="resetDay()" style="background:#333;">Reset Day</button>
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="brand">CHIGLA<span>ADS</span></div>
+    <select id="accountSelect" title="Ad account (cosmetic — TikTok API pending)"></select>
+  </div>
+
+  <div class="topbar-center">
+    <input type="date" id="datePicker" />
+    <button class="icon-btn" id="refreshBtn" title="Refresh Glitchy data">⟳ Refresh</button>
+    <button class="icon-btn danger" id="resetDayBtn" title="Snapshot a new baseline for today">Reset Day</button>
+  </div>
+
+  <div class="topbar-right">
+    <div class="live-indicator"><span class="pulse-dot"></span><span id="lastUpdated">updated just now</span></div>
+    <div class="theme-switcher">
+      <button class="theme-btn" data-theme-choice="terminal">Terminal</button>
+      <button class="theme-btn" data-theme-choice="vice">Vice</button>
+      <button class="theme-btn" data-theme-choice="bullion">Bullion</button>
+    </div>
+    <button class="icon-btn" id="manageAccountsBtn">Accounts</button>
+  </div>
+</header>
+
+<main class="app-shell">
+
+  <div id="statusMsg" class="table-meta" style="margin: 10px 0 0;"></div>
+
+  <section class="kpi-strip">
+    <div class="kpi-card" data-kpi="spend">
+      <div class="kpi-label">Total Spend</div>
+      <div class="kpi-value tabular" id="kpiSpend">$0.00</div>
+      <div class="kpi-sub badge-mock">mock — TikTok API pending</div>
+    </div>
+    <div class="kpi-card" data-kpi="earnings">
+      <div class="kpi-label">Total Earnings</div>
+      <div class="kpi-value tabular" id="kpiEarnings">$0.00</div>
+      <div class="kpi-sub badge-live">live — Glitchy</div>
+    </div>
+    <div class="kpi-card" data-kpi="profit">
+      <div class="kpi-label">Net Profit</div>
+      <div class="kpi-value tabular" id="kpiProfit">$0.00</div>
+      <div class="kpi-sub">earnings − spend</div>
+    </div>
+    <div class="kpi-card" data-kpi="roas">
+      <div class="kpi-label">Overall ROAS</div>
+      <div class="kpi-value tabular" id="kpiRoas">0.00x</div>
+      <div class="kpi-sub">earnings ÷ spend</div>
+    </div>
+    <div class="kpi-card" data-kpi="cpa">
+      <div class="kpi-label">Overall CPA</div>
+      <div class="kpi-value tabular" id="kpiCpa">$0.00</div>
+      <div class="kpi-sub">spend ÷ conversions</div>
+    </div>
+  </section>
+
+  <section class="chart-section card">
+    <div class="chart-header">
+      <h2>Performance</h2>
+      <select id="chartSourceSelect">
+        <option value="__all__">All Sources Combined</option>
+      </select>
+    </div>
+    <canvas id="mainChart" height="90"></canvas>
+  </section>
+
+  <section class="table-section card">
+    <div class="table-header">
+      <div class="section-title-row"><h2>Sources</h2></div>
+      <div class="table-meta" id="tableMeta"></div>
+    </div>
+    <div class="table-wrap">
+      <table id="sourcesTable">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Source</th>
+            <th>Spend</th>
+            <th>Clicks</th>
+            <th>Conv.</th>
+            <th>CPA</th>
+            <th>CPC</th>
+            <th>CPM</th>
+            <th>EPC</th>
+            <th>ROAS</th>
+          </tr>
+        </thead>
+        <tbody id="sourcesBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="calendar-section card">
+    <div class="calendar-header">
+      <h2>Profit Calendar</h2>
+      <span class="table-meta" id="calendarMonthLabel"></span>
+    </div>
+    <div class="calendar-grid" id="calendarGrid"></div>
+  </section>
+
+</main>
+
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<aside class="accounts-drawer" id="accountsDrawer">
+  <div class="drawer-header">
+    <h2>Ad Accounts</h2>
+    <button id="closeDrawerBtn">✕</button>
+  </div>
+  <div class="accounts-list" id="accountsList"></div>
+  <button class="add-account-btn" id="addAccountBtn">+ Add Account</button>
+</aside>
+
+<div class="modal-backdrop" id="addAccountModal">
+  <div class="modal">
+    <h3>Add Ad Account</h3>
+    <p>TikTok API access is pending developer approval — this connects automatically once available. For now this just adds a placeholder to your list.</p>
+    <input type="text" id="newAccountName" placeholder="Account name (for your reference)" />
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelAddAccount">Cancel</button>
+      <button class="icon-btn primary" id="confirmAddAccount">Add</button>
+    </div>
+  </div>
 </div>
 
-<div class="status" id="status"></div>
+<div class="cal-tooltip" id="calTooltip"></div>
 
-<table id="resultsTable" style="display:none;">
-  <thead>
-    <tr>
-      <th>Source</th>
-      <th>Offer</th>
-      <th>Clicks</th>
-      <th>Conversions</th>
-      <th>Payout ($)</th>
-      <th># entries</th>
-      <th>Reset applied?</th>
-    </tr>
-  </thead>
-  <tbody id="resultsBody"></tbody>
-</table>
-
-<div class="error-box" id="errorBox"></div>
-
-<h3 style="margin-top:24px; font-size:14px; color:#888;">Raw debug output (for troubleshooting)</h3>
-<div class="debug-box" id="debugBox">Nothing fetched yet. Click Refresh.</div>
-
-<script>
-  // Default both date fields to today
-  const today = new Date().toISOString().split("T")[0];
-  document.getElementById("startDate").value = today;
-  document.getElementById("endDate").value = today;
-
-  async function fetchStats() {
-    const statusEl = document.getElementById("status");
-    const errorBox = document.getElementById("errorBox");
-    const debugBox = document.getElementById("debugBox");
-    const table = document.getElementById("resultsTable");
-    const tbody = document.getElementById("resultsBody");
-
-    errorBox.style.display = "none";
-    statusEl.textContent = "Fetching...";
-
-    const startDate = document.getElementById("startDate").value;
-    const endDate = document.getElementById("endDate").value;
-
-    try {
-      const res = await fetch(`/.netlify/functions/glitchy-stats?startDate=${startDate}&endDate=${endDate}`);
-      const data = await res.json();
-
-      // Always show the raw response in the debug box — this is what
-      // you screenshot to me if something looks wrong.
-      debugBox.textContent = JSON.stringify(data, null, 2);
-
-      if (!res.ok || data.error) {
-        errorBox.style.display = "block";
-        errorBox.textContent = `ERROR (status ${res.status}):\n${data.error}\n\n${data.details || data.message || ""}`;
-        table.style.display = "none";
-        statusEl.textContent = "Failed — see error box below.";
-        return;
-      }
-
-      // Populate the table
-      tbody.innerHTML = "";
-      (data.sources || []).forEach(row => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${row.source}</td>
-          <td>${row.offer_name || "-"}</td>
-          <td>${row.clicks}</td>
-          <td>${row.conversions}</td>
-          <td>$${row.payout.toFixed(2)}</td>
-          <td>${row.entries_count}</td>
-          <td>${row.reset_applied ? "✅ yes" : "— no"}</td>
-        `;
-        tbody.appendChild(tr);
-      });
-
-      table.style.display = data.sources && data.sources.length ? "table" : "none";
-      statusEl.textContent = `Done. ${data.raw_entry_count} raw entries, ${data.sources.length} unique sources. (${startDate} to ${endDate})`;
-
-    } catch (err) {
-      errorBox.style.display = "block";
-      errorBox.textContent = `NETWORK / SCRIPT ERROR:\n${err.message}`;
-      statusEl.textContent = "Failed — see error box below.";
-      debugBox.textContent = err.stack || err.message;
-    }
-  }
-
-  function setToday() {
-    const t = new Date().toISOString().split("T")[0];
-    document.getElementById("startDate").value = t;
-    document.getElementById("endDate").value = t;
-    fetchStats();
-  }
-
-  function setYesterday() {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    const y = d.toISOString().split("T")[0];
-    document.getElementById("startDate").value = y;
-    document.getElementById("endDate").value = y;
-    fetchStats();
-  }
-
-  async function resetDay() {
-    const statusEl = document.getElementById("status");
-    const debugBox = document.getElementById("debugBox");
-    const errorBox = document.getElementById("errorBox");
-
-    if (!confirm("This locks in current numbers as the new baseline for today. Sure you want to reset?")) return;
-
-    statusEl.textContent = "Resetting...";
-    errorBox.style.display = "none";
-
-    try {
-      const res = await fetch("/.netlify/functions/reset-day", { method: "POST" });
-      const data = await res.json();
-      debugBox.textContent = JSON.stringify(data, null, 2);
-
-      if (!res.ok || data.error) {
-        errorBox.style.display = "block";
-        errorBox.textContent = `RESET FAILED (status ${res.status}):\n${data.error}\n\n${data.details || ""}`;
-        statusEl.textContent = "Reset failed — see error box.";
-        return;
-      }
-
-      statusEl.textContent = data.message;
-      fetchStats(); // auto-refresh so you see the effect immediately
-    } catch (err) {
-      errorBox.style.display = "block";
-      errorBox.textContent = `RESET NETWORK ERROR:\n${err.message}`;
-      statusEl.textContent = "Reset failed.";
-    }
-  }
-</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script type="module" src="js/app.js"></script>
 
 </body>
 </html>
