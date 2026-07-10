@@ -4,8 +4,6 @@ import {
   postResetDay,
   fetchDailyTotals,
   loadCache,
-  loadAccounts,
-  saveAccounts,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart, createMiniChart } from "./charts.js";
@@ -24,18 +22,27 @@ function fallbackSources() {
 }
 
 // Glitchy's "hour" field (and reset_baselines) are anchored to EST, so
-// "today" needs to mean the same calendar date the backend uses — otherwise
-// the date picker and the session logic in glitchy-stats.js can disagree
-// right around midnight.
+// "today" needs to mean the same calendar date the backend uses. This is a
+// pure display/query convenience — it never decides when a new tracking
+// session starts. Only a successful password-verified "New Day" click (see
+// reset-day.js) ever writes a new baseline.
 function todayStr() {
   const est = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
   return `${est.getFullYear()}-${String(est.getMonth() + 1).padStart(2, "0")}-${String(est.getDate()).padStart(2, "0")}`;
 }
+function currentEstHour() {
+  const est = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return est.getHours();
+}
+function estDateLabel() {
+  const est = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return est.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+}
 const money = (n) => `$${(n || 0).toFixed(2)}`;
 const num = (n) => (n || 0).toLocaleString("en-US");
+const signedMoney = (n) => `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
 
 const state = {
-  date: todayStr(),
   sources: [],
   raw: [],
   chartSource: "__all__",
@@ -52,7 +59,7 @@ let mainChartCanvas = null;
 // ============================== INIT ==============================
 
 document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("datePicker").value = state.date;
+  updateDateDisplay();
 
   initTheme(() => {
     // Chart colors are read from CSS vars at creation time — rebuild on theme swap.
@@ -62,11 +69,15 @@ document.addEventListener("DOMContentLoaded", () => {
   mainChartCanvas = document.getElementById("mainChart");
 
   renderFromCacheOrFallback();
-  renderAccounts();
   wireEvents();
   startTimers();
   refreshAll();
 });
+
+function updateDateDisplay() {
+  const el = document.getElementById("dateDisplay");
+  if (el) el.textContent = estDateLabel();
+}
 
 function renderFromCacheOrFallback() {
   const cache = loadCache();
@@ -75,39 +86,51 @@ function renderFromCacheOrFallback() {
     lastUpdatedAt = cache.savedAt || Date.now();
   } else {
     applyGlitchyResponse(
-      { startDate: state.date, endDate: state.date, sources: fallbackSources(), raw: [] },
+      { sources: fallbackSources(), raw: [] },
       { flagNewConversions: false }
     );
     lastUpdatedAt = Date.now();
   }
-  renderCalendarFallback();
 }
 
 // ============================== EVENTS ==============================
 
 function wireEvents() {
-  document.getElementById("datePicker").addEventListener("change", (e) => {
-    state.date = e.target.value;
-    refreshAll();
-  });
-
   document.getElementById("refreshBtn").addEventListener("click", () => refreshAll(true));
 
-  document.getElementById("resetDayBtn").addEventListener("click", async () => {
-    if (!confirm("This locks in current numbers as the new baseline for today. Sure you want to reset?")) return;
-    const btn = document.getElementById("resetDayBtn");
-    btn.disabled = true;
-    btn.textContent = "Resetting...";
-    try {
-      const result = await postResetDay();
-      setStatus(result.message || "Reset complete.");
-      await refreshAll(true);
-    } catch (err) {
-      setStatus(`Reset failed: ${err.message}`, true);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Reset Day";
-    }
+  // ---- Tools panel ----
+  document.getElementById("toolsBtn").addEventListener("click", openToolsDrawer);
+  document.getElementById("closeToolsBtn").addEventListener("click", closeToolsDrawer);
+  document.getElementById("drawerBackdrop").addEventListener("click", closeToolsDrawer);
+
+  document.getElementById("toolsThemesToggle").addEventListener("click", () => {
+    document.getElementById("toolsThemesGroup").classList.toggle("open");
+  });
+
+  document.getElementById("toolsAccountsBtn").addEventListener("click", () => {
+    renderAccounts();
+    openAccountsModal();
+  });
+  document.getElementById("closeAccountsModal").addEventListener("click", closeAccountsModal);
+  document.getElementById("accountsModal").addEventListener("click", (e) => {
+    if (e.target.id === "accountsModal") closeAccountsModal();
+  });
+
+  document.getElementById("toolsCalendarBtn").addEventListener("click", openCalendarModal);
+  document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
+  document.getElementById("calendarModal").addEventListener("click", (e) => {
+    if (e.target.id === "calendarModal") closeCalendarModal();
+  });
+
+  // ---- New Day (password protected) ----
+  document.getElementById("newDayBtn").addEventListener("click", openNewDayModal);
+  document.getElementById("cancelNewDayBtn").addEventListener("click", closeNewDayModal);
+  document.getElementById("newDayModal").addEventListener("click", (e) => {
+    if (e.target.id === "newDayModal") closeNewDayModal();
+  });
+  document.getElementById("confirmNewDayBtn").addEventListener("click", submitNewDay);
+  document.getElementById("newDayPasswordInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitNewDay();
   });
 
   document.getElementById("chartSourceSelect").addEventListener("change", (e) => {
@@ -115,50 +138,27 @@ function wireEvents() {
     renderChart();
   });
 
-  document.getElementById("manageAccountsBtn").addEventListener("click", openDrawer);
-  document.getElementById("closeDrawerBtn").addEventListener("click", closeDrawer);
-  document.getElementById("drawerBackdrop").addEventListener("click", closeDrawer);
-
-  document.getElementById("addAccountBtn").addEventListener("click", () => {
-    document.getElementById("newAccountName").value = "";
-    document.getElementById("addAccountModal").classList.add("open");
-  });
-  document.getElementById("cancelAddAccount").addEventListener("click", () => {
-    document.getElementById("addAccountModal").classList.remove("open");
-  });
-  document.getElementById("confirmAddAccount").addEventListener("click", () => {
-    const name = document.getElementById("newAccountName").value.trim();
-    if (!name) return;
-    const accounts = loadAccounts(mockAccounts());
-    accounts.push({ id: `acc_${Date.now()}`, name, status: "active" });
-    saveAccounts(accounts);
-    renderAccounts();
-    document.getElementById("addAccountModal").classList.remove("open");
-  });
-
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     const row = e.target.closest("tr.source-row");
     if (!row) return;
     toggleRowExpand(row.dataset.source);
   });
-
-  document.getElementById("calendarDetailBtn").addEventListener("click", openCalendarModal);
-  document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
-  document.getElementById("calendarModal").addEventListener("click", (e) => {
-    if (e.target.id === "calendarModal") closeCalendarModal();
-  });
 }
 
 function startTimers() {
-  // "last updated Xs ago" ticker
+  // "last updated Xs ago" ticker — also refreshes the (purely cosmetic) date
+  // label so it keeps up if the dashboard is left open across EST midnight.
   setInterval(() => {
     const el = document.getElementById("lastUpdated");
-    if (!lastUpdatedAt) return;
-    const secs = Math.floor((Date.now() - lastUpdatedAt) / 1000);
-    el.textContent = secs < 2 ? "updated just now" : secs < 60 ? `updated ${secs}s ago` : `updated ${Math.floor(secs / 60)}m ago`;
+    if (lastUpdatedAt) {
+      const secs = Math.floor((Date.now() - lastUpdatedAt) / 1000);
+      el.textContent = secs < 2 ? "updated just now" : secs < 60 ? `updated ${secs}s ago` : `updated ${Math.floor(secs / 60)}m ago`;
+    }
+    updateDateDisplay();
   }, 1000);
 
-  // Auto-refresh real data periodically
+  // Auto-refresh real data periodically. This only re-fetches the running
+  // session's totals — it never starts a new session.
   setInterval(() => refreshAll(), 60000);
 }
 
@@ -168,7 +168,8 @@ async function refreshAll(userTriggered) {
   const refreshBtn = document.getElementById("refreshBtn");
   refreshBtn.classList.add("spinning");
   try {
-    const data = await fetchGlitchyStats(state.date, state.date);
+    const today = todayStr();
+    const data = await fetchGlitchyStats(today, today);
     applyGlitchyResponse(data, { flagNewConversions: state.hasFetchedOnce });
     state.hasFetchedOnce = true;
     lastUpdatedAt = Date.now();
@@ -177,14 +178,6 @@ async function refreshAll(userTriggered) {
     setStatus(`Couldn't reach Glitchy: ${err.message} — showing last known data.`, true);
   } finally {
     refreshBtn.classList.remove("spinning");
-  }
-
-  try {
-    const month = state.date.slice(0, 7);
-    const daily = await fetchDailyTotals(month);
-    renderCalendar(daily);
-  } catch (err) {
-    renderCalendarFallback();
   }
 }
 
@@ -197,7 +190,7 @@ function setStatus(msg, isError) {
 
 function applyGlitchyResponse(data, { flagNewConversions }) {
   const sources = data.sources || [];
-  const dateStr = state.date;
+  const dateStr = todayStr();
 
   const newConversionSources = new Set();
   if (flagNewConversions) {
@@ -249,7 +242,7 @@ function populateChartSourceOptions(sources) {
   else state.chartSource = "__all__";
 }
 
-// ============================== KPI STRIP ==============================
+// ============================== KPI ROW ==============================
 
 function renderKpis() {
   const totalSpend = state.baseSpendTotal; // always 0 until TikTok is wired in
@@ -351,6 +344,8 @@ function renderMiniChart(source) {
 
 // Real per-source hourly payout, derived from the raw Glitchy entries the
 // function already returns (not baseline-corrected, but genuinely real data).
+// Glitchy's "hour" field is already anchored to EST, so these buckets need
+// no timezone conversion of their own.
 function hourlyPayoutForSource(source) {
   const buckets = Array(24).fill(0);
   for (const entry of state.raw) {
@@ -386,35 +381,44 @@ function hourlyPayoutCombined() {
   return buckets;
 }
 
-function currentHourLimit() {
-  if (state.date !== todayStr()) return 24;
-  return new Date().getHours() + 1;
-}
-
 function renderChart() {
   if (!mainChartCanvas || !window.Chart) return;
-  const limit = currentHourLimit();
-  const hourLabels = Array.from({ length: limit }, (_, h) => `${String(h).padStart(2, "0")}:00`);
 
-  // Spend has no hourly shape until TikTok is connected — a flat 0 line
-  // rather than an invented curve.
-  const spendBuckets = Array(limit).fill(0);
-  let earningsBuckets;
+  // Fixed 00:00–23:00 EST axis, always — never the viewer's local timezone.
+  // Only hours up to (and including) the current EST hour get plotted;
+  // everything after stays a gap (null) until that hour actually happens.
+  const hourLabels = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
+  const limit = currentEstHour() + 1;
 
+  const spendFull = Array(24).fill(0); // no hourly shape until TikTok is connected
+  let earningsFull;
   if (state.chartSource === "__all__") {
-    earningsBuckets = hourlyPayoutCombined().slice(0, limit);
+    earningsFull = hourlyPayoutCombined();
   } else {
-    const { values } = hourlyPayoutForSource(state.chartSource);
-    earningsBuckets = values.slice(0, limit);
+    earningsFull = hourlyPayoutForSource(state.chartSource).values;
   }
+
+  const spendBuckets = spendFull.map((v, h) => (h < limit ? v : null));
+  const earningsBuckets = earningsFull.map((v, h) => (h < limit ? v : null));
 
   createMainChart(mainChartCanvas, hourLabels, earningsBuckets, spendBuckets);
 }
 
-// ============================== ACCOUNTS DRAWER ==============================
+// ============================== TOOLS DRAWER ==============================
+
+function openToolsDrawer() {
+  document.getElementById("toolsDrawer").classList.add("open");
+  document.getElementById("drawerBackdrop").classList.add("open");
+}
+function closeToolsDrawer() {
+  document.getElementById("toolsDrawer").classList.remove("open");
+  document.getElementById("drawerBackdrop").classList.remove("open");
+}
+
+// ============================== ACCOUNTS MODAL ==============================
 
 function renderAccounts() {
-  const accounts = loadAccounts(mockAccounts());
+  const accounts = mockAccounts();
   const list = document.getElementById("accountsList");
   list.innerHTML = "";
 
@@ -427,42 +431,96 @@ function renderAccounts() {
         <div class="account-name">${escapeHtml(acc.name)}</div>
         <div class="account-sub">${acc.status === "active" ? "Active" : "Suspended"}</div>
       </div>
-      <button class="account-remove" data-id="${acc.id}">Remove</button>
     `;
     list.appendChild(item);
   });
-
-  list.querySelectorAll(".account-remove").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const remaining = loadAccounts(mockAccounts()).filter((a) => a.id !== btn.dataset.id);
-      saveAccounts(remaining);
-      renderAccounts();
-    });
-  });
 }
 
-function openDrawer() {
-  document.getElementById("accountsDrawer").classList.add("open");
-  document.getElementById("drawerBackdrop").classList.add("open");
+function openAccountsModal() {
+  document.getElementById("accountsModal").classList.add("open");
 }
-function closeDrawer() {
-  document.getElementById("accountsDrawer").classList.remove("open");
-  document.getElementById("drawerBackdrop").classList.remove("open");
+function closeAccountsModal() {
+  document.getElementById("accountsModal").classList.remove("open");
 }
 
-// ============================== PROFIT CALENDAR ==============================
+// ============================== NEW DAY (password protected) ==============================
 
-// Cached so the "Detailed View" modal can render instantly from whatever the
-// compact heatmap last drew, without a second fetch.
-let lastDailyData = { month: state.date.slice(0, 7), days: [] };
+let newDayAttempts = 0;
+let newDayLockedUntil = 0;
+let newDayLockInterval = null;
 
-function renderCalendarFallback() {
-  const month = state.date.slice(0, 7);
-  renderCalendar({ month, days: [] });
+function openNewDayModal() {
+  if (Date.now() < newDayLockedUntil) return; // button itself is disabled during lockout
+  document.getElementById("newDayPasswordInput").value = "";
+  document.getElementById("newDayModalError").textContent = "";
+  document.getElementById("newDayModal").classList.add("open");
+  document.getElementById("newDayPasswordInput").focus();
 }
+function closeNewDayModal() {
+  document.getElementById("newDayModal").classList.remove("open");
+}
+
+async function submitNewDay() {
+  const input = document.getElementById("newDayPasswordInput");
+  const errorEl = document.getElementById("newDayModalError");
+  const confirmBtn = document.getElementById("confirmNewDayBtn");
+  const password = input.value;
+
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = "Confirming...";
+  errorEl.textContent = "";
+
+  try {
+    const result = await postResetDay(password);
+    newDayAttempts = 0;
+    closeNewDayModal();
+    setStatus(result.message || "New day started.");
+    await refreshAll(true);
+  } catch (err) {
+    if (err.status === 401) {
+      newDayAttempts += 1;
+      const remaining = 3 - newDayAttempts;
+      if (remaining > 0) {
+        errorEl.textContent = `Incorrect password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`;
+      } else {
+        lockNewDayButton();
+        closeNewDayModal();
+      }
+    } else {
+      errorEl.textContent = `Reset failed: ${err.message}`;
+    }
+  } finally {
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = "Confirm New Day";
+  }
+}
+
+function lockNewDayButton() {
+  newDayLockedUntil = Date.now() + 60000;
+  const btn = document.getElementById("newDayBtn");
+  btn.disabled = true;
+
+  if (newDayLockInterval) clearInterval(newDayLockInterval);
+  const tick = () => {
+    const remaining = Math.ceil((newDayLockedUntil - Date.now()) / 1000);
+    if (remaining <= 0) {
+      btn.disabled = false;
+      btn.textContent = "New Day";
+      newDayAttempts = 0;
+      clearInterval(newDayLockInterval);
+      newDayLockInterval = null;
+    } else {
+      btn.textContent = `Locked (${remaining}s)`;
+    }
+  };
+  tick();
+  newDayLockInterval = setInterval(tick, 1000);
+}
+
+// ============================== PROFIT CALENDAR (modal, on demand) ==============================
 
 function monthGridDays(daily) {
-  const month = daily.month || state.date.slice(0, 7);
+  const month = daily.month || todayStr().slice(0, 7);
   const [year, mon] = month.split("-").map(Number);
   const daysInMonth = new Date(year, mon, 0).getDate();
   const firstWeekday = new Date(year, mon - 1, 1).getDay();
@@ -478,64 +536,15 @@ function monthGridDays(daily) {
   return { year, mon, month, firstWeekday, days, todayIso };
 }
 
-function renderCalendar(daily) {
-  lastDailyData = daily;
-  const { year, mon, firstWeekday, days } = monthGridDays(daily);
-
-  const grid = document.getElementById("calendarGrid");
-  grid.innerHTML = "";
-
-  document.getElementById("calendarMonthLabel").textContent = new Date(year, mon - 1, 1).toLocaleString("en-US", {
-    month: "short",
-    year: "numeric",
-  });
-
-  // Only real rows from `daily_totals` get colored/labeled — days with no
-  // recorded row (before this dashboard existed, or a gap) render blank
-  // rather than an invented number.
-  const maxAbs = Math.max(1, ...days.filter((c) => c.entry).map((c) => Math.abs((c.entry.total_earnings || 0) - (c.entry.total_spend || 0))));
-
-  for (let i = 0; i < firstWeekday; i++) {
-    const filler = document.createElement("div");
-    filler.className = "cal-cell empty";
-    grid.appendChild(filler);
-  }
-
-  days.forEach(({ dateStr, day, isFuture, isToday, entry }, idx) => {
-    const cell = document.createElement("div");
-    cell.className = "cal-cell" + (isFuture ? " future" : "") + (isToday ? " today" : "");
-    cell.style.animationDelay = `${idx * 8}ms`;
-    cell.title = dateStr;
-
-    if (entry && !isFuture) {
-      const profit = (entry.total_earnings || 0) - (entry.total_spend || 0);
-      // Capped lower than the profit/loss colors' full brightness so the
-      // colored $ text on top stays readable against the tinted background.
-      const pct = Math.min(42, Math.round((Math.abs(profit) / maxAbs) * 42)) + 6;
-      const sentiment = profit >= 0 ? "positive" : "negative";
-      cell.style.background = profit >= 0
-        ? `color-mix(in srgb, var(--profit) ${pct}%, var(--bg-2))`
-        : `color-mix(in srgb, var(--loss) ${pct}%, var(--bg-2))`;
-      cell.innerHTML = `<span class="cal-daynum">${day}</span><span class="cal-profit ${sentiment}">${signedMoney(profit)}</span>`;
-      cell.title = `${dateStr} — profit ${profit >= 0 ? "+" : ""}${money(profit)}`;
-    } else {
-      cell.style.background = "var(--bg-2)";
-      cell.innerHTML = `<span class="cal-daynum">${day}</span>`;
-    }
-
-    grid.appendChild(cell);
-  });
-}
-
-function signedMoney(n) {
-  return `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
-}
-
-// ============================== CALENDAR DETAIL MODAL ==============================
-
-function openCalendarModal() {
-  renderDetailedCalendar(lastDailyData);
+async function openCalendarModal() {
   document.getElementById("calendarModal").classList.add("open");
+  const month = todayStr().slice(0, 7);
+  try {
+    const daily = await fetchDailyTotals(month);
+    renderDetailedCalendar(daily);
+  } catch (err) {
+    renderDetailedCalendar({ month, days: [] });
+  }
 }
 
 function closeCalendarModal() {
@@ -551,15 +560,20 @@ function renderDetailedCalendar(daily) {
   });
 
   const withEntries = days.filter((d) => d.entry && !d.isFuture);
+  const totalSpend = withEntries.reduce((a, d) => a + (d.entry.total_spend || 0), 0);
   const totalEarnings = withEntries.reduce((a, d) => a + (d.entry.total_earnings || 0), 0);
-  const totalClicks = withEntries.reduce((a, d) => a + (d.entry.total_clicks || 0), 0);
-  const totalConversions = withEntries.reduce((a, d) => a + (d.entry.total_conversions || 0), 0);
-  const convRate = totalClicks > 0 ? (totalConversions / totalClicks) * 100 : 0;
+  const totalProfit = totalEarnings - totalSpend;
+  const overallRoas = totalSpend > 0 ? totalEarnings / totalSpend : 0;
 
+  document.getElementById("summarySpend").textContent = money(totalSpend);
   document.getElementById("summaryEarnings").textContent = money(totalEarnings);
-  document.getElementById("summaryClicks").textContent = num(totalClicks);
-  document.getElementById("summaryConversions").textContent = num(totalConversions);
-  document.getElementById("summaryConvRate").textContent = `${convRate.toFixed(2)}%`;
+  const profitEl = document.getElementById("summaryProfit");
+  profitEl.textContent = signedMoney(totalProfit);
+  profitEl.classList.toggle("positive", totalProfit >= 0);
+  profitEl.classList.toggle("negative", totalProfit < 0);
+  document.getElementById("summaryRoas").textContent = `${overallRoas.toFixed(2)}x`;
+
+  const maxAbs = Math.max(1, ...withEntries.map((d) => Math.abs((d.entry.total_earnings || 0) - (d.entry.total_spend || 0))));
 
   const grid = document.getElementById("calendarGridDetailed");
   grid.innerHTML = "";
@@ -579,11 +593,15 @@ function renderDetailedCalendar(daily) {
     if (entry && !isFuture) {
       const profit = (entry.total_earnings || 0) - (entry.total_spend || 0);
       const sentiment = profit >= 0 ? "positive" : "negative";
+      const pct = Math.min(45, Math.round((Math.abs(profit) / maxAbs) * 45)) + 6;
+      cell.style.background = profit >= 0
+        ? `color-mix(in srgb, var(--profit) ${pct}%, var(--bg-2))`
+        : `color-mix(in srgb, var(--loss) ${pct}%, var(--bg-2))`;
       cell.innerHTML = `
         <span class="cal-d-daynum">${day}</span>
         <span class="cal-d-amount ${sentiment}">${signedMoney(profit)}</span>
-        <span class="cal-d-clicks">${num(entry.total_clicks || 0)} clicks</span>
       `;
+      cell.title = `${dateStr} — net profit ${signedMoney(profit)}`;
     } else {
       cell.innerHTML = `<span class="cal-d-daynum">${day}</span>`;
     }

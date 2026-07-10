@@ -9,6 +9,7 @@ exports.handler = async function (event) {
     const token = process.env.GLITCHY_TOKEN;
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+    const requiredPassword = process.env.NEW_DAY_PASSWORD;
 
     if (!token || !supabaseUrl || !supabaseKey) {
       return {
@@ -17,6 +18,27 @@ exports.handler = async function (event) {
           error: "Missing GLITCHY_TOKEN, SUPABASE_URL, or SUPABASE_SERVICE_KEY env vars in Netlify.",
         }),
       };
+    }
+
+    if (!requiredPassword) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: "NEW_DAY_PASSWORD is missing. Add it in Netlify → Site settings → Environment variables." }),
+      };
+    }
+
+    // The password check has to happen here, server-side — anything in the
+    // frontend bundle is visible to anyone via view-source, so a client-side
+    // check would be no protection at all.
+    let body = {};
+    try {
+      body = JSON.parse(event.body || "{}");
+    } catch (_) {
+      body = {};
+    }
+
+    if (body.password !== requiredPassword) {
+      return { statusCode: 401, body: JSON.stringify({ error: "Incorrect password." }) };
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);

@@ -5,7 +5,6 @@
 
 const CACHE_KEY = "chigla_glitchy_cache_v1";
 const DAILY_CACHE_KEY = "chigla_daily_totals_cache_v1";
-const ACCOUNTS_KEY = "chigla_accounts_v1";
 const THEME_KEY = "chigla_theme_v1";
 
 export async function fetchGlitchyStats(startDate, endDate) {
@@ -20,11 +19,16 @@ export async function fetchGlitchyStats(startDate, endDate) {
   return data;
 }
 
-export async function postResetDay() {
-  const res = await fetch("/.netlify/functions/reset-day", { method: "POST" });
+export async function postResetDay(password) {
+  const res = await fetch("/.netlify/functions/reset-day", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
   const data = await res.json();
   if (!res.ok || data.error) {
     const err = new Error(data.error || `Reset failed (${res.status})`);
+    err.status = res.status;
     err.details = data.details;
     throw err;
   }
@@ -74,23 +78,6 @@ export function loadDailyCache() {
   } catch (_) {
     return null;
   }
-}
-
-// ---------------- Mock ad accounts persistence (UI-only, no backend) ----------------
-
-export function loadAccounts(defaults) {
-  try {
-    const raw = localStorage.getItem(ACCOUNTS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (_) {}
-  saveAccounts(defaults);
-  return defaults;
-}
-
-export function saveAccounts(accounts) {
-  try {
-    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts));
-  } catch (_) {}
 }
 
 // ---------------- Theme persistence ----------------

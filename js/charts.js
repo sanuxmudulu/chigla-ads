@@ -54,6 +54,7 @@ export function createMainChart(canvas, hours, earnings, spend) {
           pointRadius: 0,
           pointHoverRadius: 5,
           pointHoverBackgroundColor: accent,
+          spanGaps: false,
         },
         {
           label: "Spend",
@@ -67,6 +68,7 @@ export function createMainChart(canvas, hours, earnings, spend) {
           pointRadius: 0,
           pointHoverRadius: 5,
           pointHoverBackgroundColor: loss,
+          spanGaps: false,
         },
       ],
     },
