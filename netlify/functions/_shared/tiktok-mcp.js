@@ -381,6 +381,257 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
   return { advertiserCount: rows.length, businessCenterCount: bcs.length };
 }
 
+// ---------------------------------------------------------------------------
+// Effective campaign status
+//
+// The TikTok status vocabulary is large and can change, so this classifies by
+// KEYWORD on the raw status strings rather than matching an exact enum. Real
+// samples seen from the API: campaign `CAMPAIGN_STATUS_DISABLE`, ad
+// `AD_STATUS_CAMPAIGN_DISABLE` / `AD_STATUS_DELIVERY_OK` / `AD_STATUS_AUDIT` /
+// `AD_STATUS_AUDIT_DENY`, ad group `ADGROUP_STATUS_CAMPAIGN_DISABLE`, advertiser
+// `STATUS_ENABLE` / `STATUS_LIMIT`. `ad/review_info` gives is_approved +
+// review_status (`ALL_AVAILABLE` / `PART_AVAILABLE` / `UNAVAILABLE`).
+// ---------------------------------------------------------------------------
+
+function accountHealthy(raw) {
+  return String(raw || "").toUpperCase() === "STATUS_ENABLE";
+}
+
+// Maps one ad's raw delivery status to a coarse bucket.
+function classifyAdDelivery(raw) {
+  const s = String(raw || "").toUpperCase();
+  if (!s) return "unknown";
+  if (s.includes("DELIVERY_OK") || s.endsWith("_OK") || s.includes("DELIVERING")) return "active";
+  if (s.includes("DENY") || s.includes("REJECT") || s.includes("DISAPPROV") || s.includes("NOT_APPROV"))
+    return "rejected";
+  if (s.includes("AUDIT") || s.includes("REVIEW") || s.includes("PENDING") || s.includes("CHECKING"))
+    return "in_review";
+  if (s.includes("NOT_START") || s.includes("NOT_YET") || s.includes("SCHEDULE")) return "scheduled";
+  if (s.includes("BALANCE") || s.includes("BUDGET") || s.includes("EXCEED") || s.includes("NO_BUDGET"))
+    return "budget";
+  if (s.includes("DONE") || s.includes("FINISH") || s.includes("COMPLETE") || s.includes("EXPIR"))
+    return "done";
+  if (s.includes("CAMPAIGN_DISABLE") || s.includes("CAMPAIGN_PAUSE")) return "campaign_paused";
+  if (s.includes("ADGROUP_DISABLE") || s.includes("AD_GROUP_DISABLE") || s.includes("ADGROUP_PAUSE"))
+    return "adgroup_paused";
+  if (s.includes("ADVERTISER") || s.includes("ACCOUNT") || s.includes("FROZEN") || s.includes("PUNISH") || s.includes("LIMIT"))
+    return "account";
+  if (s.includes("DELETE")) return "deleted";
+  if (s.includes("DISABLE") || s.includes("PAUSE")) return "ad_paused";
+  return "other";
+}
+
+function humanizeStatus(raw) {
+  const s = String(raw || "").replace(/^(AD|ADGROUP|CAMPAIGN)_STATUS_/i, "").replace(/^STATUS_/i, "");
+  if (!s) return null;
+  return s
+    .toLowerCase()
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+// Derives ONE display status for a campaign row from the advertiser status, the
+// campaign status, and every ad's status/review. Follows the priority the
+// dashboard owner asked for: account > rejected > in review > active > ...
+// A few individually-paused ad groups do NOT make the row "Paused" as long as
+// at least one copy of the ad is still delivering.
+function deriveEffectiveStatus({ advertiserStatus, campaign, ads, reviewByAdId }) {
+  if (!accountHealthy(advertiserStatus)) {
+    const s = String(advertiserStatus || "").toUpperCase();
+    if (s.includes("PENDING") || s.includes("AUDIT") || s.includes("CONFIRM") || s.includes("UNAUDITED") || s.includes("VERIF"))
+      return { label: "Account Pending", tone: "warn", detail: advertiserStatus || null };
+    return { label: "Account Suspended", tone: "bad", detail: advertiserStatus || null };
+  }
+
+  const list = ads || [];
+  let rejectReason = null;
+
+  const classes = list.map((ad) => {
+    const rev = reviewByAdId ? reviewByAdId[String(ad.ad_id)] : null;
+    if (rev) {
+      const rs = String(rev.review_status || "").toUpperCase();
+      if (rev.is_approved === false || rs.includes("UNAVAILABLE")) {
+        if (!rejectReason) rejectReason = extractRejectReason(rev);
+        return "rejected";
+      }
+      if (rs.includes("REVIEW") || rs.includes("AUDIT") || rs.includes("PENDING")) return "in_review";
+    }
+    return classifyAdDelivery(ad.secondary_status || ad.operation_status);
+  });
+
+  const n = (c) => classes.filter((x) => x === c).length;
+  const total = classes.length;
+  const activeAdCount = n("active");
+
+  if (total > 0) {
+    if (n("rejected") > 0)
+      return { label: "Rejected", tone: "bad", detail: rejectReason || "One or more ads were not approved", activeAdCount };
+    if (n("in_review") > 0)
+      return { label: "In Review", tone: "warn", detail: null, activeAdCount };
+    if (activeAdCount > 0)
+      return { label: "Active", tone: "good", detail: null, activeAdCount };
+    if (n("scheduled") > 0)
+      return { label: "Scheduled", tone: "neutral", detail: null, activeAdCount };
+    if (n("budget") > 0)
+      return { label: "Out of Budget", tone: "warn", detail: null, activeAdCount };
+    if (n("campaign_paused") === total)
+      return { label: "Paused", tone: "neutral", detail: "Campaign paused", activeAdCount };
+    if (n("adgroup_paused") > 0 && n("campaign_paused") === 0)
+      return { label: "Ad Groups Paused", tone: "warn", detail: "All ad groups are paused", activeAdCount };
+    if (n("ad_paused") > 0 && n("campaign_paused") === 0)
+      return { label: "Ads Paused", tone: "warn", detail: null, activeAdCount };
+    if (n("done") > 0)
+      return { label: "Completed", tone: "neutral", detail: null, activeAdCount };
+    if (n("deleted") === total)
+      return { label: "Deleted", tone: "bad", detail: null, activeAdCount };
+  }
+
+  const camp = String(campaign?.secondary_status || campaign?.operation_status || "").toUpperCase();
+  if (camp.includes("DELETE")) return { label: "Deleted", tone: "bad", detail: null, activeAdCount };
+  if (camp.includes("BUDGET") || camp.includes("EXCEED"))
+    return { label: "Out of Budget", tone: "warn", detail: null, activeAdCount };
+  if (camp.includes("DISABLE") || camp.includes("PAUSE"))
+    return { label: "Paused", tone: "neutral", detail: null, activeAdCount };
+  if (camp.includes("ENABLE"))
+    return { label: total ? "Inactive" : "No Ads", tone: "warn", detail: total ? null : "Campaign has no ads yet", activeAdCount };
+  return { label: humanizeStatus(camp) || "Unknown", tone: "neutral", detail: null, activeAdCount };
+}
+
+function extractRejectReason(rev) {
+  const infos = rev.reject_info || rev.audit_result || [];
+  const arr = Array.isArray(infos) ? infos : [infos];
+  for (const it of arr) {
+    if (!it) continue;
+    const r = it.reason || it.description || it.reject_reason || it.message || it.suggestion;
+    if (r) return String(r).slice(0, 240);
+  }
+  return null;
+}
+
+const CAMPAIGN_FIELDS = [
+  "campaign_id",
+  "campaign_name",
+  "operation_status",
+  "secondary_status",
+  "objective_type",
+  "budget",
+  "budget_mode",
+  "create_time",
+];
+
+// Discovers TODAY's live campaigns (all non-deleted campaigns) inside the
+// tracked advertiser accounts under one connection, derives an effective
+// status for each, and upserts them into tiktok_campaigns. Reuses a single
+// MCP client for every advertiser in the connection.
+async function discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers }) {
+  const now = new Date().toISOString();
+  const rows = [];
+  const seenCampaignIds = [];
+  const perAdvertiser = {};
+
+  for (const adv of trackedAdvertisers) {
+    const advId = String(adv.advertiser_id);
+    try {
+      const campRes = await mcpCall(client, "campaign_get", {
+        advertiser_id: advId,
+        fields: CAMPAIGN_FIELDS,
+        page_size: 200,
+      });
+      const campaigns = campRes?.list || [];
+
+      let ads = [];
+      try {
+        const adRes = await mcpCall(client, "ad_get", {
+          advertiser_id: advId,
+          fields: ["ad_id", "ad_name", "adgroup_id", "campaign_id", "operation_status", "secondary_status"],
+          page_size: 1000,
+        });
+        ads = adRes?.list || [];
+      } catch {
+        ads = [];
+      }
+
+      const adIds = ads.map((a) => String(a.ad_id)).filter(Boolean);
+      const reviewByAdId = {};
+      for (let i = 0; i < adIds.length; i += 100) {
+        try {
+          const rev = await mcpCall(client, "ad_review_info_get", {
+            advertiser_id: advId,
+            ad_ids: adIds.slice(i, i + 100),
+          });
+          Object.assign(reviewByAdId, rev?.ad_review_map || {});
+        } catch {
+          /* review lookup is best-effort */
+        }
+      }
+
+      const adsByCampaign = {};
+      for (const ad of ads) {
+        const cid = String(ad.campaign_id);
+        (adsByCampaign[cid] = adsByCampaign[cid] || []).push(ad);
+      }
+
+      for (const campaign of campaigns) {
+        const cid = String(campaign.campaign_id);
+        const campAds = adsByCampaign[cid] || [];
+        const eff = deriveEffectiveStatus({
+          advertiserStatus: adv.status,
+          campaign,
+          ads: campAds,
+          reviewByAdId,
+        });
+        seenCampaignIds.push(cid);
+        rows.push({
+          campaign_id: cid,
+          connection_id: connectionId,
+          advertiser_id: advId,
+          advertiser_name: adv.advertiser_name || null,
+          campaign_name: campaign.campaign_name || cid,
+          objective_type: campaign.objective_type || null,
+          budget: campaign.budget != null ? Number(campaign.budget) : null,
+          budget_mode: campaign.budget_mode || null,
+          campaign_operation_status: campaign.operation_status || null,
+          campaign_secondary_status: campaign.secondary_status || null,
+          effective_status: eff.label,
+          effective_tone: eff.tone,
+          status_detail: eff.detail || null,
+          ad_count: campAds.length,
+          active_ad_count: eff.activeAdCount || 0,
+          create_time: parseTikTokTime(campaign.create_time),
+          updated_at: now,
+        });
+      }
+      perAdvertiser[advId] = campaigns.length;
+    } catch (err) {
+      perAdvertiser[advId] = `error: ${err.message}`;
+    }
+  }
+
+  if (rows.length) {
+    const { error } = await supabase
+      .from("tiktok_campaigns")
+      .upsert(rows, { onConflict: "campaign_id" });
+    if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
+  }
+
+  // Drop rows for campaigns that no longer exist under these tracked advertisers.
+  const advIds = trackedAdvertisers.map((a) => String(a.advertiser_id));
+  if (advIds.length) {
+    let q = supabase.from("tiktok_campaigns").delete().in("advertiser_id", advIds);
+    if (seenCampaignIds.length) q = q.not("campaign_id", "in", `(${seenCampaignIds.join(",")})`);
+    await q;
+  }
+
+  return { campaignCount: rows.length, perAdvertiser };
+}
+
+function parseTikTokTime(raw) {
+  if (!raw) return null;
+  const d = new Date(String(raw).replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(raw)) ? "" : "Z"));
+  return isNaN(d) ? null : d.toISOString();
+}
+
 module.exports = {
   DEFAULT_MCP_SERVER_URL,
   MCP_SCOPE,
@@ -393,4 +644,6 @@ module.exports = {
   connectMcp,
   mcpCall,
   discoverAndStoreAdvertisers,
+  discoverAndStoreCampaigns,
+  deriveEffectiveStatus,
 };

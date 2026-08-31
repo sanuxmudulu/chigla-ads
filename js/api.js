@@ -126,6 +126,22 @@ export async function postTiktokAction(payload) {
   return readTiktokResponse(res, "Request failed");
 }
 
+// TikTok campaign discovery. GET is fast (reads Supabase); the sync POST hits
+// the TikTok MCP for every tracked advertiser account.
+export async function fetchTiktokCampaigns() {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns");
+  return readTiktokResponse(res, "Request failed"); // { campaigns: [...] }
+}
+
+export async function syncTiktokCampaigns(password) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password, action: "sync" }),
+  });
+  return readTiktokResponse(res, "Campaign sync failed");
+}
+
 // ---------------- Theme persistence ----------------
 
 export function loadTheme(defaultTheme) {

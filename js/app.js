@@ -1,4 +1,3 @@
-import { mockSourceProfile } from "./mock.js";
 import {
   fetchGlitchyStats,
   postResetDay,
@@ -7,6 +6,8 @@ import {
   fetchTiktokConnections,
   startTiktokAuth,
   postTiktokAction,
+  fetchTiktokCampaigns,
+  syncTiktokCampaigns,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart, createMiniChart } from "./charts.js";
@@ -47,6 +48,8 @@ const signedMoney = (n) => `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
 
 const state = {
   sources: [],
+  glitchyRows: [], // raw per-source rows from Glitchy (clicks/payout/conversions)
+  tiktokCampaigns: [], // rows from tiktok-campaigns (campaign_name == source)
   raw: [],
   chartSource: "__all__",
   hasFetchedOnce: false,
@@ -76,7 +79,21 @@ document.addEventListener("DOMContentLoaded", () => {
   handleTiktokReturn();
   startTimers();
   refreshAll();
+  loadTiktokCampaigns();
 });
+
+// Loads stored TikTok campaign rows (fast, from Supabase) and merges them into
+// the Detailed Metrics table. Does not hit the TikTok API — that only happens
+// on an explicit "Sync campaigns".
+async function loadTiktokCampaigns() {
+  try {
+    const data = await fetchTiktokCampaigns();
+    state.tiktokCampaigns = data.campaigns || [];
+    rebuildSources();
+  } catch (_) {
+    /* non-fatal — table still renders from Glitchy data */
+  }
+}
 
 function updateDateDisplay() {
   const el = document.getElementById("dateDisplay");
@@ -195,7 +212,6 @@ function setStatus(msg, isError) {
 
 function applyGlitchyResponse(data, { flagNewConversions }) {
   const sources = data.sources || [];
-  const dateStr = todayStr();
 
   const newConversionSources = new Set();
   if (flagNewConversions) {
@@ -206,30 +222,73 @@ function applyGlitchyResponse(data, { flagNewConversions }) {
   }
   state.prevConversions = new Map(sources.map((s) => [s.source, s.conversions]));
 
-  // Spend, CPM, CPA (cost per conversion) and CPNC (cost per network click)
-  // all come from TikTok, which isn't connected yet — they stay at 0 rather
-  // than showing invented numbers. Clicks, Earning (payout) and EPC are the
-  // real Glitchy figures.
-  const enriched = sources.map((s) => {
-    const profile = mockSourceProfile(s.source, dateStr);
+  state.glitchyRows = sources;
+  state.raw = data.raw || [];
+
+  rebuildSources({ newConversionSources });
+}
+
+// Builds the Detailed Metrics table rows as the UNION of:
+//   - Glitchy sources (real clicks / earning / EPC), and
+//   - TikTok campaigns inside tracked advertiser accounts (SOURCE = campaign
+//     name), which appear as soon as the campaign exists even with no spend.
+// TikTok-supplied metrics (spend, CPM, CPA, CPNC, ROAS) are still 0 — the
+// metric merge is a later step. Matching key: Glitchy `source` == campaign name.
+function rebuildSources(opts = {}) {
+  const glitchyBySource = new Map(state.glitchyRows.map((s) => [s.source, s]));
+  const tiktokByName = new Map();
+  for (const c of state.tiktokCampaigns) {
+    if (c && c.campaign_name) tiktokByName.set(c.campaign_name, c);
+  }
+
+  const names = new Set([...glitchyBySource.keys(), ...tiktokByName.keys()]);
+
+  const merged = [...names].map((name) => {
+    const g = glitchyBySource.get(name);
+    const tk = tiktokByName.get(name);
+
+    const clicks = g?.clicks || 0;
+    const conversions = g?.conversions || 0;
+    const payout = g?.payout || 0;
+
+    // From TikTok — not wired to real values yet, initialise at 0.
     const spend = 0;
     const cpm = 0;
     const cpa = 0;
     const cpnc = 0;
-    const epc = s.clicks > 0 ? s.payout / s.clicks : 0;
     const roas = 0;
-    const profit = s.payout - spend;
-    return { ...s, type: profile.type, spend, cpm, cpa, cpnc, epc, roas, profit };
+
+    const epc = clicks > 0 ? payout / clicks : 0;
+    const profit = payout - spend;
+
+    return {
+      source: name,
+      offer_name: g?.offer_name || null,
+      clicks,
+      conversions,
+      payout,
+      spend,
+      cpm,
+      cpa,
+      cpnc,
+      epc,
+      roas,
+      profit,
+      status: tk
+        ? { label: tk.effective_status || "Unknown", tone: tk.effective_tone || "neutral", detail: tk.status_detail || null }
+        : null,
+      hasTiktok: !!tk,
+      hasGlitchy: !!g,
+    };
   });
 
-  state.sources = enriched;
-  state.raw = data.raw || [];
-  state.baseSpendTotal = enriched.reduce((a, s) => a + s.spend, 0);
-  state.baseEarningsTotal = enriched.reduce((a, s) => a + s.payout, 0);
+  state.sources = merged;
+  state.baseSpendTotal = merged.reduce((a, s) => a + s.spend, 0);
+  state.baseEarningsTotal = merged.reduce((a, s) => a + s.payout, 0);
 
-  populateChartSourceOptions(enriched);
+  populateChartSourceOptions(merged);
   renderKpis();
-  renderTable(newConversionSources);
+  renderTable(opts.newConversionSources);
   renderChart();
 }
 
@@ -300,7 +359,7 @@ function renderTable(newConversionSources) {
     const crown = bestRoas && s === bestRoas ? `<span class="crown" title="Best ROAS today">👑</span>` : "";
 
     tr.innerHTML = `
-      <td><span class="type-badge ${s.type.toLowerCase()}">${s.type}</span></td>
+      <td>${statusBadge(s.status)}</td>
       <td class="source-name"><span class="expand-caret">▸</span>${crown}${escapeHtml(s.source)}</td>
       <td class="num">${money(s.spend)}</td>
       <td class="num">${money(s.cpm)}</td>
@@ -361,6 +420,18 @@ function hourlyPayoutForSource(source) {
   }
   const hours = buckets.map((_, h) => `${String(h).padStart(2, "0")}:00`);
   return { hours, values: buckets.map((v) => Math.round(v * 100) / 100) };
+}
+
+// Effective operating status for a SOURCE/campaign row. `status` is
+// { label, tone, detail } from the TikTok campaign, or null when the source
+// only exists on the Glitchy side (no matching tracked TikTok campaign).
+function statusBadge(status) {
+  if (!status || !status.label) {
+    return `<span class="status-badge none" title="No matching tracked TikTok campaign">—</span>`;
+  }
+  const tone = ["good", "warn", "bad", "neutral"].includes(status.tone) ? status.tone : "neutral";
+  const tip = status.detail ? `${status.label} — ${status.detail}` : status.label;
+  return `<span class="status-badge ${tone}" title="${escapeHtml(tip)}">${escapeHtml(status.label)}</span>`;
 }
 
 function escapeHtml(str) {
@@ -438,6 +509,7 @@ function closeAccountsModal() {
 function wireTiktokEvents() {
   document.getElementById("tiktokConnectBtn").addEventListener("click", connectTiktok);
   document.getElementById("tiktokSaveTrackedBtn").addEventListener("click", saveTiktokTracked);
+  document.getElementById("tiktokSyncCampaignsBtn").addEventListener("click", () => runTiktokCampaignSync());
 
   const wrap = document.getElementById("tiktokConnectionsWrap");
   wrap.addEventListener("change", (e) => {
@@ -481,6 +553,8 @@ async function renderTiktokAccounts() {
   tiktokState.connections = data.connections || [];
   tiktokState.advertisers = data.advertisers || [];
 
+  renderTiktokSummary();
+
   if (!tiktokState.connections.length) {
     wrap.innerHTML = `<p class="tk-empty">No TikTok accounts connected yet. Click “Connect TikTok Ads” and authorize in this browser profile.</p>`;
     return;
@@ -488,14 +562,23 @@ async function renderTiktokAccounts() {
 
   wrap.innerHTML = tiktokState.connections
     .map((c) => {
-      const advs = tiktokState.advertisers.filter((a) => a.connection_id === c.id);
+      const advs = tiktokState.advertisers
+        .filter((a) => a.connection_id === c.id)
+        // Approved accounts first, then Suspended; stable by name within a group.
+        .slice()
+        .sort(
+          (a, b) =>
+            advApprovedRank(a) - advApprovedRank(b) ||
+            String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
+        );
       const rows = advs.length
         ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
         : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
+      const approved = advs.filter((a) => advIsApproved(a)).length;
       const sub = [
         c.tiktok_email || c.tiktok_display_name || "",
         `${advs.length} account${advs.length === 1 ? "" : "s"}`,
-        c.status,
+        `${approved} Approved · ${advs.length - approved} Suspended`,
       ]
         .filter(Boolean)
         .join(" · ");
@@ -517,6 +600,33 @@ async function renderTiktokAccounts() {
     .join("");
 }
 
+// TikTok advertiser `status` is kept raw in storage; only the label shown to
+// the user is mapped. STATUS_ENABLE -> "Approved", anything else -> "Suspended".
+function advIsApproved(a) {
+  return String(a.status || "").toUpperCase() === "STATUS_ENABLE";
+}
+function advApprovedRank(a) {
+  return advIsApproved(a) ? 0 : 1;
+}
+function advStatusLabel(a) {
+  return advIsApproved(a) ? "Approved" : "Suspended";
+}
+
+function renderTiktokSummary() {
+  const el = document.getElementById("tiktokSummary");
+  if (!el) return;
+  const advs = tiktokState.advertisers || [];
+  if (!advs.length) {
+    el.innerHTML = "";
+    return;
+  }
+  const approved = advs.filter((a) => advIsApproved(a)).length;
+  el.innerHTML = `
+    <span class="tk-sum-item"><strong>${advs.length}</strong> account${advs.length === 1 ? "" : "s"}</span>
+    <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
+    <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
+}
+
 function tiktokAdvRow(connectionId, a) {
   const meta = [
     a.advertiser_id,
@@ -526,9 +636,7 @@ function tiktokAdvRow(connectionId, a) {
   ]
     .filter(Boolean)
     .join(" · ");
-  const enabled = /ENABLE/i.test(a.status || "");
-  const statusCls = a.status ? (enabled ? "ok" : "warn") : "";
-  const statusTxt = (a.status || "unknown").replace(/^STATUS_/, "");
+  const approved = advIsApproved(a);
   return `
     <label class="tk-adv">
       <input type="checkbox" data-tk-adv data-tk-adv-id="${escapeHtml(a.advertiser_id)}" data-tk-conn-id="${connectionId}" ${a.tracked ? "checked" : ""} />
@@ -536,7 +644,7 @@ function tiktokAdvRow(connectionId, a) {
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
         <span class="tk-adv-meta">${escapeHtml(meta)}</span>
       </span>
-      <span class="tk-adv-status ${statusCls}">${escapeHtml(statusTxt)}</span>
+      <span class="tk-adv-status ${approved ? "ok" : "warn"}">${advStatusLabel(a)}</span>
     </label>`;
 }
 
@@ -641,12 +749,45 @@ async function saveTiktokTracked() {
     if (outcome && !outcome.cancelled) {
       markTiktokDirty(false);
       setStatus(`Saved — tracking ${selections.filter((s) => s.tracked).length} advertiser account(s).`);
+      // Pull in campaigns for the freshly-selected accounts.
+      await runTiktokCampaignSync({ silent: true });
     }
   } catch (err) {
     setStatus(`Couldn't save selection: ${err.message}`, true);
   } finally {
     btn.textContent = "Save tracked accounts";
     btn.disabled = !tiktokState.dirty;
+  }
+}
+
+// Hits the TikTok MCP for every tracked advertiser account, refreshes stored
+// campaigns + their effective status, then re-merges the Detailed Metrics table.
+async function runTiktokCampaignSync({ silent } = {}) {
+  const btn = document.getElementById("tiktokSyncCampaignsBtn");
+  const original = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Syncing…";
+  }
+  if (!silent) setStatus("Syncing TikTok campaigns…");
+  try {
+    const outcome = await withTiktokPassword(
+      { title: "Sync campaigns", hint: "Enter the dashboard password to pull campaigns from the tracked accounts." },
+      (password) => syncTiktokCampaigns(password)
+    );
+    if (outcome && !outcome.cancelled) {
+      await loadTiktokCampaigns();
+      const r = outcome.result || {};
+      if (r.note) setStatus(r.note);
+      else setStatus(`Synced ${r.campaignCount ?? 0} TikTok campaign(s) from ${r.connections ?? 0} connection(s).`);
+    }
+  } catch (err) {
+    setStatus(`Campaign sync failed: ${err.message}`, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = original || "Sync campaigns";
+    }
   }
 }
 
