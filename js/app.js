@@ -1,9 +1,12 @@
-import { mockAccounts, mockSourceProfile } from "./mock.js";
+import { mockSourceProfile } from "./mock.js";
 import {
   fetchGlitchyStats,
   postResetDay,
   fetchDailyTotals,
   loadCache,
+  fetchTiktokConnections,
+  startTiktokAuth,
+  postTiktokAction,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart, createMiniChart } from "./charts.js";
@@ -70,6 +73,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   renderFromCacheOrFallback();
   wireEvents();
+  handleTiktokReturn();
   startTimers();
   refreshAll();
 });
@@ -108,13 +112,14 @@ function wireEvents() {
   });
 
   document.getElementById("toolsAccountsBtn").addEventListener("click", () => {
-    renderAccounts();
     openAccountsModal();
+    renderTiktokAccounts();
   });
   document.getElementById("closeAccountsModal").addEventListener("click", closeAccountsModal);
   document.getElementById("accountsModal").addEventListener("click", (e) => {
     if (e.target.id === "accountsModal") closeAccountsModal();
   });
+  wireTiktokEvents();
 
   document.getElementById("toolsCalendarBtn").addEventListener("click", openCalendarModal);
   document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
@@ -415,32 +420,295 @@ function closeToolsDrawer() {
   document.getElementById("drawerBackdrop").classList.remove("open");
 }
 
-// ============================== ACCOUNTS MODAL ==============================
+// ============================== TIKTOK ACCOUNTS MODAL ==============================
+// Authentication + connection storage + advertiser discovery/selection only.
+// All token handling lives in the tiktok-* Netlify functions.
 
-function renderAccounts() {
-  const accounts = mockAccounts();
-  const list = document.getElementById("accountsList");
-  list.innerHTML = "";
-
-  accounts.forEach((acc) => {
-    const item = document.createElement("div");
-    item.className = "account-item";
-    item.innerHTML = `
-      <span class="status-dot ${acc.status}"></span>
-      <div class="account-info">
-        <div class="account-name">${escapeHtml(acc.name)}</div>
-        <div class="account-sub">${acc.status === "active" ? "Active" : "Suspended"}</div>
-      </div>
-    `;
-    list.appendChild(item);
-  });
-}
+const tiktokState = { connections: [], advertisers: [], dirty: false };
+let tiktokPassword = null; // cached in memory for the session after first success
+let tiktokPwHandler = null;
 
 function openAccountsModal() {
   document.getElementById("accountsModal").classList.add("open");
 }
 function closeAccountsModal() {
   document.getElementById("accountsModal").classList.remove("open");
+}
+
+function wireTiktokEvents() {
+  document.getElementById("tiktokConnectBtn").addEventListener("click", connectTiktok);
+  document.getElementById("tiktokSaveTrackedBtn").addEventListener("click", saveTiktokTracked);
+
+  const wrap = document.getElementById("tiktokConnectionsWrap");
+  wrap.addEventListener("change", (e) => {
+    if (e.target.matches('input[type="checkbox"][data-tk-adv]')) markTiktokDirty(true);
+  });
+  wrap.addEventListener("click", (e) => {
+    const refreshId = e.target.dataset?.tkRefresh;
+    const disconnectId = e.target.dataset?.tkDisconnect;
+    if (refreshId) refreshTiktokConnection(refreshId, e.target);
+    if (disconnectId) disconnectTiktokConnection(disconnectId);
+  });
+
+  document.getElementById("tiktokPwCancel").addEventListener("click", closeTiktokPwModal);
+  document.getElementById("tiktokPwConfirm").addEventListener("click", submitTiktokPw);
+  document.getElementById("tiktokPwInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitTiktokPw();
+  });
+  document.getElementById("tiktokPwModal").addEventListener("click", (e) => {
+    if (e.target.id === "tiktokPwModal") closeTiktokPwModal();
+  });
+}
+
+function markTiktokDirty(value) {
+  tiktokState.dirty = value;
+  document.getElementById("tiktokSaveTrackedBtn").disabled = !value;
+}
+
+async function renderTiktokAccounts() {
+  const wrap = document.getElementById("tiktokConnectionsWrap");
+  wrap.innerHTML = `<p class="tk-loading">Loading connections…</p>`;
+  markTiktokDirty(false);
+
+  let data;
+  try {
+    data = await fetchTiktokConnections();
+  } catch (err) {
+    wrap.innerHTML = `<p class="tk-error">Couldn't load connections: ${escapeHtml(err.message)}</p>`;
+    return;
+  }
+
+  tiktokState.connections = data.connections || [];
+  tiktokState.advertisers = data.advertisers || [];
+
+  if (!tiktokState.connections.length) {
+    wrap.innerHTML = `<p class="tk-empty">No TikTok accounts connected yet. Click “Connect TikTok Ads” and authorize in this browser profile.</p>`;
+    return;
+  }
+
+  wrap.innerHTML = tiktokState.connections
+    .map((c) => {
+      const advs = tiktokState.advertisers.filter((a) => a.connection_id === c.id);
+      const rows = advs.length
+        ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
+        : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
+      const sub = [
+        c.tiktok_email || c.tiktok_display_name || "",
+        `${advs.length} account${advs.length === 1 ? "" : "s"}`,
+        c.status,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+        <div class="tk-conn" data-tk-conn-card="${c.id}">
+          <div class="tk-conn-head">
+            <div>
+              <div class="tk-conn-label">${escapeHtml(c.label || "TikTok connection")}</div>
+              <div class="tk-conn-sub">${escapeHtml(sub)}</div>
+            </div>
+            <div class="tk-conn-actions">
+              <button class="tk-mini" data-tk-refresh="${c.id}">Re-scan</button>
+              <button class="tk-mini danger" data-tk-disconnect="${c.id}">Disconnect</button>
+            </div>
+          </div>
+          <div class="tk-adv-list">${rows}</div>
+        </div>`;
+    })
+    .join("");
+}
+
+function tiktokAdvRow(connectionId, a) {
+  const meta = [
+    a.advertiser_id,
+    a.currency || null,
+    a.display_timezone || a.timezone || null,
+    a.bc_name || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const enabled = /ENABLE/i.test(a.status || "");
+  const statusCls = a.status ? (enabled ? "ok" : "warn") : "";
+  const statusTxt = (a.status || "unknown").replace(/^STATUS_/, "");
+  return `
+    <label class="tk-adv">
+      <input type="checkbox" data-tk-adv data-tk-adv-id="${escapeHtml(a.advertiser_id)}" data-tk-conn-id="${connectionId}" ${a.tracked ? "checked" : ""} />
+      <span class="tk-adv-main">
+        <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
+      </span>
+      <span class="tk-adv-status ${statusCls}">${escapeHtml(statusTxt)}</span>
+    </label>`;
+}
+
+// ---- privileged action helper (password gate, mirrors the New Day pattern) ----
+
+function askTiktokPassword({ title, hint }) {
+  return new Promise((resolve) => {
+    tiktokPwHandler = resolve;
+    document.getElementById("tiktokPwTitle").textContent = title || "Dashboard password";
+    document.getElementById("tiktokPwHint").textContent =
+      hint || "Enter the dashboard password to continue.";
+    document.getElementById("tiktokPwInput").value = "";
+    document.getElementById("tiktokPwError").textContent = "";
+    document.getElementById("tiktokPwModal").classList.add("open");
+    document.getElementById("tiktokPwInput").focus();
+  });
+}
+function closeTiktokPwModal() {
+  document.getElementById("tiktokPwModal").classList.remove("open");
+  if (tiktokPwHandler) {
+    tiktokPwHandler(null);
+    tiktokPwHandler = null;
+  }
+}
+function submitTiktokPw() {
+  const val = document.getElementById("tiktokPwInput").value;
+  if (!val) {
+    document.getElementById("tiktokPwError").textContent = "Password required.";
+    return;
+  }
+  document.getElementById("tiktokPwModal").classList.remove("open");
+  if (tiktokPwHandler) {
+    tiktokPwHandler(val);
+    tiktokPwHandler = null;
+  }
+}
+
+// Runs `fn(password)`; prompts for the password unless one is already cached,
+// and clears the cache on a 401 so the next attempt re-prompts.
+async function withTiktokPassword(purpose, fn) {
+  let password = tiktokPassword;
+  if (!password) {
+    password = await askTiktokPassword(purpose);
+    if (!password) return { cancelled: true };
+  }
+  try {
+    const result = await fn(password);
+    tiktokPassword = password;
+    return { result };
+  } catch (err) {
+    if (err.status === 401) {
+      tiktokPassword = null;
+      setStatus("Incorrect password.", true);
+    }
+    throw err;
+  }
+}
+
+// ---- actions ----
+
+async function connectTiktok() {
+  let outcome;
+  try {
+    outcome = await withTiktokPassword(
+      {
+        title: "Connect TikTok Ads",
+        hint: "Enter the dashboard password. You'll then be sent to TikTok to authorize this browser's logged-in Business account.",
+      },
+      (password) => startTiktokAuth(password, "")
+    );
+  } catch (err) {
+    setStatus(`Couldn't start TikTok authentication: ${err.message}`, true);
+    return;
+  }
+  if (!outcome || outcome.cancelled) return;
+  const { authorizeUrl } = outcome.result;
+  if (!authorizeUrl) {
+    setStatus("TikTok did not return an authorization URL.", true);
+    return;
+  }
+  // Full-page redirect — survives AdsPower profiles and popup blockers. We come
+  // back to /?tiktok=connected (handled in init).
+  window.location.assign(authorizeUrl);
+}
+
+async function saveTiktokTracked() {
+  const selections = [...document.querySelectorAll('input[type="checkbox"][data-tk-adv]')].map(
+    (el) => ({
+      connection_id: el.dataset.tkConnId,
+      advertiser_id: el.dataset.tkAdvId,
+      tracked: el.checked,
+    })
+  );
+  const btn = document.getElementById("tiktokSaveTrackedBtn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const outcome = await withTiktokPassword(
+      { title: "Save tracked accounts", hint: "Enter the dashboard password to save your selection." },
+      (password) => postTiktokAction({ password, action: "track", selections })
+    );
+    if (outcome && !outcome.cancelled) {
+      markTiktokDirty(false);
+      setStatus(`Saved — tracking ${selections.filter((s) => s.tracked).length} advertiser account(s).`);
+    }
+  } catch (err) {
+    setStatus(`Couldn't save selection: ${err.message}`, true);
+  } finally {
+    btn.textContent = "Save tracked accounts";
+    btn.disabled = !tiktokState.dirty;
+  }
+}
+
+async function refreshTiktokConnection(connectionId, btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Scanning…";
+  try {
+    const outcome = await withTiktokPassword(
+      { title: "Re-scan accounts", hint: "Enter the dashboard password to re-scan this connection." },
+      (password) => postTiktokAction({ password, action: "refresh", connection_id: connectionId })
+    );
+    if (outcome && !outcome.cancelled) {
+      setStatus(`Re-scanned — ${outcome.result.advertiserCount ?? 0} advertiser account(s) found.`);
+      await renderTiktokAccounts();
+    }
+  } catch (err) {
+    setStatus(`Re-scan failed: ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+async function disconnectTiktokConnection(connectionId) {
+  try {
+    const outcome = await withTiktokPassword(
+      { title: "Disconnect", hint: "Enter the dashboard password to remove this TikTok connection." },
+      (password) => postTiktokAction({ password, action: "disconnect", connection_id: connectionId })
+    );
+    if (outcome && !outcome.cancelled) {
+      setStatus("TikTok connection removed.");
+      await renderTiktokAccounts();
+    }
+  } catch (err) {
+    setStatus(`Couldn't disconnect: ${err.message}`, true);
+  }
+}
+
+// Called from init when returning from the OAuth redirect.
+function handleTiktokReturn() {
+  const qp = new URLSearchParams(window.location.search);
+  const kind = qp.get("tiktok");
+  if (!kind) return;
+
+  if (kind === "connected") {
+    const n = qp.get("accounts");
+    const warn = qp.get("warn");
+    setStatus(
+      `TikTok account connected${n != null ? ` — ${n} ad account(s) discovered` : ""}.` +
+        (warn ? ` Note: ${warn}` : "")
+    );
+  } else if (kind === "error") {
+    setStatus(`TikTok connection failed: ${qp.get("reason") || "unknown error"}`, true);
+  }
+
+  history.replaceState({}, "", window.location.pathname);
+
+  if (kind === "connected") {
+    openAccountsModal();
+    renderTiktokAccounts();
+  }
 }
 
 // ============================== NEW DAY (password protected) ==============================

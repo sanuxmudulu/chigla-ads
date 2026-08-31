@@ -80,6 +80,49 @@ export function loadDailyCache() {
   }
 }
 
+// ---------------- TikTok Ads (MCP OAuth) ----------------
+// Auth + advertiser discovery/selection. All token handling is server-side in
+// the tiktok-* Netlify functions — nothing sensitive is returned here.
+
+export async function fetchTiktokConnections() {
+  const res = await fetch("/.netlify/functions/tiktok-connections");
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+  return data; // { connections: [...], advertisers: [...] }
+}
+
+export async function startTiktokAuth(password, label) {
+  const res = await fetch("/.netlify/functions/tiktok-auth-start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password, label }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    const err = new Error(data.error || `Failed (${res.status})`);
+    err.status = res.status;
+    err.details = data.details;
+    throw err;
+  }
+  return data; // { authorizeUrl }
+}
+
+export async function postTiktokAction(payload) {
+  const res = await fetch("/.netlify/functions/tiktok-connections", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    const err = new Error(data.error || `Failed (${res.status})`);
+    err.status = res.status;
+    err.details = data.details;
+    throw err;
+  }
+  return data;
+}
+
 // ---------------- Theme persistence ----------------
 
 export function loadTheme(defaultTheme) {

@@ -1,3 +1,8 @@
 [build]
   functions = "netlify/functions"
   publish = "."
+
+[build.environment]
+  # The tiktok-*.mjs functions use @modelcontextprotocol/sdk (needs Node >= 18)
+  # and are authored as ES modules.
+  NODE_VERSION = "20"

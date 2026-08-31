@@ -132,7 +132,7 @@
       <span class="tools-item-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
       </span>
-      <span>Accounts</span>
+      <span>TikTok Ads</span>
     </button>
 
     <button class="tools-item" id="toolsCalendarBtn">
@@ -161,15 +161,37 @@
   <button class="icon-btn danger new-day-btn" id="newDayBtn">New Day</button>
 </aside>
 
-<!-- ============ ACCOUNTS MODAL ============ -->
+<!-- ============ TIKTOK ACCOUNTS MODAL ============ -->
 <div class="modal-backdrop" id="accountsModal">
-  <div class="modal">
+  <div class="modal modal-lg">
     <div class="modal-header">
-      <h3>Ad Accounts</h3>
+      <h3>TikTok Ad Accounts</h3>
       <button id="closeAccountsModal">✕</button>
     </div>
-    <p style="margin-top:-4px;">TikTok API access is pending developer approval. These are placeholders for now.</p>
-    <div class="accounts-list" id="accountsList"></div>
+    <p style="margin-top:-4px;">
+      Connections authenticate through TikTok's official MCP OAuth. Open Chigla Ads in the
+      AdsPower profile for a TikTok Business login, then click <strong>Connect TikTok Ads</strong>.
+      Tick the advertiser accounts you want Chigla Ads to track.
+    </p>
+    <div id="tiktokConnectionsWrap" class="tk-wrap"></div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button class="icon-btn" id="tiktokConnectBtn">Connect TikTok Ads</button>
+      <button class="icon-btn primary" id="tiktokSaveTrackedBtn" disabled>Save tracked accounts</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TIKTOK PASSWORD MODAL ============ -->
+<div class="modal-backdrop" id="tiktokPwModal">
+  <div class="modal">
+    <h3 id="tiktokPwTitle">Dashboard password</h3>
+    <p id="tiktokPwHint">Enter the dashboard password to continue.</p>
+    <input type="password" id="tiktokPwInput" placeholder="Password" autocomplete="off" />
+    <div class="modal-error" id="tiktokPwError"></div>
+    <div class="modal-actions">
+      <button class="icon-btn" id="tiktokPwCancel">Cancel</button>
+      <button class="icon-btn primary" id="tiktokPwConfirm">Continue</button>
+    </div>
   </div>
 </div>
 

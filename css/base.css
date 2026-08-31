@@ -409,6 +409,46 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 160px; padding: 14px
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .modal-error { font-size: 12.5px; color: var(--loss); min-height: 16px; margin: -6px 0 10px; }
 
+/* ---------------- TikTok accounts modal ---------------- */
+.tk-wrap { display: flex; flex-direction: column; gap: 14px; max-height: 52vh; overflow-y: auto; }
+.tk-empty, .tk-loading { font-size: 12.5px; color: var(--text-2); }
+.tk-error { font-size: 12.5px; color: var(--loss); }
+
+.tk-conn {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-2); padding: 12px;
+}
+.tk-conn-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.tk-conn-label { font-weight: 700; font-size: 13.5px; }
+.tk-conn-sub { font-size: 11px; color: var(--text-2); margin-top: 2px; }
+.tk-conn-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.tk-mini {
+  background: var(--bg-1); border: 1px solid var(--border); color: var(--text-1);
+  font-family: var(--font-body); font-size: 11px; font-weight: 600;
+  padding: 5px 9px; border-radius: 6px; cursor: pointer; transition: all 0.15s var(--ease);
+}
+.tk-mini:hover { border-color: var(--accent); color: var(--accent); }
+.tk-mini.danger:hover { border-color: var(--danger); color: var(--danger); }
+.tk-mini:disabled { opacity: 0.5; cursor: default; }
+
+.tk-adv-list { display: flex; flex-direction: column; gap: 4px; }
+.tk-adv {
+  display: flex; align-items: center; gap: 10px; padding: 8px 9px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--bg-1); cursor: pointer;
+}
+.tk-adv:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.tk-adv input { width: auto; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
+.tk-adv-main { flex: 1; min-width: 0; }
+.tk-adv-name { display: block; font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-adv-meta { display: block; font-size: 10.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-adv-status {
+  flex-shrink: 0; font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border);
+  text-transform: uppercase; color: var(--text-2);
+}
+.tk-adv-status.ok { color: var(--profit); border-color: color-mix(in srgb, var(--profit) 55%, transparent); }
+.tk-adv-status.warn { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 55%, transparent); }
+
 /* ---------------- Misc ---------------- */
 .section-title-row { display: flex; align-items: center; gap: 8px; }
 
