@@ -6,7 +6,7 @@
 //        action "refresh"    : { connection_id }   -> re-scan advertisers via MCP
 //        action "disconnect" : { connection_id }   -> forget the connection
 
-import {
+const {
   getSupabase,
   resolveConfig,
   checkPassword,
@@ -14,7 +14,7 @@ import {
   connectMcp,
   discoverAndStoreAdvertisers,
   json,
-} from "./_shared/tiktok-mcp.mjs";
+} = require("./_shared/tiktok-mcp");
 
 const CONNECTION_COLUMNS =
   "id, label, tiktok_email, tiktok_display_name, status, last_verified_at, created_at";
@@ -22,7 +22,7 @@ const CONNECTION_COLUMNS =
 const ADVERTISER_COLUMNS =
   "connection_id, advertiser_id, advertiser_name, bc_id, bc_name, currency, timezone, display_timezone, status, role, country, tracked, updated_at";
 
-export const handler = async (event) => {
+exports.handler = async function (event) {
   try {
     const supabase = getSupabase();
 
@@ -31,8 +31,8 @@ export const handler = async (event) => {
         supabase.from("tiktok_connections").select(CONNECTION_COLUMNS).order("created_at", { ascending: true }),
         supabase.from("tiktok_advertisers").select(ADVERTISER_COLUMNS).order("advertiser_name", { ascending: true }),
       ]);
-      if (connectionsRes.error) return json(500, { error: connectionsRes.error.message });
-      if (advertisersRes.error) return json(500, { error: advertisersRes.error.message });
+      if (connectionsRes.error) return json(500, { error: "Supabase read failed", details: connectionsRes.error.message });
+      if (advertisersRes.error) return json(500, { error: "Supabase read failed", details: advertisersRes.error.message });
       return json(200, {
         connections: connectionsRes.data || [],
         advertisers: advertisersRes.data || [],
@@ -44,7 +44,7 @@ export const handler = async (event) => {
     let body = {};
     try {
       body = JSON.parse(event.body || "{}");
-    } catch {
+    } catch (_) {
       body = {};
     }
 
@@ -63,7 +63,7 @@ export const handler = async (event) => {
             .update({ tracked: !!s.tracked, updated_at: now })
             .eq("connection_id", s.connection_id)
             .eq("advertiser_id", String(s.advertiser_id));
-          if (error) return json(500, { error: error.message });
+          if (error) return json(500, { error: "Update failed", details: error.message });
           updated += 1;
         }
         return json(200, { ok: true, updated });
@@ -76,7 +76,7 @@ export const handler = async (event) => {
           .select("*")
           .eq("id", body.connection_id)
           .maybeSingle();
-        if (error) return json(500, { error: error.message });
+        if (error) return json(500, { error: "Supabase read failed", details: error.message });
         if (!conn) return json(404, { error: "Connection not found" });
 
         const { serverUrl, redirectUrl } = resolveConfig();
@@ -111,7 +111,7 @@ export const handler = async (event) => {
           .from("tiktok_connections")
           .delete()
           .eq("id", body.connection_id);
-        if (error) return json(500, { error: error.message });
+        if (error) return json(500, { error: "Delete failed", details: error.message });
         return json(200, { ok: true });
       }
 

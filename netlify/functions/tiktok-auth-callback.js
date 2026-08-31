@@ -9,20 +9,20 @@
 //
 // Tokens are written to Supabase server-side only and never put in the redirect.
 
-import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import {
+const {
+  auth,
   getSupabase,
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
   mcpCall,
   discoverAndStoreAdvertisers,
-} from "./_shared/tiktok-mcp.mjs";
+} = require("./_shared/tiktok-mcp");
 
 function safeBase() {
   try {
     return resolveConfig().base || "";
-  } catch {
+  } catch (_) {
     return "";
   }
 }
@@ -33,7 +33,7 @@ const redirectTo = (base, params) => ({
   body: "",
 });
 
-export const handler = async (event) => {
+exports.handler = async function (event) {
   const q = event.queryStringParameters || {};
   const base = safeBase();
 
@@ -69,7 +69,7 @@ export const handler = async (event) => {
       return redirectTo(base, { tiktok: "error", reason: "token_exchange_failed" });
     }
     const tokenRecord = provider.getResolvedTokens();
-    if (!tokenRecord?.access_token) {
+    if (!tokenRecord || !tokenRecord.access_token) {
       return redirectTo(base, { tiktok: "error", reason: "no_access_token" });
     }
 
@@ -79,7 +79,7 @@ export const handler = async (event) => {
     let me = {};
     try {
       me = await mcpCall(client, "user_info_get", {});
-    } catch {
+    } catch (_) {
       me = {};
     }
     const coreId = String(me.core_user_id || me.id || `pending_${tx.state.slice(0, 12)}`);

@@ -6,22 +6,22 @@
 //
 // No advertiser IDs, tokens or credentials are hard-coded anywhere.
 
-import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import {
+const {
+  auth,
   getSupabase,
   resolveConfig,
   checkPassword,
   SupabaseOAuthProvider,
   json,
-} from "./_shared/tiktok-mcp.mjs";
+} = require("./_shared/tiktok-mcp");
 
-export const handler = async (event) => {
+exports.handler = async function (event) {
   if (event.httpMethod !== "POST") return json(405, { error: "Use POST" });
 
   let body = {};
   try {
     body = JSON.parse(event.body || "{}");
-  } catch {
+  } catch (_) {
     body = {};
   }
 

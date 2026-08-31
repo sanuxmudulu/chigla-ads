@@ -12,28 +12,35 @@
 // transport handle discovery, Dynamic Client Registration (RFC 7591), PKCE and
 // token refresh; SupabaseOAuthProvider just persists everything to Supabase so
 // the flow works statelessly across separate function invocations.
+//
+// CommonJS on purpose — matches the existing glitchy-* functions and avoids
+// ESM/CJS interop hazards when Netlify's bundler inlines `ws` / the SDK.
 
-import { createClient } from "@supabase/supabase-js";
-import { randomUUID } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+const { createClient } = require("@supabase/supabase-js");
+const WebSocketImpl = require("ws");
+const { randomUUID } = require("node:crypto");
+const { auth } = require("@modelcontextprotocol/sdk/client/auth.js");
+const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
+const {
+  StreamableHTTPClientTransport,
+} = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
 
-export const DEFAULT_MCP_SERVER_URL =
+const DEFAULT_MCP_SERVER_URL =
   "https://business-api.tiktok.com/open_mcp/tt-ads-mcp-flat";
 
-export const MCP_SCOPE = "mcp:tt4b";
+const MCP_SCOPE = "mcp:tt4b";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
-export function resolveConfig() {
+function resolveConfig() {
   const serverUrl = process.env.TIKTOK_MCP_SERVER_URL || DEFAULT_MCP_SERVER_URL;
 
   const base = (
     process.env.APP_BASE_URL ||
-    process.env.URL ||               // Netlify: site's primary URL
-    process.env.DEPLOY_PRIME_URL ||  // Netlify: deploy-specific URL
+    process.env.URL || // Netlify: site's primary URL
+    process.env.DEPLOY_PRIME_URL || // Netlify: deploy-specific URL
     ""
   ).replace(/\/+$/, "");
 
@@ -49,17 +56,26 @@ export function resolveConfig() {
   return { serverUrl, redirectUrl, base };
 }
 
-export function getSupabase() {
+function getSupabase() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_KEY;
   if (!url || !key) {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY env vars in Netlify.");
   }
-  return createClient(url, key, { auth: { persistSession: false } });
+  // @supabase/supabase-js builds a RealtimeClient inside createClient(), which
+  // demands a WebSocket constructor at construction time. Netlify's Lambda Node
+  // runtime does not reliably expose a global `WebSocket` (only Node >= 22.4
+  // does, and the functions runtime may lag the build's NODE_VERSION), so we
+  // hand it an explicit implementation. We never use Realtime — this just keeps
+  // createClient() from throwing "native WebSocket not found".
+  return createClient(url, key, {
+    auth: { persistSession: false },
+    realtime: { transport: WebSocketImpl },
+  });
 }
 
 // Reuses the New Day password unless a dedicated one is set.
-export function checkPassword(supplied) {
+function checkPassword(supplied) {
   const want = process.env.TIKTOK_ADMIN_PASSWORD || process.env.NEW_DAY_PASSWORD || null;
   if (!want) {
     return {
@@ -72,7 +88,7 @@ export function checkPassword(supplied) {
   return { ok: true };
 }
 
-export const json = (statusCode, obj) => ({
+const json = (statusCode, obj) => ({
   statusCode,
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(obj),
@@ -118,7 +134,7 @@ function toSdkTokens(stored) {
 //   - API calls        : ... ({ ..., connection: <tiktok_connections row> })
 // ---------------------------------------------------------------------------
 
-export class SupabaseOAuthProvider {
+class SupabaseOAuthProvider {
   constructor({ supabase, serverUrl, redirectUrl, transaction = null, connection = null }) {
     this.supabase = supabase;
     this.serverUrl = serverUrl;
@@ -130,8 +146,8 @@ export class SupabaseOAuthProvider {
     this._codeVerifier = transaction?.code_verifier || null;
 
     this._authorizationUrl = null; // captured from redirectToAuthorization()
-    this._pendingTokens = null;    // raw SDK tokens from the current flow
-    this._resolvedTokens = null;   // stored-shape tokens for the caller to persist
+    this._pendingTokens = null; // raw SDK tokens from the current flow
+    this._resolvedTokens = null; // stored-shape tokens for the caller to persist
   }
 
   // -- interactive redirect target --
@@ -248,7 +264,7 @@ export class SupabaseOAuthProvider {
 // MCP client helpers
 // ---------------------------------------------------------------------------
 
-export async function connectMcp({ provider, serverUrl }) {
+async function connectMcp({ provider, serverUrl }) {
   const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
     authProvider: provider,
   });
@@ -261,7 +277,7 @@ export async function connectMcp({ provider, serverUrl }) {
 }
 
 // The TikTok MCP wraps every result as JSON text: { code, message, data, request_id }.
-export async function mcpCall(client, name, args = {}) {
+async function mcpCall(client, name, args = {}) {
   const res = await client.callTool({ name, arguments: args });
   const text = (res.content || [])
     .filter((c) => c.type === "text")
@@ -296,7 +312,7 @@ const ADV_FIELDS = [
 // Walks the authenticated TikTok user's Business Centers + advertiser accounts
 // and upserts them into tiktok_advertisers. Descriptive columns only — `tracked`
 // and `discovered_at` are left untouched so a re-scan preserves the selection.
-export async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
+async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
   let bcs = [];
   try {
     const d = await mcpCall(client, "bc_get", {});
@@ -364,3 +380,17 @@ export async function discoverAndStoreAdvertisers({ supabase, client, connection
 
   return { advertiserCount: rows.length, businessCenterCount: bcs.length };
 }
+
+module.exports = {
+  DEFAULT_MCP_SERVER_URL,
+  MCP_SCOPE,
+  auth,
+  resolveConfig,
+  getSupabase,
+  checkPassword,
+  json,
+  SupabaseOAuthProvider,
+  connectMcp,
+  mcpCall,
+  discoverAndStoreAdvertisers,
+};

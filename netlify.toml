@@ -3,8 +3,11 @@
   publish = "."
 
 [build.environment]
-  # Node 22 is required: @supabase/supabase-js (>= 2.49) needs a global WebSocket
-  # at createClient() time, which only exists on Node >= 22. This affects every
-  # function that builds a Supabase client (glitchy + tiktok). The tiktok-*.mjs
-  # functions additionally use @modelcontextprotocol/sdk and are ES modules.
+  # Build-time Node version.
   NODE_VERSION = "22"
+  # Functions RUNTIME (AWS Lambda) Node version. Separate lever from NODE_VERSION:
+  # Netlify's functions runtime does not reliably follow the build version, and
+  # @supabase/supabase-js needs an unflagged global WebSocket at createClient()
+  # (Node >= 22.4). The tiktok-* functions also hand Supabase an explicit `ws`
+  # transport, so they work even if this is ignored.
+  AWS_LAMBDA_JS_RUNTIME = "nodejs22.x"
