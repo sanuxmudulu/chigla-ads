@@ -1,6 +1,5 @@
 import {
   fetchGlitchyStats,
-  postResetDay,
   fetchDailyTotals,
   loadCache,
   fetchTiktokConnections,
@@ -28,11 +27,9 @@ function fallbackSources() {
   ];
 }
 
-// Glitchy's "hour" field (and reset_baselines) are anchored to EST, so
-// "today" needs to mean the same calendar date the backend uses. This is a
-// pure display/query convenience — it never decides when a new tracking
-// session starts. Only a successful password-verified "New Day" click (see
-// reset-day.js) ever writes a new baseline.
+// Glitchy's "hour" field is EST-anchored, so "today" here means the same EST
+// calendar date the backend uses. The dashboard day rolls over automatically
+// at EST midnight — there is no manual "New Day".
 function todayStr() {
   const est = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
   return `${est.getFullYear()}-${String(est.getMonth() + 1).padStart(2, "0")}-${String(est.getDate()).padStart(2, "0")}`;
@@ -148,17 +145,8 @@ function wireEvents() {
   document.getElementById("calendarModal").addEventListener("click", (e) => {
     if (e.target.id === "calendarModal") closeCalendarModal();
   });
-
-  // ---- New Day (password protected) ----
-  document.getElementById("newDayBtn").addEventListener("click", openNewDayModal);
-  document.getElementById("cancelNewDayBtn").addEventListener("click", closeNewDayModal);
-  document.getElementById("newDayModal").addEventListener("click", (e) => {
-    if (e.target.id === "newDayModal") closeNewDayModal();
-  });
-  document.getElementById("confirmNewDayBtn").addEventListener("click", submitNewDay);
-  document.getElementById("newDayPasswordInput").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submitNewDay();
-  });
+  document.getElementById("calPrevMonth").addEventListener("click", () => shiftCalendarMonth(-1));
+  document.getElementById("calNextMonth").addEventListener("click", () => shiftCalendarMonth(1));
 
   document.getElementById("chartSourceSelect").addEventListener("change", (e) => {
     state.chartSource = e.target.value;
@@ -1040,81 +1028,11 @@ function handleTiktokReturn() {
   }
 }
 
-// ============================== NEW DAY (password protected) ==============================
-
-let newDayAttempts = 0;
-let newDayLockedUntil = 0;
-let newDayLockInterval = null;
-
-function openNewDayModal() {
-  if (Date.now() < newDayLockedUntil) return; // button itself is disabled during lockout
-  document.getElementById("newDayPasswordInput").value = "";
-  document.getElementById("newDayModalError").textContent = "";
-  document.getElementById("newDayModal").classList.add("open");
-  document.getElementById("newDayPasswordInput").focus();
-}
-function closeNewDayModal() {
-  document.getElementById("newDayModal").classList.remove("open");
-}
-
-async function submitNewDay() {
-  const input = document.getElementById("newDayPasswordInput");
-  const errorEl = document.getElementById("newDayModalError");
-  const confirmBtn = document.getElementById("confirmNewDayBtn");
-  const password = input.value;
-
-  confirmBtn.disabled = true;
-  confirmBtn.textContent = "Confirming...";
-  errorEl.textContent = "";
-
-  try {
-    const result = await postResetDay(password);
-    newDayAttempts = 0;
-    closeNewDayModal();
-    setStatus(result.message || "New day started.");
-    await refreshAll(true);
-  } catch (err) {
-    if (err.status === 401) {
-      newDayAttempts += 1;
-      const remaining = 3 - newDayAttempts;
-      if (remaining > 0) {
-        errorEl.textContent = `Incorrect password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`;
-      } else {
-        lockNewDayButton();
-        closeNewDayModal();
-      }
-    } else {
-      errorEl.textContent = `Reset failed: ${err.message}`;
-    }
-  } finally {
-    confirmBtn.disabled = false;
-    confirmBtn.textContent = "Confirm New Day";
-  }
-}
-
-function lockNewDayButton() {
-  newDayLockedUntil = Date.now() + 60000;
-  const btn = document.getElementById("newDayBtn");
-  btn.disabled = true;
-
-  if (newDayLockInterval) clearInterval(newDayLockInterval);
-  const tick = () => {
-    const remaining = Math.ceil((newDayLockedUntil - Date.now()) / 1000);
-    if (remaining <= 0) {
-      btn.disabled = false;
-      btn.textContent = "New Day";
-      newDayAttempts = 0;
-      clearInterval(newDayLockInterval);
-      newDayLockInterval = null;
-    } else {
-      btn.textContent = `Locked (${remaining}s)`;
-    }
-  };
-  tick();
-  newDayLockInterval = setInterval(tick, 1000);
-}
-
 // ============================== PROFIT CALENDAR (modal, on demand) ==============================
+// Automatic history — no "New Day". Reads the stored daily_totals rows; the
+// current day's row is kept fresh by the normal glitchy-stats poll.
+
+let calendarMonth = null; // "YYYY-MM" currently displayed
 
 function monthGridDays(daily) {
   const month = daily.month || todayStr().slice(0, 7);
@@ -1127,25 +1045,65 @@ function monthGridDays(daily) {
   const days = [];
   for (let d = 1; d <= daysInMonth; d++) {
     const dateStr = `${year}-${String(mon).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    const isFuture = dateStr > todayIso;
-    days.push({ dateStr, day: d, isFuture, isToday: dateStr === todayIso, entry: rowsByDate.get(dateStr) || null });
+    days.push({
+      dateStr,
+      day: d,
+      isFuture: dateStr > todayIso,
+      isToday: dateStr === todayIso,
+      entry: rowsByDate.get(dateStr) || null,
+    });
   }
-  return { year, mon, month, firstWeekday, days, todayIso };
+  return { year, mon, firstWeekday, days };
+}
+
+function dayProfit(entry) {
+  if (!entry) return 0;
+  if (entry.net_profit != null) return entry.net_profit;
+  return (entry.total_earnings || 0) - (entry.total_spend || 0);
 }
 
 async function openCalendarModal() {
   document.getElementById("calendarModal").classList.add("open");
-  const month = todayStr().slice(0, 7);
-  try {
-    const daily = await fetchDailyTotals(month);
-    renderDetailedCalendar(daily);
-  } catch (err) {
-    renderDetailedCalendar({ month, days: [] });
-  }
+  calendarMonth = todayStr().slice(0, 7);
+  await loadCalendar();
 }
 
 function closeCalendarModal() {
   document.getElementById("calendarModal").classList.remove("open");
+}
+
+function shiftCalendarMonth(delta) {
+  if (!calendarMonth) calendarMonth = todayStr().slice(0, 7);
+  const [y, m] = calendarMonth.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  calendarMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  loadCalendar();
+}
+
+async function loadCalendar() {
+  const grid = document.getElementById("calendarGridDetailed");
+  grid.innerHTML = `<div class="cal-loading">Loading…</div>`;
+  try {
+    const daily = await fetchDailyTotals(calendarMonth);
+    renderDetailedCalendar(daily);
+  } catch (_) {
+    renderDetailedCalendar({ month: calendarMonth, days: [] });
+  }
+}
+
+// Heatmap intensity for one day's profit, normalised against the visible month
+// so a single unusually large day doesn't wash out the rest. The reference is
+// the ~80th percentile of the month's absolute profits (falls back to the max);
+// sqrt scaling lifts the mid-range. Near-zero days stay very subtle.
+function makeIntensity(magnitudes) {
+  const sorted = magnitudes.filter((v) => v > 0).sort((a, b) => a - b);
+  const ref = sorted.length
+    ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.8))] || sorted[sorted.length - 1]
+    : 1;
+  return (profit) => {
+    const r = Math.min(1, Math.sqrt(Math.abs(profit) / (ref || 1)));
+    return Math.round(6 + r * 46); // 6% (subtle) .. 52%
+  };
 }
 
 function renderDetailedCalendar(daily) {
@@ -1156,9 +1114,9 @@ function renderDetailedCalendar(daily) {
     year: "numeric",
   });
 
-  const withEntries = days.filter((d) => d.entry && !d.isFuture);
-  const totalSpend = withEntries.reduce((a, d) => a + (d.entry.total_spend || 0), 0);
-  const totalEarnings = withEntries.reduce((a, d) => a + (d.entry.total_earnings || 0), 0);
+  const populated = days.filter((d) => d.entry && !d.isFuture);
+  const totalSpend = populated.reduce((a, d) => a + (d.entry.total_spend || 0), 0);
+  const totalEarnings = populated.reduce((a, d) => a + (d.entry.total_earnings || 0), 0);
   const totalProfit = totalEarnings - totalSpend;
   const overallRoas = totalSpend > 0 ? totalEarnings / totalSpend : 0;
 
@@ -1170,7 +1128,7 @@ function renderDetailedCalendar(daily) {
   profitEl.classList.toggle("negative", totalProfit < 0);
   document.getElementById("summaryRoas").textContent = `${overallRoas.toFixed(2)}x`;
 
-  const maxAbs = Math.max(1, ...withEntries.map((d) => Math.abs((d.entry.total_earnings || 0) - (d.entry.total_spend || 0))));
+  const intensity = makeIntensity(populated.map((d) => Math.abs(dayProfit(d.entry))));
 
   const grid = document.getElementById("calendarGridDetailed");
   grid.innerHTML = "";
@@ -1184,23 +1142,23 @@ function renderDetailedCalendar(daily) {
   days.forEach(({ dateStr, day, isFuture, isToday, entry }, idx) => {
     const cell = document.createElement("div");
     cell.className = "cal-cell-detailed" + (isFuture ? " future" : "") + (isToday ? " today" : "");
-    cell.style.animationDelay = `${idx * 6}ms`;
-    cell.title = dateStr;
+    cell.style.animationDelay = `${idx * 5}ms`;
 
     if (entry && !isFuture) {
-      const profit = (entry.total_earnings || 0) - (entry.total_spend || 0);
+      const profit = dayProfit(entry);
       const sentiment = profit >= 0 ? "positive" : "negative";
-      const pct = Math.min(45, Math.round((Math.abs(profit) / maxAbs) * 45)) + 6;
-      cell.style.background = profit >= 0
-        ? `color-mix(in srgb, var(--profit) ${pct}%, var(--bg-2))`
-        : `color-mix(in srgb, var(--loss) ${pct}%, var(--bg-2))`;
+      const pct = intensity(profit);
+      cell.style.background =
+        profit >= 0
+          ? `color-mix(in srgb, var(--profit) ${pct}%, var(--bg-2))`
+          : `color-mix(in srgb, var(--loss) ${pct}%, var(--bg-2))`;
       cell.innerHTML = `
         <span class="cal-d-daynum">${day}</span>
-        <span class="cal-d-amount ${sentiment}">${signedMoney(profit)}</span>
-      `;
+        <span class="cal-d-amount ${sentiment}">${signedMoney(profit)}</span>`;
       cell.title = `${dateStr} — net profit ${signedMoney(profit)}`;
     } else {
       cell.innerHTML = `<span class="cal-d-daynum">${day}</span>`;
+      cell.title = dateStr;
     }
 
     grid.appendChild(cell);

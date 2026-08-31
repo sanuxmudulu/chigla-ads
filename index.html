@@ -158,8 +158,6 @@
       </div>
     </div>
   </nav>
-
-  <button class="icon-btn danger new-day-btn" id="newDayBtn">New Day</button>
 </aside>
 
 <!-- ============ TIKTOK ACCOUNTS MODAL ============ -->
@@ -198,34 +196,22 @@
   </div>
 </div>
 
-<!-- ============ NEW DAY PASSWORD MODAL ============ -->
-<div class="modal-backdrop" id="newDayModal">
-  <div class="modal">
-    <h3>Confirm New Day</h3>
-    <p>Enter the password to lock in current numbers as the new baseline. This can't be undone.</p>
-    <input type="password" id="newDayPasswordInput" placeholder="Password" autocomplete="off" />
-    <div class="modal-error" id="newDayModalError"></div>
-    <div class="modal-actions">
-      <button class="icon-btn" id="cancelNewDayBtn">Cancel</button>
-      <button class="icon-btn danger" id="confirmNewDayBtn">Confirm New Day</button>
-    </div>
-  </div>
-</div>
-
-<!-- ============ CALENDAR MODAL ============ -->
+<!-- ============ PROFIT CALENDAR MODAL ============ -->
 <div class="modal-backdrop" id="calendarModal">
-  <div class="modal modal-lg">
-    <div class="modal-header">
-      <h3>Profit Calendar — <span id="calendarModalMonthLabel"></span></h3>
-      <button id="closeCalendarModal">✕</button>
+  <div class="modal modal-cal">
+    <div class="cal-head">
+      <button class="cal-nav" id="calPrevMonth" title="Previous month">‹</button>
+      <h3 id="calendarModalMonthLabel"></h3>
+      <button class="cal-nav" id="calNextMonth" title="Next month">›</button>
+      <button class="cal-close" id="closeCalendarModal" title="Close">✕</button>
     </div>
-    <div class="calendar-summary-strip" id="calendarSummaryStrip">
+    <div class="calendar-summary-strip">
       <div class="summary-item">
-        <div class="summary-label">Total Spend</div>
+        <div class="summary-label">Spend</div>
         <div class="summary-value tabular" id="summarySpend">$0.00</div>
       </div>
       <div class="summary-item">
-        <div class="summary-label">Total Earnings</div>
+        <div class="summary-label">Earnings</div>
         <div class="summary-value tabular" id="summaryEarnings">$0.00</div>
       </div>
       <div class="summary-item">
@@ -233,7 +219,7 @@
         <div class="summary-value tabular" id="summaryProfit">$0.00</div>
       </div>
       <div class="summary-item">
-        <div class="summary-label">Overall ROAS</div>
+        <div class="summary-label">ROAS</div>
         <div class="summary-value tabular" id="summaryRoas">0.00x</div>
       </div>
     </div>

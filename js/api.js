@@ -1,7 +1,6 @@
-// Talks to the two real Netlify functions (glitchy-stats, reset-day) plus the
-// new daily-totals function, and caches the last successful result in
-// localStorage so the dashboard never has to render an empty state — even on
-// a fresh browser with no network yet.
+// Talks to the Netlify functions (glitchy-stats, daily-totals, tiktok-*) and
+// caches the last successful Glitchy result in localStorage so the dashboard
+// never has to render an empty state — even on a fresh browser with no network.
 
 const CACHE_KEY = "chigla_glitchy_cache_v1";
 const DAILY_CACHE_KEY = "chigla_daily_totals_cache_v1";
@@ -16,22 +15,6 @@ export async function fetchGlitchyStats(startDate, endDate) {
     throw err;
   }
   saveCache(startDate, endDate, data);
-  return data;
-}
-
-export async function postResetDay(password) {
-  const res = await fetch("/.netlify/functions/reset-day", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.error) {
-    const err = new Error(data.error || `Reset failed (${res.status})`);
-    err.status = res.status;
-    err.details = data.details;
-    throw err;
-  }
   return data;
 }
 

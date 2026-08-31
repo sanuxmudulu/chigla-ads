@@ -74,7 +74,9 @@ function getSupabase() {
   });
 }
 
-// Reuses the New Day password unless a dedicated one is set.
+// Dashboard admin password for TikTok write operations. Uses TIKTOK_ADMIN_PASSWORD
+// if set, otherwise falls back to the existing NEW_DAY_PASSWORD env var so no
+// Netlify config change is needed (the "New Day" feature itself is gone).
 function checkPassword(supplied) {
   const want = process.env.TIKTOK_ADMIN_PASSWORD || process.env.NEW_DAY_PASSWORD || null;
   if (!want) {

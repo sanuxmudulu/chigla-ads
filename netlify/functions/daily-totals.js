@@ -1,26 +1,23 @@
-// Backs the profit calendar heatmap. Reads/writes a `daily_totals` table in
-// Supabase (date, total_spend, total_earnings). TikTok spend isn't connected
-// yet, so total_spend stays 0 rather than an invented number — but
-// total_earnings for TODAY is always the real, session-aware Glitchy total
-// (same logic as glitchy-stats.js), upserted here before being read back.
+// Backs the Profit Calendar. Reads the `daily_totals` history table (one row
+// per EST calendar date) and returns the requested month with net profit and
+// ROAS derived per day. If the requested month contains today, today's row is
+// refreshed first so the calendar is current even on a stale tab.
+//
+// total_spend stays 0 until TikTok metrics are merged into the daily history —
+// so today net_profit == total_earnings and roas == 0, matching the KPI cards.
 
-const { createClient } = require("@supabase/supabase-js");
-const { todayEst, resolveSessionRange, summarizeWithBaseline } = require("./_shared/glitchy-session");
+const { todayEst, supabaseClient, fetchGlitchy, upsertTodayTotals } = require("./_shared/glitchy-daily");
 
 exports.handler = async function (event) {
   try {
-    const token = process.env.GLITCHY_TOKEN;
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
-
-    if (!supabaseUrl || !supabaseKey) {
+    const supabase = supabaseClient();
+    if (!supabase) {
       return {
         statusCode: 500,
         body: JSON.stringify({ error: "Missing SUPABASE_URL or SUPABASE_SERVICE_KEY env vars in Netlify." }),
       };
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey);
     const params = event.queryStringParameters || {};
     const today = todayEst();
     const month = params.month || today.slice(0, 7); // YYYY-MM
@@ -30,26 +27,14 @@ exports.handler = async function (event) {
     const lastDay = new Date(year, mon, 0).getDate();
     const monthEnd = `${month}-${String(lastDay).padStart(2, "0")}`;
 
-    // If today falls inside the requested month, refresh today's row with
-    // real figures before reading the month back.
+    // Keep today's row current if it falls inside the requested month.
+    const token = process.env.GLITCHY_TOKEN;
     if (token && today >= monthStart && today <= monthEnd) {
       try {
-        const summary = await fetchTodaySummary(token, supabase);
-        await supabase
-          .from("daily_totals")
-          .upsert(
-            {
-              date: today,
-              total_spend: 0,
-              total_earnings: summary.payout,
-              total_clicks: summary.clicks,
-              total_conversions: summary.conversions,
-            },
-            { onConflict: "date" }
-          );
+        const { entries } = await fetchGlitchy(token, today, today);
+        await upsertTodayTotals(supabase, entries);
       } catch (_) {
-        // Non-fatal — Glitchy hiccup shouldn't block the calendar from
-        // rendering whatever is already stored.
+        /* non-fatal — render whatever history is already stored */
       }
     }
 
@@ -57,7 +42,8 @@ exports.handler = async function (event) {
       .from("daily_totals")
       .select("*")
       .gte("date", monthStart)
-      .lte("date", monthEnd);
+      .lte("date", monthEnd)
+      .order("date", { ascending: true });
 
     if (error) {
       return { statusCode: 500, body: JSON.stringify({ error: "Supabase read failed", details: error.message }) };
@@ -67,13 +53,19 @@ exports.handler = async function (event) {
       statusCode: 200,
       body: JSON.stringify({
         month,
-        days: (rows || []).map((r) => ({
-          date: r.date,
-          total_spend: Number(r.total_spend),
-          total_earnings: Number(r.total_earnings),
-          total_clicks: Number(r.total_clicks || 0),
-          total_conversions: Number(r.total_conversions || 0),
-        })),
+        days: (rows || []).map((r) => {
+          const spend = Number(r.total_spend) || 0;
+          const earnings = Number(r.total_earnings) || 0;
+          return {
+            date: r.date,
+            total_spend: spend,
+            total_earnings: earnings,
+            total_clicks: Number(r.total_clicks || 0),
+            total_conversions: Number(r.total_conversions || 0),
+            net_profit: Math.round((earnings - spend) * 100) / 100,
+            roas: spend > 0 ? Math.round((earnings / spend) * 10000) / 10000 : 0,
+          };
+        }),
       }),
     };
   } catch (err) {
@@ -83,30 +75,3 @@ exports.handler = async function (event) {
     };
   }
 };
-
-// Sums today's real payout, clicks, and conversions across all sources, using
-// the same session-aware range + baseline correction glitchy-stats.js uses,
-// so these totals agree with the KPI strip on the main dashboard even
-// mid-session.
-async function fetchTodaySummary(token, supabase) {
-  const today = todayEst();
-  const session = await resolveSessionRange(supabase, today, today);
-
-  const url = `https://api.glitchy.com/v3/stats?rangeTypeValue=Today&startDate=${session.effectiveStartDate}&endDate=${session.effectiveEndDate}`;
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/json, text/plain, */*" },
-  });
-  if (!response.ok) throw new Error(`Glitchy responded ${response.status}`);
-
-  const data = await response.json();
-  const entries = Array.isArray(data) ? data : data.data || data.results || [data];
-
-  const bySource = summarizeWithBaseline(entries, session.baselineBySource, session.effectiveEndDate);
-  let payout = 0, clicks = 0, conversions = 0;
-  for (const src of Object.keys(bySource)) {
-    payout += bySource[src].payout;
-    clicks += bySource[src].clicks;
-    conversions += bySource[src].conversions;
-  }
-  return { payout: Math.round(payout * 100) / 100, clicks, conversions };
-}
