@@ -108,24 +108,24 @@ function sumEntriesForDate(entries, dateStr) {
   return { payout: Math.round(payout * 100) / 100, clicks, conversions };
 }
 
-// Upsert today's row in `daily_totals`. `total_spend` stays 0 until TikTok
-// metrics are merged into the daily history — same as the KPI cards.
+// Upsert today's row in `daily_totals`. Only the columns the base table is
+// guaranteed to have (date, total_spend, total_earnings, updated_at) — the
+// calendar derives net profit and ROAS from spend + earnings. `total_spend`
+// stays 0 until TikTok metrics are merged into the daily history.
 async function upsertTodayTotals(supabase, entries) {
   const today = todayEst();
-  const { payout, clicks, conversions } = sumEntriesForDate(entries, today);
+  const { payout } = sumEntriesForDate(entries, today);
   const { error } = await supabase.from("daily_totals").upsert(
     {
       date: today,
       total_spend: 0,
       total_earnings: payout,
-      total_clicks: clicks,
-      total_conversions: conversions,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "date" }
   );
   if (error) throw new Error(`daily_totals upsert failed: ${error.message}`);
-  return { date: today, total_earnings: payout, total_clicks: clicks, total_conversions: conversions };
+  return { date: today, total_earnings: payout };
 }
 
 module.exports = {
