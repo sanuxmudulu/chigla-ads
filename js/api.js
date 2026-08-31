@@ -84,11 +84,28 @@ export function loadDailyCache() {
 // Auth + advertiser discovery/selection. All token handling is server-side in
 // the tiktok-* Netlify functions — nothing sensitive is returned here.
 
+// Surfaces the function's `details` alongside `error` so failures are debuggable
+// from the dashboard instead of a bare "Request failed".
+async function readTiktokResponse(res, fallback) {
+  let data = {};
+  try {
+    data = await res.json();
+  } catch (_) {
+    data = {};
+  }
+  if (!res.ok || data.error) {
+    const msg = data.error || `${fallback} (${res.status})`;
+    const err = new Error(data.details ? `${msg} — ${data.details}` : msg);
+    err.status = res.status;
+    err.details = data.details;
+    throw err;
+  }
+  return data;
+}
+
 export async function fetchTiktokConnections() {
   const res = await fetch("/.netlify/functions/tiktok-connections");
-  const data = await res.json();
-  if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
-  return data; // { connections: [...], advertisers: [...] }
+  return readTiktokResponse(res, "Request failed"); // { connections: [...], advertisers: [...] }
 }
 
 export async function startTiktokAuth(password, label) {
@@ -97,14 +114,7 @@ export async function startTiktokAuth(password, label) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password, label }),
   });
-  const data = await res.json();
-  if (!res.ok || data.error) {
-    const err = new Error(data.error || `Failed (${res.status})`);
-    err.status = res.status;
-    err.details = data.details;
-    throw err;
-  }
-  return data; // { authorizeUrl }
+  return readTiktokResponse(res, "Auth start failed"); // { authorizeUrl }
 }
 
 export async function postTiktokAction(payload) {
@@ -113,14 +123,7 @@ export async function postTiktokAction(payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await res.json();
-  if (!res.ok || data.error) {
-    const err = new Error(data.error || `Failed (${res.status})`);
-    err.status = res.status;
-    err.details = data.details;
-    throw err;
-  }
-  return data;
+  return readTiktokResponse(res, "Request failed");
 }
 
 // ---------------- Theme persistence ----------------

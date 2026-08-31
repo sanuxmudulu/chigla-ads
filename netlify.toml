@@ -3,6 +3,8 @@
   publish = "."
 
 [build.environment]
-  # The tiktok-*.mjs functions use @modelcontextprotocol/sdk (needs Node >= 18)
-  # and are authored as ES modules.
-  NODE_VERSION = "20"
+  # Node 22 is required: @supabase/supabase-js (>= 2.49) needs a global WebSocket
+  # at createClient() time, which only exists on Node >= 22. This affects every
+  # function that builds a Supabase client (glitchy + tiktok). The tiktok-*.mjs
+  # functions additionally use @modelcontextprotocol/sdk and are ES modules.
+  NODE_VERSION = "22"
