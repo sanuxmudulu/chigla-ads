@@ -113,7 +113,7 @@ function sumEntriesForDate(entries, dateStr) {
 async function upsertTodayTotals(supabase, entries) {
   const today = todayEst();
   const { payout, clicks, conversions } = sumEntriesForDate(entries, today);
-  await supabase.from("daily_totals").upsert(
+  const { error } = await supabase.from("daily_totals").upsert(
     {
       date: today,
       total_spend: 0,
@@ -124,6 +124,7 @@ async function upsertTodayTotals(supabase, entries) {
     },
     { onConflict: "date" }
   );
+  if (error) throw new Error(`daily_totals upsert failed: ${error.message}`);
   return { date: today, total_earnings: payout, total_clicks: clicks, total_conversions: conversions };
 }
 

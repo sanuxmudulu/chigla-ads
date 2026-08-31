@@ -29,12 +29,13 @@ exports.handler = async function (event) {
 
     // Keep today's row current if it falls inside the requested month.
     const token = process.env.GLITCHY_TOKEN;
+    let refresh = null;
     if (token && today >= monthStart && today <= monthEnd) {
       try {
         const { entries } = await fetchGlitchy(token, today, today);
-        await upsertTodayTotals(supabase, entries);
-      } catch (_) {
-        /* non-fatal — render whatever history is already stored */
+        refresh = await upsertTodayTotals(supabase, entries);
+      } catch (err) {
+        refresh = { error: err.message }; // non-fatal — stored history still renders
       }
     }
 
@@ -53,6 +54,7 @@ exports.handler = async function (event) {
       statusCode: 200,
       body: JSON.stringify({
         month,
+        today_refresh: refresh,
         days: (rows || []).map((r) => {
           const spend = Number(r.total_spend) || 0;
           const earnings = Number(r.total_earnings) || 0;
