@@ -8,9 +8,12 @@ import {
   postTiktokAction,
   fetchTiktokCampaigns,
   syncTiktokCampaigns,
+  fetchCampaignAdGroups,
+  setCampaignStatus,
+  setAdgroupStatus,
 } from "./api.js";
 import { initTheme } from "./theme.js";
-import { createMainChart, createMiniChart } from "./charts.js";
+import { createMainChart } from "./charts.js";
 
 // ---------------------------------------------------------------------------
 // Fallback dataset — only ever used on a brand-new browser with no cache AND
@@ -50,6 +53,8 @@ const state = {
   sources: [],
   glitchyRows: [], // raw per-source rows from Glitchy (clicks/payout/conversions)
   tiktokCampaigns: [], // rows from tiktok-campaigns (campaign_name == source)
+  adGroupsByCampaign: {}, // campaign_id -> { loadedAt, rows, error }
+  pendingActions: new Set(), // in-flight campaign/adgroup writes (double-click guard)
   raw: [],
   chartSource: "__all__",
   hasFetchedOnce: false,
@@ -161,6 +166,20 @@ function wireEvents() {
   });
 
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
+    // Campaign pause/unpause button — must NOT toggle the row.
+    const campBtn = e.target.closest("[data-campaign-action]");
+    if (campBtn) {
+      e.stopPropagation();
+      handleCampaignAction(campBtn);
+      return;
+    }
+    // Ad group pause/unpause button inside an expanded row.
+    const agBtn = e.target.closest("[data-adgroup-action]");
+    if (agBtn) {
+      e.stopPropagation();
+      handleAdgroupAction(agBtn);
+      return;
+    }
     const row = e.target.closest("tr.source-row");
     if (!row) return;
     toggleRowExpand(row.dataset.source);
@@ -279,6 +298,9 @@ function rebuildSources(opts = {}) {
         : null,
       hasTiktok: !!tk,
       hasGlitchy: !!g,
+      campaignId: tk ? String(tk.campaign_id) : null,
+      campaignOpStatus: tk ? tk.campaign_operation_status || null : null, // ENABLE / DISABLE
+      advertiserName: tk ? tk.advertiser_name || null : null,
     };
   });
 
@@ -369,41 +391,207 @@ function renderTable(newConversionSources) {
       <td class="num">${money(s.payout)}</td>
       <td class="num">${money(s.epc)}</td>
       <td class="num ${s.roas >= 1 ? "positive" : "negative"}">${s.roas.toFixed(2)}x</td>
+      <td class="action-cell">${campaignActionButton(s)}</td>
     `;
     tbody.appendChild(tr);
 
     const detailTr = document.createElement("tr");
     detailTr.className = "row-detail";
-    detailTr.innerHTML = `<td colspan="10"><div class="row-detail-inner"><canvas id="mini_${cssSafeId(s.source)}" height="120"></canvas></div></td>`;
+    detailTr.innerHTML = `<td colspan="11"><div class="row-detail-inner"><div class="adgroups-panel" data-adgroups-for="${escapeHtml(s.campaignId || "")}"></div></div></td>`;
     tbody.appendChild(detailTr);
 
     if (state.expandedSources.has(s.source)) {
       tr.classList.add("expanded");
-      requestAnimationFrame(() => renderMiniChart(s.source));
+      requestAnimationFrame(() => renderAdGroupsPanel(s));
     }
   });
+}
+
+// Compact Pause / Unpause control for the campaign row. Only for rows backed by
+// a tracked TikTok campaign.
+function campaignActionButton(s) {
+  if (!s.hasTiktok || !s.campaignId) return "";
+  const op = String(s.campaignOpStatus || "").toUpperCase();
+  const paused = op === "DISABLE";
+  const label = paused ? "Unpause" : "Pause";
+  const pending = state.pendingActions.has(`c:${s.campaignId}`);
+  return `<button class="mini-action ${paused ? "resume" : "pause"}" data-campaign-action="${paused ? "ENABLE" : "DISABLE"}" data-campaign-id="${escapeHtml(s.campaignId)}" ${pending ? "disabled" : ""}>${pending ? "…" : label}</button>`;
 }
 
 function toggleRowExpand(source) {
   const tr = document.querySelector(`tr.source-row[data-source="${cssEscapeAttr(source)}"]`);
   if (!tr) return;
   const isOpen = tr.classList.toggle("expanded");
+  const s = state.sources.find((x) => x.source === source);
   if (isOpen) {
     state.expandedSources.add(source);
-    // Chart.js measures its container at creation time — wait for the
-    // row-detail-inner max-height transition (0.35s, see base.css) to
-    // finish, otherwise it sizes itself against a still-collapsed box.
-    setTimeout(() => renderMiniChart(source), 380);
+    if (s) renderAdGroupsPanel(s);
   } else {
     state.expandedSources.delete(source);
   }
 }
 
-function renderMiniChart(source) {
-  const canvas = document.getElementById(`mini_${cssSafeId(source)}`);
-  if (!canvas) return;
-  const { hours, values } = hourlyPayoutForSource(source);
-  createMiniChart(canvas, source, hours, values, "--profit");
+// ---- expanded ad-group panel (lazy-loaded from TikTok MCP) ----
+
+function panelEl(campaignId) {
+  return document.querySelector(`.adgroups-panel[data-adgroups-for="${cssEscapeAttr(campaignId || "")}"]`);
+}
+
+async function renderAdGroupsPanel(s, { force } = {}) {
+  const panel = panelEl(s.campaignId);
+  if (!panel) return;
+
+  if (!s.hasTiktok || !s.campaignId) {
+    panel.innerHTML = `<div class="adgroups-empty">No tracked TikTok campaign for this source — ad groups come from TikTok only.</div>`;
+    return;
+  }
+
+  const cached = state.adGroupsByCampaign[s.campaignId];
+  const fresh = cached && Date.now() - cached.loadedAt < 60000 && !force;
+  if (fresh && cached.rows) {
+    paintAdGroups(panel, s, cached.rows);
+    return;
+  }
+  if (cached && cached.error && !force) {
+    panel.innerHTML = `<div class="adgroups-error">Couldn't load ad groups: ${escapeHtml(cached.error)}</div>`;
+    return;
+  }
+
+  panel.innerHTML = `<div class="adgroups-loading">Loading ad groups…</div>`;
+  try {
+    const res = await fetchCampaignAdGroups(s.campaignId);
+    state.adGroupsByCampaign[s.campaignId] = { loadedAt: Date.now(), rows: res.adgroups || [] };
+    applyCampaignStatusResult(res); // keep the row status in sync with the live read
+    const s2 = state.sources.find((x) => x.campaignId === s.campaignId) || s;
+    const panel2 = panelEl(s.campaignId);
+    if (panel2) paintAdGroups(panel2, s2, res.adgroups || []);
+  } catch (err) {
+    state.adGroupsByCampaign[s.campaignId] = { loadedAt: Date.now(), error: err.message };
+    const p = panelEl(s.campaignId);
+    if (p) p.innerHTML = `<div class="adgroups-error">Couldn't load ad groups: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function paintAdGroups(panel, s, rows) {
+  if (!rows.length) {
+    panel.innerHTML = `<div class="adgroups-empty">This campaign has no ad groups.</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <table class="adgroups-table">
+      <thead>
+        <tr><th>Ad group</th><th>Status</th><th class="num">Spend</th><th class="num">CPA</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        ${rows.map((g) => adGroupRowHtml(s.campaignId, g)).join("")}
+      </tbody>
+    </table>
+    <div class="adgroups-foot">TikTok · today only · CPA = cost per conversion</div>`;
+}
+
+function adGroupRowHtml(campaignId, g) {
+  const paused = String(g.operation_status || "").toUpperCase() === "DISABLE";
+  const label = paused ? "Unpause" : "Pause";
+  const key = `g:${g.adgroup_id}`;
+  const pending = state.pendingActions.has(key);
+  return `
+    <tr data-adgroup-row="${escapeHtml(g.adgroup_id)}">
+      <td>
+        <div class="ag-name">${escapeHtml(g.adgroup_name || g.adgroup_id)}</div>
+        <div class="ag-id">${escapeHtml(g.adgroup_id)}</div>
+      </td>
+      <td><span class="status-badge ${["good", "warn", "bad", "neutral"].includes(g.status_tone) ? g.status_tone : "neutral"}">${escapeHtml(g.status_label || "—")}</span></td>
+      <td class="num">${money(g.spend)}</td>
+      <td class="num">${money(g.cpa)}</td>
+      <td>
+        <button class="mini-action ${paused ? "resume" : "pause"}" data-adgroup-action="${paused ? "ENABLE" : "DISABLE"}" data-campaign-id="${escapeHtml(campaignId)}" data-adgroup-id="${escapeHtml(g.adgroup_id)}" ${pending ? "disabled" : ""}>${pending ? "…" : label}</button>
+      </td>
+    </tr>`;
+}
+
+// Merge a { campaign_id, campaign_operation_status, effective_status, ... }
+// result from the backend into the stored campaign + re-render its row/panel.
+function applyCampaignStatusResult(res) {
+  if (!res || !res.campaign_id) return;
+  const tk = state.tiktokCampaigns.find((c) => String(c.campaign_id) === String(res.campaign_id));
+  if (tk) {
+    if (res.campaign_operation_status !== undefined) tk.campaign_operation_status = res.campaign_operation_status;
+    if (res.effective_status) tk.effective_status = res.effective_status;
+    if (res.effective_tone) tk.effective_tone = res.effective_tone;
+    if (res.status_detail !== undefined) tk.status_detail = res.status_detail;
+  }
+  if (Array.isArray(res.adgroups)) {
+    state.adGroupsByCampaign[String(res.campaign_id)] = { loadedAt: Date.now(), rows: res.adgroups };
+  }
+  rebuildSources();
+  // rebuildSources -> renderTable rebuilds rows; re-open panels that were expanded.
+  for (const s of state.sources) {
+    if (state.expandedSources.has(s.source)) {
+      const cached = state.adGroupsByCampaign[s.campaignId];
+      const panel = panelEl(s.campaignId);
+      if (panel && cached && cached.rows) paintAdGroups(panel, s, cached.rows);
+    }
+  }
+}
+
+// ---- campaign / ad group pause-unpause writes ----
+
+async function handleCampaignAction(btn) {
+  const campaignId = btn.dataset.campaignId;
+  const targetOp = btn.dataset.campaignAction; // ENABLE | DISABLE
+  const key = `c:${campaignId}`;
+  if (state.pendingActions.has(key)) return;
+  state.pendingActions.add(key);
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const outcome = await withTiktokPassword(
+      {
+        title: targetOp === "DISABLE" ? "Pause campaign" : "Enable campaign",
+        hint: "Enter the dashboard password to change this TikTok campaign.",
+      },
+      (password) => setCampaignStatus(password, campaignId, targetOp)
+    );
+    if (outcome && !outcome.cancelled) {
+      applyCampaignStatusResult(outcome.result);
+      setStatus(`Campaign ${targetOp === "DISABLE" ? "paused" : "enabled"} — now “${outcome.result.effective_status}”.`);
+    }
+  } catch (err) {
+    setStatus(`Campaign update failed: ${err.message}`, true);
+  } finally {
+    state.pendingActions.delete(key);
+    rebuildSources();
+  }
+}
+
+async function handleAdgroupAction(btn) {
+  const campaignId = btn.dataset.campaignId;
+  const adgroupId = btn.dataset.adgroupId;
+  const targetOp = btn.dataset.adgroupAction;
+  const key = `g:${adgroupId}`;
+  if (state.pendingActions.has(key)) return;
+  state.pendingActions.add(key);
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const outcome = await withTiktokPassword(
+      {
+        title: targetOp === "DISABLE" ? "Pause ad group" : "Unpause ad group",
+        hint: "Enter the dashboard password to change this ad group.",
+      },
+      (password) => setAdgroupStatus(password, campaignId, adgroupId, targetOp)
+    );
+    if (outcome && !outcome.cancelled) {
+      applyCampaignStatusResult(outcome.result);
+      setStatus(`Ad group ${targetOp === "DISABLE" ? "paused" : "unpaused"}.`);
+    }
+  } catch (err) {
+    setStatus(`Ad group update failed: ${err.message}`, true);
+    const s = state.sources.find((x) => x.campaignId === campaignId);
+    if (s) renderAdGroupsPanel(s, { force: true });
+  } finally {
+    state.pendingActions.delete(key);
+  }
 }
 
 // Real per-source hourly payout, derived from the raw Glitchy entries the

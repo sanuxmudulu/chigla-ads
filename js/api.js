@@ -142,6 +142,42 @@ export async function syncTiktokCampaigns(password) {
   return readTiktokResponse(res, "Campaign sync failed");
 }
 
+// Lazy: one campaign's ad groups + today's spend/CPA + status. Read-only.
+export async function fetchCampaignAdGroups(campaignId) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "adgroups", campaign_id: campaignId }),
+  });
+  return readTiktokResponse(res, "Couldn't load ad groups");
+}
+
+// Write: pause / enable a whole campaign.
+export async function setCampaignStatus(password, campaignId, operationStatus) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password, action: "set_campaign_status", campaign_id: campaignId, operation_status: operationStatus }),
+  });
+  return readTiktokResponse(res, "Campaign update failed");
+}
+
+// Write: pause / enable one ad group.
+export async function setAdgroupStatus(password, campaignId, adgroupId, operationStatus) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      password,
+      action: "set_adgroup_status",
+      campaign_id: campaignId,
+      adgroup_id: adgroupId,
+      operation_status: operationStatus,
+    }),
+  });
+  return readTiktokResponse(res, "Ad group update failed");
+}
+
 // ---------------- Theme persistence ----------------
 
 export function loadTheme(defaultTheme) {

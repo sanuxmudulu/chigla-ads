@@ -384,26 +384,39 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
 // ---------------------------------------------------------------------------
 // Effective campaign status
 //
-// The TikTok status vocabulary is large and can change, so this classifies by
-// KEYWORD on the raw status strings rather than matching an exact enum. Real
-// samples seen from the API: campaign `CAMPAIGN_STATUS_DISABLE`, ad
-// `AD_STATUS_CAMPAIGN_DISABLE` / `AD_STATUS_DELIVERY_OK` / `AD_STATUS_AUDIT` /
-// `AD_STATUS_AUDIT_DENY`, ad group `ADGROUP_STATUS_CAMPAIGN_DISABLE`, advertiser
-// `STATUS_ENABLE` / `STATUS_LIMIT`. `ad/review_info` gives is_approved +
-// review_status (`ALL_AVAILABLE` / `PART_AVAILABLE` / `UNAVAILABLE`).
+// The authoritative CURRENT state comes from the live `secondary_status` /
+// `operation_status` fields on the ad group (`/adgroup/get/`) and campaign
+// (`/campaign/get/`). `/adgroup/review_info/` is used ONLY for review facts
+// that are themselves current — `contains_rejected_ads` and `appeal_status` —
+// never as a standalone "was once rejected" trigger, so a historical
+// rejection that has since been appealed and approved does NOT keep the row
+// marked Rejected.
+//
+// Real samples: campaign `CAMPAIGN_STATUS_DISABLE` / `CAMPAIGN_STATUS_BUDGET_EXCEED`
+// / `ADVERTISER_ACCOUNT_PUNISH`; ad group `ADGROUP_STATUS_CAMPAIGN_DISABLE` /
+// `ADGROUP_STATUS_DELIVERY_OK` / `ADGROUP_STATUS_DISABLE` / `ADGROUP_STATUS_AUDIT`;
+// advertiser `STATUS_ENABLE` / `STATUS_LIMIT`. adgroup/review_info gives
+// `is_approved`, `review_status` (`ALL_AVAILABLE`/`PART_AVAILABLE`/`UNAVAILABLE`),
+// `contains_rejected_ads` (bool), `appeal_status` (`NOT_APPEALED` / appeal states).
 // ---------------------------------------------------------------------------
 
 function accountHealthy(raw) {
-  return String(raw || "").toUpperCase() === "STATUS_ENABLE";
+  const s = String(raw || "").toUpperCase();
+  return s === "" || s === "STATUS_ENABLE";
 }
 
-// Maps one ad's raw delivery status to a coarse bucket.
-function classifyAdDelivery(raw) {
+function accountLooksPunished(campaignSecondary) {
+  const s = String(campaignSecondary || "").toUpperCase();
+  return s.includes("ADVERTISER") || s.includes("ACCOUNT") || s.includes("PUNISH");
+}
+
+// Coarse bucket for one ad group's CURRENT operating status.
+function classifyDelivery(raw) {
   const s = String(raw || "").toUpperCase();
   if (!s) return "unknown";
-  if (s.includes("DELIVERY_OK") || s.endsWith("_OK") || s.includes("DELIVERING")) return "active";
   if (s.includes("DENY") || s.includes("REJECT") || s.includes("DISAPPROV") || s.includes("NOT_APPROV"))
     return "rejected";
+  if (s.includes("DELIVERY_OK") || s.endsWith("_OK") || s.includes("DELIVERING")) return "active";
   if (s.includes("AUDIT") || s.includes("REVIEW") || s.includes("PENDING") || s.includes("CHECKING"))
     return "in_review";
   if (s.includes("NOT_START") || s.includes("NOT_YET") || s.includes("SCHEDULE")) return "scheduled";
@@ -412,12 +425,10 @@ function classifyAdDelivery(raw) {
   if (s.includes("DONE") || s.includes("FINISH") || s.includes("COMPLETE") || s.includes("EXPIR"))
     return "done";
   if (s.includes("CAMPAIGN_DISABLE") || s.includes("CAMPAIGN_PAUSE")) return "campaign_paused";
-  if (s.includes("ADGROUP_DISABLE") || s.includes("AD_GROUP_DISABLE") || s.includes("ADGROUP_PAUSE"))
-    return "adgroup_paused";
-  if (s.includes("ADVERTISER") || s.includes("ACCOUNT") || s.includes("FROZEN") || s.includes("PUNISH") || s.includes("LIMIT"))
+  if (s.includes("ADVERTISER") || s.includes("ACCOUNT") || s.includes("PUNISH") || s.includes("FROZEN") || s.includes("LIMIT"))
     return "account";
   if (s.includes("DELETE")) return "deleted";
-  if (s.includes("DISABLE") || s.includes("PAUSE")) return "ad_paused";
+  if (s.includes("DISABLE") || s.includes("PAUSE")) return "paused"; // ad group / ad paused
   return "other";
 }
 
@@ -431,33 +442,53 @@ function humanizeStatus(raw) {
     .join(" ");
 }
 
-// Derives ONE display status for a campaign row from the advertiser status, the
-// campaign status, and every ad's status/review. Follows the priority the
-// dashboard owner asked for: account > rejected > in review > active > ...
-// A few individually-paused ad groups do NOT make the row "Paused" as long as
-// at least one copy of the ad is still delivering.
-function deriveEffectiveStatus({ advertiserStatus, campaign, ads, reviewByAdId }) {
-  if (!accountHealthy(advertiserStatus)) {
+// Is this ad group CURRENTLY rejected / in review, per its own review record?
+// `review` is one entry from adgroup/review_info's `ad_group_review_map`.
+function reviewState(review) {
+  if (!review) return null;
+  const rs = String(review.review_status || "").toUpperCase();
+  const appeal = String(review.appeal_status || "").toUpperCase();
+
+  const appealPending =
+    appeal.includes("PENDING") || appeal.includes("PROCESSING") || appeal.includes("APPEALING") || appeal.includes("IN_REVIEW");
+  if (appealPending) return "in_review";
+
+  const currentlyRejected =
+    review.contains_rejected_ads === true ||
+    (review.is_approved === false && (rs.includes("UNAVAILABLE") || rs === "" ));
+  if (currentlyRejected) return "rejected";
+
+  if (rs.includes("AUDIT") || rs.includes("REVIEW") || rs.includes("PENDING") || rs.includes("CHECKING"))
+    return "in_review";
+
+  return null; // approved / not a review problem -> defer to delivery status
+}
+
+// Derives ONE display status for a campaign row. Priority (as specified):
+//   1. account suspended/limited/punished
+//   2. an ad currently rejected (and not since re-approved / not mid-appeal)
+//   3. an ad currently pending / in review / mid-appeal
+//   4. campaign active with >= 1 delivering ad copy
+//   5. scheduled / out of budget
+//   6. whole campaign manually paused
+//   7. all ad groups individually paused (campaign itself not paused)
+// A few manually-paused ad groups never hide an "Active" row.
+function deriveEffectiveStatus({ advertiserStatus, campaign, adGroups, reviewByAdGroupId }) {
+  const campSecondary = campaign?.secondary_status || "";
+  if (!accountHealthy(advertiserStatus) || accountLooksPunished(campSecondary)) {
     const s = String(advertiserStatus || "").toUpperCase();
-    if (s.includes("PENDING") || s.includes("AUDIT") || s.includes("CONFIRM") || s.includes("UNAUDITED") || s.includes("VERIF"))
-      return { label: "Account Pending", tone: "warn", detail: advertiserStatus || null };
-    return { label: "Account Suspended", tone: "bad", detail: advertiserStatus || null };
+    if (s.includes("PENDING") || s.includes("CONFIRM") || s.includes("UNAUDITED") || s.includes("VERIF"))
+      return { label: "Account Pending", tone: "warn", detail: advertiserStatus || campSecondary || null };
+    return { label: "Account Suspended", tone: "bad", detail: advertiserStatus || campSecondary || null };
   }
 
-  const list = ads || [];
-  let rejectReason = null;
-
-  const classes = list.map((ad) => {
-    const rev = reviewByAdId ? reviewByAdId[String(ad.ad_id)] : null;
-    if (rev) {
-      const rs = String(rev.review_status || "").toUpperCase();
-      if (rev.is_approved === false || rs.includes("UNAVAILABLE")) {
-        if (!rejectReason) rejectReason = extractRejectReason(rev);
-        return "rejected";
-      }
-      if (rs.includes("REVIEW") || rs.includes("AUDIT") || rs.includes("PENDING")) return "in_review";
-    }
-    return classifyAdDelivery(ad.secondary_status || ad.operation_status);
+  const list = adGroups || [];
+  const classes = list.map((ag) => {
+    const rv = reviewState(reviewByAdGroupId ? reviewByAdGroupId[String(ag.adgroup_id)] : null);
+    if (rv) return rv;
+    // Manual pause on this ad group takes precedence over its (masked) secondary status.
+    if (String(ag.operation_status || "").toUpperCase() === "DISABLE") return "paused";
+    return classifyDelivery(ag.secondary_status || ag.operation_status);
   });
 
   const n = (c) => classes.filter((x) => x === c).length;
@@ -466,28 +497,21 @@ function deriveEffectiveStatus({ advertiserStatus, campaign, ads, reviewByAdId }
 
   if (total > 0) {
     if (n("rejected") > 0)
-      return { label: "Rejected", tone: "bad", detail: rejectReason || "One or more ads were not approved", activeAdCount };
+      return { label: "Rejected", tone: "bad", detail: "One or more ads are currently not approved", activeAdCount };
     if (n("in_review") > 0)
       return { label: "In Review", tone: "warn", detail: null, activeAdCount };
-    if (activeAdCount > 0)
-      return { label: "Active", tone: "good", detail: null, activeAdCount };
-    if (n("scheduled") > 0)
-      return { label: "Scheduled", tone: "neutral", detail: null, activeAdCount };
-    if (n("budget") > 0)
-      return { label: "Out of Budget", tone: "warn", detail: null, activeAdCount };
+    if (activeAdCount > 0) return { label: "Active", tone: "good", detail: null, activeAdCount };
+    if (n("scheduled") > 0) return { label: "Scheduled", tone: "neutral", detail: null, activeAdCount };
+    if (n("budget") > 0) return { label: "Out of Budget", tone: "warn", detail: null, activeAdCount };
     if (n("campaign_paused") === total)
       return { label: "Paused", tone: "neutral", detail: "Campaign paused", activeAdCount };
-    if (n("adgroup_paused") > 0 && n("campaign_paused") === 0)
+    if (n("paused") > 0 && n("campaign_paused") === 0)
       return { label: "Ad Groups Paused", tone: "warn", detail: "All ad groups are paused", activeAdCount };
-    if (n("ad_paused") > 0 && n("campaign_paused") === 0)
-      return { label: "Ads Paused", tone: "warn", detail: null, activeAdCount };
-    if (n("done") > 0)
-      return { label: "Completed", tone: "neutral", detail: null, activeAdCount };
-    if (n("deleted") === total)
-      return { label: "Deleted", tone: "bad", detail: null, activeAdCount };
+    if (n("done") === total) return { label: "Completed", tone: "neutral", detail: null, activeAdCount };
+    if (n("deleted") === total) return { label: "Deleted", tone: "bad", detail: null, activeAdCount };
   }
 
-  const camp = String(campaign?.secondary_status || campaign?.operation_status || "").toUpperCase();
+  const camp = String(campSecondary || campaign?.operation_status || "").toUpperCase();
   if (camp.includes("DELETE")) return { label: "Deleted", tone: "bad", detail: null, activeAdCount };
   if (camp.includes("BUDGET") || camp.includes("EXCEED"))
     return { label: "Out of Budget", tone: "warn", detail: null, activeAdCount };
@@ -498,15 +522,38 @@ function deriveEffectiveStatus({ advertiserStatus, campaign, ads, reviewByAdId }
   return { label: humanizeStatus(camp) || "Unknown", tone: "neutral", detail: null, activeAdCount };
 }
 
-function extractRejectReason(rev) {
-  const infos = rev.reject_info || rev.audit_result || [];
-  const arr = Array.isArray(infos) ? infos : [infos];
-  for (const it of arr) {
-    if (!it) continue;
-    const r = it.reason || it.description || it.reject_reason || it.message || it.suggestion;
-    if (r) return String(r).slice(0, 240);
+// Per-ad-group display status for the expanded sub-rows. Manual pause wins;
+// otherwise use current review state, then the live secondary status.
+function deriveAdGroupStatus(adGroup, review) {
+  const op = String(adGroup.operation_status || "").toUpperCase();
+  const rv = reviewState(review);
+  if (rv === "rejected") return { label: "Rejected", tone: "bad" };
+  if (rv === "in_review") return { label: "In Review", tone: "warn" };
+  if (op === "DISABLE") return { label: "Paused", tone: "neutral" };
+  switch (classifyDelivery(adGroup.secondary_status || adGroup.operation_status)) {
+    case "active":
+      return { label: "Active", tone: "good" };
+    case "in_review":
+      return { label: "In Review", tone: "warn" };
+    case "rejected":
+      return { label: "Rejected", tone: "bad" };
+    case "scheduled":
+      return { label: "Scheduled", tone: "neutral" };
+    case "budget":
+      return { label: "Out of Budget", tone: "warn" };
+    case "campaign_paused":
+      return { label: "Campaign Paused", tone: "neutral" };
+    case "paused":
+      return { label: "Paused", tone: "neutral" };
+    case "account":
+      return { label: "Account Suspended", tone: "bad" };
+    case "done":
+      return { label: "Completed", tone: "neutral" };
+    case "deleted":
+      return { label: "Deleted", tone: "bad" };
+    default:
+      return { label: humanizeStatus(adGroup.secondary_status) || "Unknown", tone: "neutral" };
   }
-  return null;
 }
 
 const CAMPAIGN_FIELDS = [
@@ -520,10 +567,50 @@ const CAMPAIGN_FIELDS = [
   "create_time",
 ];
 
-// Discovers TODAY's live campaigns (all non-deleted campaigns) inside the
-// tracked advertiser accounts under one connection, derives an effective
-// status for each, and upserts them into tiktok_campaigns. Reuses a single
-// MCP client for every advertiser in the connection.
+const ADGROUP_STATUS_FIELDS = [
+  "adgroup_id",
+  "adgroup_name",
+  "campaign_id",
+  "operation_status",
+  "secondary_status",
+];
+
+// Pulls every ad group + its current review record for one advertiser, grouped
+// by campaign id. One adgroup/review_info call per 20 ad groups.
+async function loadAdGroupsForAdvertiser(client, advertiserId) {
+  const res = await mcpCall(client, "adgroup_get", {
+    advertiser_id: advertiserId,
+    fields: ADGROUP_STATUS_FIELDS,
+    page_size: 1000,
+  });
+  const adGroups = res?.list || [];
+  const ids = adGroups.map((g) => String(g.adgroup_id)).filter(Boolean);
+
+  const reviewByAdGroupId = {};
+  for (let i = 0; i < ids.length; i += 20) {
+    try {
+      const rev = await mcpCall(client, "adgroup_review_info_get", {
+        advertiser_id: advertiserId,
+        adgroup_ids: ids.slice(i, i + 20),
+      });
+      Object.assign(reviewByAdGroupId, rev?.ad_group_review_map || {});
+    } catch {
+      /* review lookup is best-effort */
+    }
+  }
+
+  const byCampaign = {};
+  for (const g of adGroups) {
+    const cid = String(g.campaign_id);
+    (byCampaign[cid] = byCampaign[cid] || []).push(g);
+  }
+  return { byCampaign, reviewByAdGroupId };
+}
+
+// Discovers current campaigns (all non-deleted) inside the tracked advertiser
+// accounts under one connection, derives an effective status for each from the
+// CURRENT ad group + review state, and upserts them into tiktok_campaigns.
+// Reuses a single MCP client for every advertiser in the connection.
 async function discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers }) {
   const now = new Date().toISOString();
   const rows = [];
@@ -540,46 +627,22 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
       });
       const campaigns = campRes?.list || [];
 
-      let ads = [];
+      let byCampaign = {};
+      let reviewByAdGroupId = {};
       try {
-        const adRes = await mcpCall(client, "ad_get", {
-          advertiser_id: advId,
-          fields: ["ad_id", "ad_name", "adgroup_id", "campaign_id", "operation_status", "secondary_status"],
-          page_size: 1000,
-        });
-        ads = adRes?.list || [];
+        ({ byCampaign, reviewByAdGroupId } = await loadAdGroupsForAdvertiser(client, advId));
       } catch {
-        ads = [];
-      }
-
-      const adIds = ads.map((a) => String(a.ad_id)).filter(Boolean);
-      const reviewByAdId = {};
-      for (let i = 0; i < adIds.length; i += 100) {
-        try {
-          const rev = await mcpCall(client, "ad_review_info_get", {
-            advertiser_id: advId,
-            ad_ids: adIds.slice(i, i + 100),
-          });
-          Object.assign(reviewByAdId, rev?.ad_review_map || {});
-        } catch {
-          /* review lookup is best-effort */
-        }
-      }
-
-      const adsByCampaign = {};
-      for (const ad of ads) {
-        const cid = String(ad.campaign_id);
-        (adsByCampaign[cid] = adsByCampaign[cid] || []).push(ad);
+        /* fall back to campaign-level status only */
       }
 
       for (const campaign of campaigns) {
         const cid = String(campaign.campaign_id);
-        const campAds = adsByCampaign[cid] || [];
+        const campAdGroups = byCampaign[cid] || [];
         const eff = deriveEffectiveStatus({
           advertiserStatus: adv.status,
           campaign,
-          ads: campAds,
-          reviewByAdId,
+          adGroups: campAdGroups,
+          reviewByAdGroupId,
         });
         seenCampaignIds.push(cid);
         rows.push({
@@ -596,7 +659,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
           effective_status: eff.label,
           effective_tone: eff.tone,
           status_detail: eff.detail || null,
-          ad_count: campAds.length,
+          ad_count: campAdGroups.length,
           active_ad_count: eff.activeAdCount || 0,
           create_time: parseTikTokTime(campaign.create_time),
           updated_at: now,
@@ -632,6 +695,172 @@ function parseTikTokTime(raw) {
   return isNaN(d) ? null : d.toISOString();
 }
 
+// YYYY-MM-DD "today" in a given IANA timezone (report_integrated_get interprets
+// its date range in the ad account's timezone). Falls back to America/New_York.
+function localToday(tzName) {
+  const tz = tzName || "America/New_York";
+  try {
+    const p = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    return p; // en-CA formats as YYYY-MM-DD
+  } catch {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+  }
+}
+
+const num = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+// TikTok's CPA for this business == cost per optimization conversion (the
+// instant-form / instant-page completion). `cost_per_result` is a fallback for
+// campaigns whose "result" event is configured; last resort spend/conversion.
+function tiktokCpa(m) {
+  const cpc = num(m.cost_per_conversion);
+  if (cpc > 0) return cpc;
+  const cpr = num(m.cost_per_result);
+  if (cpr > 0) return cpr;
+  const conv = num(m.conversion) || num(m.result);
+  const spend = num(m.spend);
+  return conv > 0 ? spend / conv : 0;
+}
+
+// -------- lazy: one campaign's live detail (row status + ad groups + today) --
+// Verifies nothing — the caller must confirm the campaign belongs to a tracked
+// advertiser first. Returns the freshly-derived campaign status AND the ad
+// group sub-rows (name/id/status/today's spend/today's CPA/operation_status).
+async function loadCampaignDetail({ client, advertiserId, advertiserStatus, campaignId, timezone }) {
+  let campaign = null;
+  try {
+    const cRes = await mcpCall(client, "campaign_get", {
+      advertiser_id: advertiserId,
+      fields: CAMPAIGN_FIELDS,
+      filtering: { campaign_ids: [String(campaignId)] },
+    });
+    campaign = (cRes?.list || []).find((c) => String(c.campaign_id) === String(campaignId)) || null;
+  } catch {
+    /* keep going with ad-group data only */
+  }
+
+  const gRes = await mcpCall(client, "adgroup_get", {
+    advertiser_id: advertiserId,
+    fields: ADGROUP_STATUS_FIELDS,
+    filtering: { campaign_ids: [String(campaignId)] },
+    page_size: 1000,
+  });
+  const adGroups = (gRes?.list || []).filter((g) => String(g.campaign_id) === String(campaignId));
+  const ids = adGroups.map((g) => String(g.adgroup_id));
+
+  const reviewById = {};
+  for (let i = 0; i < ids.length; i += 20) {
+    try {
+      const rev = await mcpCall(client, "adgroup_review_info_get", {
+        advertiser_id: advertiserId,
+        adgroup_ids: ids.slice(i, i + 20),
+      });
+      Object.assign(reviewById, rev?.ad_group_review_map || {});
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  const metricsById = {};
+  if (ids.length) {
+    const today = localToday(timezone);
+    try {
+      const rep = await mcpCall(client, "report_integrated_get", {
+        report_type: "BASIC",
+        service_type: "AUCTION",
+        data_level: "AUCTION_ADGROUP",
+        advertiser_id: advertiserId,
+        dimensions: ["adgroup_id"],
+        metrics: ["spend", "conversion", "cost_per_conversion", "result", "cost_per_result", "impressions", "clicks"],
+        start_date: today,
+        end_date: today,
+        filtering: [{ field_name: "campaign_ids", filter_type: "IN", filter_value: JSON.stringify([String(campaignId)]) }],
+        page_size: 1000,
+      });
+      for (const row of rep?.list || []) {
+        const id = String(row.dimensions?.adgroup_id || "");
+        if (id) metricsById[id] = row.metrics || {};
+      }
+    } catch {
+      /* metrics best-effort — rows still render with 0 */
+    }
+  }
+
+  const eff = deriveEffectiveStatus({
+    advertiserStatus,
+    campaign: campaign || {},
+    adGroups,
+    reviewByAdGroupId: reviewById,
+  });
+
+  const rows = adGroups.map((g) => {
+    const id = String(g.adgroup_id);
+    const m = metricsById[id] || {};
+    const st = deriveAdGroupStatus(g, reviewById[id]);
+    return {
+      adgroup_id: id,
+      adgroup_name: g.adgroup_name || id,
+      operation_status: g.operation_status || null, // ENABLE / DISABLE -> button label
+      status_label: st.label,
+      status_tone: st.tone,
+      spend: num(m.spend),
+      cpa: tiktokCpa(m),
+      conversions: num(m.conversion) || num(m.result),
+      impressions: num(m.impressions),
+      clicks: num(m.clicks),
+    };
+  });
+
+  return {
+    campaign_operation_status: campaign?.operation_status || null,
+    campaign_secondary_status: campaign?.secondary_status || null,
+    effective_status: eff.label,
+    effective_tone: eff.tone,
+    status_detail: eff.detail || null,
+    ad_count: adGroups.length,
+    active_ad_count: eff.activeAdCount || 0,
+    adGroups: rows,
+  };
+}
+
+// -------- writes --------
+
+async function setCampaignStatus({ client, advertiserId, campaignId, operationStatus }) {
+  await mcpCall(client, "campaign_status_update", {
+    advertiser_id: advertiserId,
+    campaign_ids: [String(campaignId)],
+    operation_status: operationStatus, // ENABLE | DISABLE
+  });
+  const res = await mcpCall(client, "campaign_get", {
+    advertiser_id: advertiserId,
+    fields: CAMPAIGN_FIELDS,
+    filtering: { campaign_ids: [String(campaignId)] },
+  });
+  return (res?.list || []).find((c) => String(c.campaign_id) === String(campaignId)) || null;
+}
+
+async function setAdGroupStatus({ client, advertiserId, adGroupId, operationStatus }) {
+  await mcpCall(client, "adgroup_status_update", {
+    advertiser_id: advertiserId,
+    adgroup_ids: [String(adGroupId)],
+    operation_status: operationStatus, // ENABLE | DISABLE
+  });
+  const res = await mcpCall(client, "adgroup_get", {
+    advertiser_id: advertiserId,
+    fields: ADGROUP_STATUS_FIELDS,
+    filtering: { adgroup_ids: [String(adGroupId)] },
+  });
+  return (res?.list || []).find((g) => String(g.adgroup_id) === String(adGroupId)) || null;
+}
+
 module.exports = {
   DEFAULT_MCP_SERVER_URL,
   MCP_SCOPE,
@@ -646,4 +875,8 @@ module.exports = {
   discoverAndStoreAdvertisers,
   discoverAndStoreCampaigns,
   deriveEffectiveStatus,
+  deriveAdGroupStatus,
+  loadCampaignDetail,
+  setCampaignStatus,
+  setAdGroupStatus,
 };
