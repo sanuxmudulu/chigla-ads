@@ -369,6 +369,7 @@ function renderTable(newConversionSources) {
     const crown = bestRoas && s === bestRoas ? `<span class="crown" title="Best ROAS today">👑</span>` : "";
 
     tr.innerHTML = `
+      <td class="toggle-cell">${campaignToggle(s)}</td>
       <td>${statusBadge(s.status)}</td>
       <td class="source-name"><span class="expand-caret">▸</span>${crown}${escapeHtml(s.source)}</td>
       <td class="num">${money(s.spend)}</td>
@@ -379,7 +380,6 @@ function renderTable(newConversionSources) {
       <td class="num">${money(s.payout)}</td>
       <td class="num">${money(s.epc)}</td>
       <td class="num ${s.roas >= 1 ? "positive" : "negative"}">${s.roas.toFixed(2)}x</td>
-      <td class="action-cell">${campaignActionButton(s)}</td>
     `;
     tbody.appendChild(tr);
 
@@ -395,15 +395,24 @@ function renderTable(newConversionSources) {
   });
 }
 
-// Compact Pause / Unpause control for the campaign row. Only for rows backed by
-// a tracked TikTok campaign.
-function campaignActionButton(s) {
+// Compact ON/OFF switch for the campaign row. ON = campaign ENABLE, OFF =
+// DISABLE. Only for rows backed by a tracked TikTok campaign. Clicking toggles
+// the campaign via the same MCP action; it never expands the row.
+function campaignToggle(s) {
   if (!s.hasTiktok || !s.campaignId) return "";
-  const op = String(s.campaignOpStatus || "").toUpperCase();
-  const paused = op === "DISABLE";
-  const label = paused ? "Unpause" : "Pause";
+  const on = String(s.campaignOpStatus || "").toUpperCase() === "ENABLE";
   const pending = state.pendingActions.has(`c:${s.campaignId}`);
-  return `<button class="mini-action ${paused ? "resume" : "pause"}" data-campaign-action="${paused ? "ENABLE" : "DISABLE"}" data-campaign-id="${escapeHtml(s.campaignId)}" ${pending ? "disabled" : ""}>${pending ? "…" : label}</button>`;
+  return switchHtml({
+    on,
+    pending,
+    attrs: `data-campaign-action="${on ? "DISABLE" : "ENABLE"}" data-campaign-id="${escapeHtml(s.campaignId)}"`,
+    title: on ? "Campaign running — click to pause" : "Campaign paused — click to enable",
+  });
+}
+
+// Shared toggle-switch markup (campaign rows + ad-group rows).
+function switchHtml({ on, pending, attrs, title }) {
+  return `<button type="button" role="switch" aria-checked="${on ? "true" : "false"}" title="${escapeHtml(title || "")}" class="tk-switch${on ? " on" : ""}${pending ? " busy" : ""}" ${pending ? "disabled" : ""} ${attrs}></button>`;
 }
 
 function toggleRowExpand(source) {
@@ -467,8 +476,11 @@ function paintAdGroups(panel, s, rows) {
   }
   panel.innerHTML = `
     <table class="adgroups-table">
+      <colgroup>
+        <col style="width:44px" /><col style="width:96px" /><col /><col style="width:88px" /><col style="width:88px" />
+      </colgroup>
       <thead>
-        <tr><th>Ad group</th><th>Status</th><th class="num">Spend</th><th class="num">CPA</th><th>Action</th></tr>
+        <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th></tr>
       </thead>
       <tbody>
         ${rows.map((g) => adGroupRowHtml(s.campaignId, g)).join("")}
@@ -478,22 +490,24 @@ function paintAdGroups(panel, s, rows) {
 }
 
 function adGroupRowHtml(campaignId, g) {
-  const paused = String(g.operation_status || "").toUpperCase() === "DISABLE";
-  const label = paused ? "Unpause" : "Pause";
-  const key = `g:${g.adgroup_id}`;
-  const pending = state.pendingActions.has(key);
+  const on = String(g.operation_status || "").toUpperCase() === "ENABLE";
+  const pending = state.pendingActions.has(`g:${g.adgroup_id}`);
+  const tone = ["good", "warn", "bad", "neutral"].includes(g.status_tone) ? g.status_tone : "neutral";
   return `
     <tr data-adgroup-row="${escapeHtml(g.adgroup_id)}">
-      <td>
+      <td class="toggle-cell">${switchHtml({
+        on,
+        pending,
+        attrs: `data-adgroup-action="${on ? "DISABLE" : "ENABLE"}" data-campaign-id="${escapeHtml(campaignId)}" data-adgroup-id="${escapeHtml(g.adgroup_id)}"`,
+        title: on ? "Ad group running — click to pause" : "Ad group paused — click to unpause",
+      })}</td>
+      <td><span class="status-badge ${tone}">${escapeHtml(g.status_label || "—")}</span></td>
+      <td class="ag-name-cell">
         <div class="ag-name">${escapeHtml(g.adgroup_name || g.adgroup_id)}</div>
         <div class="ag-id">${escapeHtml(g.adgroup_id)}</div>
       </td>
-      <td><span class="status-badge ${["good", "warn", "bad", "neutral"].includes(g.status_tone) ? g.status_tone : "neutral"}">${escapeHtml(g.status_label || "—")}</span></td>
       <td class="num">${money(g.spend)}</td>
       <td class="num">${money(g.cpa)}</td>
-      <td>
-        <button class="mini-action ${paused ? "resume" : "pause"}" data-adgroup-action="${paused ? "ENABLE" : "DISABLE"}" data-campaign-id="${escapeHtml(campaignId)}" data-adgroup-id="${escapeHtml(g.adgroup_id)}" ${pending ? "disabled" : ""}>${pending ? "…" : label}</button>
-      </td>
     </tr>`;
 }
 
@@ -528,26 +542,18 @@ async function handleCampaignAction(btn) {
   const campaignId = btn.dataset.campaignId;
   const targetOp = btn.dataset.campaignAction; // ENABLE | DISABLE
   const key = `c:${campaignId}`;
-  if (state.pendingActions.has(key)) return;
+  if (state.pendingActions.has(key)) return; // double-click guard
   state.pendingActions.add(key);
   btn.disabled = true;
-  btn.textContent = "…";
+  btn.classList.add("busy");
   try {
-    const outcome = await withTiktokPassword(
-      {
-        title: targetOp === "DISABLE" ? "Pause campaign" : "Enable campaign",
-        hint: "Enter the dashboard password to change this TikTok campaign.",
-      },
-      (password) => setCampaignStatus(password, campaignId, targetOp)
-    );
-    if (outcome && !outcome.cancelled) {
-      applyCampaignStatusResult(outcome.result);
-      setStatus(`Campaign ${targetOp === "DISABLE" ? "paused" : "enabled"} — now “${outcome.result.effective_status}”.`);
-    }
-  } catch (err) {
-    setStatus(`Campaign update failed: ${err.message}`, true);
-  } finally {
+    const result = await setCampaignStatus(campaignId, targetOp);
     state.pendingActions.delete(key);
+    applyCampaignStatusResult(result);
+    setStatus(`Campaign ${targetOp === "DISABLE" ? "paused" : "enabled"} — now “${result.effective_status}”.`);
+  } catch (err) {
+    state.pendingActions.delete(key);
+    setStatus(`Campaign update failed: ${err.message}`, true);
     rebuildSources();
   }
 }
@@ -557,28 +563,20 @@ async function handleAdgroupAction(btn) {
   const adgroupId = btn.dataset.adgroupId;
   const targetOp = btn.dataset.adgroupAction;
   const key = `g:${adgroupId}`;
-  if (state.pendingActions.has(key)) return;
+  if (state.pendingActions.has(key)) return; // double-click guard
   state.pendingActions.add(key);
   btn.disabled = true;
-  btn.textContent = "…";
+  btn.classList.add("busy");
   try {
-    const outcome = await withTiktokPassword(
-      {
-        title: targetOp === "DISABLE" ? "Pause ad group" : "Unpause ad group",
-        hint: "Enter the dashboard password to change this ad group.",
-      },
-      (password) => setAdgroupStatus(password, campaignId, adgroupId, targetOp)
-    );
-    if (outcome && !outcome.cancelled) {
-      applyCampaignStatusResult(outcome.result);
-      setStatus(`Ad group ${targetOp === "DISABLE" ? "paused" : "unpaused"}.`);
-    }
+    const result = await setAdgroupStatus(campaignId, adgroupId, targetOp);
+    state.pendingActions.delete(key);
+    applyCampaignStatusResult(result); // repaints the panel + row from the live result
+    setStatus(`Ad group ${targetOp === "DISABLE" ? "paused" : "unpaused"}.`);
   } catch (err) {
+    state.pendingActions.delete(key);
     setStatus(`Ad group update failed: ${err.message}`, true);
     const s = state.sources.find((x) => x.campaignId === campaignId);
     if (s) renderAdGroupsPanel(s, { force: true });
-  } finally {
-    state.pendingActions.delete(key);
   }
 }
 
@@ -671,8 +669,12 @@ function closeToolsDrawer() {
 // Authentication + connection storage + advertiser discovery/selection only.
 // All token handling lives in the tiktok-* Netlify functions.
 
-const tiktokState = { connections: [], advertisers: [], dirty: false };
-let tiktokPassword = null; // cached in memory for the session after first success
+// connections: [{id,label,tiktok_email,tiktok_display_name,bc_id,bc_name,bc_count,...}]
+// advertisers: [{connection_id,advertiser_id,...,tracked}]
+// selectedConnectionId: which connection the management view shows (multi-BC only)
+// trackedDraft: { "<connId>::<advId>": bool } — unsaved checkbox changes, survives
+//               switching the BC dropdown until Save.
+const tiktokState = { connections: [], advertisers: [], selectedConnectionId: null, trackedDraft: {} };
 let tiktokPwHandler = null;
 
 function openAccountsModal() {
@@ -685,17 +687,25 @@ function closeAccountsModal() {
 function wireTiktokEvents() {
   document.getElementById("tiktokConnectBtn").addEventListener("click", connectTiktok);
   document.getElementById("tiktokSaveTrackedBtn").addEventListener("click", saveTiktokTracked);
-  document.getElementById("tiktokSyncCampaignsBtn").addEventListener("click", () => runTiktokCampaignSync());
+  document.getElementById("tiktokSyncCampaignsBtn").addEventListener("click", () => refreshTiktokData());
+  document.getElementById("tiktokBcSelect").addEventListener("change", (e) => {
+    tiktokState.selectedConnectionId = e.target.value;
+    renderSelectedConnection();
+  });
 
   const wrap = document.getElementById("tiktokConnectionsWrap");
   wrap.addEventListener("change", (e) => {
-    if (e.target.matches('input[type="checkbox"][data-tk-adv]')) markTiktokDirty(true);
+    const cb = e.target.closest('input[type="checkbox"][data-tk-adv]');
+    if (cb) {
+      tiktokState.trackedDraft[`${cb.dataset.tkConnId}::${cb.dataset.tkAdvId}`] = cb.checked;
+      updateSaveButton();
+    }
   });
   wrap.addEventListener("click", (e) => {
-    const refreshId = e.target.dataset?.tkRefresh;
-    const disconnectId = e.target.dataset?.tkDisconnect;
-    if (refreshId) refreshTiktokConnection(refreshId, e.target);
-    if (disconnectId) disconnectTiktokConnection(disconnectId);
+    const refreshBtn = e.target.closest("[data-tk-refresh]");
+    const disconnectBtn = e.target.closest("[data-tk-disconnect]");
+    if (refreshBtn) rescanConnection(refreshBtn.dataset.tkRefresh, refreshBtn);
+    if (disconnectBtn) disconnectConnection(disconnectBtn.dataset.tkDisconnect);
   });
 
   document.getElementById("tiktokPwCancel").addEventListener("click", closeTiktokPwModal);
@@ -708,72 +718,11 @@ function wireTiktokEvents() {
   });
 }
 
-function markTiktokDirty(value) {
-  tiktokState.dirty = value;
-  document.getElementById("tiktokSaveTrackedBtn").disabled = !value;
-}
-
-async function renderTiktokAccounts() {
-  const wrap = document.getElementById("tiktokConnectionsWrap");
-  wrap.innerHTML = `<p class="tk-loading">Loading connections…</p>`;
-  markTiktokDirty(false);
-
-  let data;
-  try {
-    data = await fetchTiktokConnections();
-  } catch (err) {
-    wrap.innerHTML = `<p class="tk-error">Couldn't load connections: ${escapeHtml(err.message)}</p>`;
-    return;
-  }
-
-  tiktokState.connections = data.connections || [];
-  tiktokState.advertisers = data.advertisers || [];
-
-  renderTiktokSummary();
-
-  if (!tiktokState.connections.length) {
-    wrap.innerHTML = `<p class="tk-empty">No TikTok accounts connected yet. Click “Connect TikTok Ads” and authorize in this browser profile.</p>`;
-    return;
-  }
-
-  wrap.innerHTML = tiktokState.connections
-    .map((c) => {
-      const advs = tiktokState.advertisers
-        .filter((a) => a.connection_id === c.id)
-        // Approved accounts first, then Suspended; stable by name within a group.
-        .slice()
-        .sort(
-          (a, b) =>
-            advApprovedRank(a) - advApprovedRank(b) ||
-            String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
-        );
-      const rows = advs.length
-        ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
-        : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
-      const approved = advs.filter((a) => advIsApproved(a)).length;
-      const sub = [
-        c.tiktok_email || c.tiktok_display_name || "",
-        `${advs.length} account${advs.length === 1 ? "" : "s"}`,
-        `${approved} Approved · ${advs.length - approved} Suspended`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      return `
-        <div class="tk-conn" data-tk-conn-card="${c.id}">
-          <div class="tk-conn-head">
-            <div>
-              <div class="tk-conn-label">${escapeHtml(c.label || "TikTok connection")}</div>
-              <div class="tk-conn-sub">${escapeHtml(sub)}</div>
-            </div>
-            <div class="tk-conn-actions">
-              <button class="tk-mini" data-tk-refresh="${c.id}">Re-scan</button>
-              <button class="tk-mini danger" data-tk-disconnect="${c.id}">Disconnect</button>
-            </div>
-          </div>
-          <div class="tk-adv-list">${rows}</div>
-        </div>`;
-    })
-    .join("");
+function updateSaveButton() {
+  const n = Object.keys(tiktokState.trackedDraft).length;
+  const btn = document.getElementById("tiktokSaveTrackedBtn");
+  btn.disabled = n === 0;
+  btn.textContent = n ? `Save tracked accounts (${n})` : "Save tracked accounts";
 }
 
 // TikTok advertiser `status` is kept raw in storage; only the label shown to
@@ -788,34 +737,119 @@ function advStatusLabel(a) {
   return advIsApproved(a) ? "Approved" : "Suspended";
 }
 
-function renderTiktokSummary() {
-  const el = document.getElementById("tiktokSummary");
-  if (!el) return;
-  const advs = tiktokState.advertisers || [];
-  if (!advs.length) {
-    el.innerHTML = "";
+// A connection's Business Center identity for display. Real BC name from
+// bc/get when known; never invented from advertiser names.
+function connBcName(c) {
+  return c.bc_name || c.tiktok_display_name || c.tiktok_email || "TikTok connection";
+}
+function connBcOptionLabel(c) {
+  const primary = c.bc_name || (c.bc_count > 1 ? `${c.bc_count} Business Centers` : c.tiktok_display_name) || "Connection";
+  return c.tiktok_email ? `${primary} — ${c.tiktok_email}` : primary;
+}
+
+function advsForConnection(connId) {
+  return tiktokState.advertisers
+    .filter((a) => a.connection_id === connId)
+    .slice()
+    .sort(
+      (a, b) =>
+        advApprovedRank(a) - advApprovedRank(b) ||
+        String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
+    );
+}
+
+function isAdvTracked(connId, adv) {
+  const draft = tiktokState.trackedDraft[`${connId}::${adv.advertiser_id}`];
+  return draft === undefined ? !!adv.tracked : draft;
+}
+
+async function renderTiktokAccounts() {
+  const wrap = document.getElementById("tiktokConnectionsWrap");
+  wrap.innerHTML = `<p class="tk-loading">Loading connections…</p>`;
+
+  let data;
+  try {
+    data = await fetchTiktokConnections();
+  } catch (err) {
+    wrap.innerHTML = `<p class="tk-error">Couldn't load connections: ${escapeHtml(err.message)}</p>`;
     return;
   }
+
+  tiktokState.connections = data.connections || [];
+  tiktokState.advertisers = data.advertisers || [];
+
+  const ids = tiktokState.connections.map((c) => c.id);
+  if (!ids.includes(tiktokState.selectedConnectionId)) {
+    tiktokState.selectedConnectionId = ids[0] || null;
+  }
+
+  // BC / connection dropdown — only when there's more than one connection.
+  const bcWrap = document.getElementById("tiktokBcSelectWrap");
+  const bcSelect = document.getElementById("tiktokBcSelect");
+  if (tiktokState.connections.length > 1) {
+    bcSelect.innerHTML = tiktokState.connections
+      .map((c) => `<option value="${c.id}" ${c.id === tiktokState.selectedConnectionId ? "selected" : ""}>${escapeHtml(connBcOptionLabel(c))}</option>`)
+      .join("");
+    bcWrap.hidden = false;
+  } else {
+    bcWrap.hidden = true;
+  }
+
+  renderSelectedConnection();
+}
+
+function renderSelectedConnection() {
+  const wrap = document.getElementById("tiktokConnectionsWrap");
+  const summaryEl = document.getElementById("tiktokSummary");
+
+  if (!tiktokState.connections.length) {
+    summaryEl.innerHTML = "";
+    wrap.innerHTML = `<p class="tk-empty">No TikTok accounts connected yet. Click “Connect TikTok Ads” and authorize in this browser profile.</p>`;
+    updateSaveButton();
+    return;
+  }
+
+  const c =
+    tiktokState.connections.find((x) => x.id === tiktokState.selectedConnectionId) || tiktokState.connections[0];
+  const advs = advsForConnection(c.id);
   const approved = advs.filter((a) => advIsApproved(a)).length;
-  el.innerHTML = `
+
+  summaryEl.innerHTML = `
     <span class="tk-sum-item"><strong>${advs.length}</strong> account${advs.length === 1 ? "" : "s"}</span>
     <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
     <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
+
+  const bcIdLine = c.bc_id ? `<span class="tk-conn-bcid">BC ${escapeHtml(c.bc_id)}</span>` : "";
+  const rows = advs.length
+    ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
+    : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
+
+  wrap.innerHTML = `
+    <div class="tk-conn">
+      <div class="tk-conn-head">
+        <div>
+          <div class="tk-conn-label">${escapeHtml(connBcName(c))}</div>
+          <div class="tk-conn-sub">${escapeHtml(c.tiktok_email || c.tiktok_display_name || "")} ${bcIdLine}</div>
+        </div>
+        <div class="tk-conn-actions">
+          <button class="tk-mini" data-tk-refresh="${c.id}">Re-scan</button>
+          <button class="tk-mini danger" data-tk-disconnect="${c.id}">Disconnect</button>
+        </div>
+      </div>
+      <div class="tk-adv-list">${rows}</div>
+    </div>`;
+
+  updateSaveButton();
 }
 
 function tiktokAdvRow(connectionId, a) {
-  const meta = [
-    a.advertiser_id,
-    a.currency || null,
-    a.display_timezone || a.timezone || null,
-    a.bc_name || null,
-  ]
+  const meta = [a.advertiser_id, a.currency || null, a.display_timezone || a.timezone || null]
     .filter(Boolean)
     .join(" · ");
   const approved = advIsApproved(a);
   return `
     <label class="tk-adv">
-      <input type="checkbox" data-tk-adv data-tk-adv-id="${escapeHtml(a.advertiser_id)}" data-tk-conn-id="${connectionId}" ${a.tracked ? "checked" : ""} />
+      <input type="checkbox" data-tk-adv data-tk-adv-id="${escapeHtml(a.advertiser_id)}" data-tk-conn-id="${connectionId}" ${isAdvTracked(connectionId, a) ? "checked" : ""} />
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
         <span class="tk-adv-meta">${escapeHtml(meta)}</span>
@@ -824,14 +858,13 @@ function tiktokAdvRow(connectionId, a) {
     </label>`;
 }
 
-// ---- privileged action helper (password gate, mirrors the New Day pattern) ----
+// ---- admin password (only for connect + disconnect) ----
 
 function askTiktokPassword({ title, hint }) {
   return new Promise((resolve) => {
     tiktokPwHandler = resolve;
     document.getElementById("tiktokPwTitle").textContent = title || "Dashboard password";
-    document.getElementById("tiktokPwHint").textContent =
-      hint || "Enter the dashboard password to continue.";
+    document.getElementById("tiktokPwHint").textContent = hint || "Enter the dashboard password to continue.";
     document.getElementById("tiktokPwInput").value = "";
     document.getElementById("tiktokPwError").textContent = "";
     document.getElementById("tiktokPwModal").classList.add("open");
@@ -858,146 +891,118 @@ function submitTiktokPw() {
   }
 }
 
-// Runs `fn(password)`; prompts for the password unless one is already cached,
-// and clears the cache on a 401 so the next attempt re-prompts.
-async function withTiktokPassword(purpose, fn) {
-  let password = tiktokPassword;
-  if (!password) {
-    password = await askTiktokPassword(purpose);
-    if (!password) return { cancelled: true };
-  }
-  try {
-    const result = await fn(password);
-    tiktokPassword = password;
-    return { result };
-  } catch (err) {
-    if (err.status === 401) {
-      tiktokPassword = null;
-      setStatus("Incorrect password.", true);
-    }
-    throw err;
-  }
-}
-
 // ---- actions ----
 
 async function connectTiktok() {
-  let outcome;
+  const password = await askTiktokPassword({
+    title: "Connect TikTok Ads",
+    hint: "Enter the dashboard password. You'll then be sent to TikTok to authorize this browser's logged-in Business account.",
+  });
+  if (!password) return;
   try {
-    outcome = await withTiktokPassword(
-      {
-        title: "Connect TikTok Ads",
-        hint: "Enter the dashboard password. You'll then be sent to TikTok to authorize this browser's logged-in Business account.",
-      },
-      (password) => startTiktokAuth(password, "")
-    );
+    const { authorizeUrl } = await startTiktokAuth(password, "");
+    if (!authorizeUrl) {
+      setStatus("TikTok did not return an authorization URL.", true);
+      return;
+    }
+    // Full-page redirect — survives AdsPower profiles / popup blockers.
+    window.location.assign(authorizeUrl);
   } catch (err) {
     setStatus(`Couldn't start TikTok authentication: ${err.message}`, true);
-    return;
   }
-  if (!outcome || outcome.cancelled) return;
-  const { authorizeUrl } = outcome.result;
-  if (!authorizeUrl) {
-    setStatus("TikTok did not return an authorization URL.", true);
-    return;
-  }
-  // Full-page redirect — survives AdsPower profiles and popup blockers. We come
-  // back to /?tiktok=connected (handled in init).
-  window.location.assign(authorizeUrl);
 }
 
+// Persists the unsaved checkbox draft (across ALL connections) then auto-syncs
+// campaigns. No password.
 async function saveTiktokTracked() {
-  const selections = [...document.querySelectorAll('input[type="checkbox"][data-tk-adv]')].map(
-    (el) => ({
-      connection_id: el.dataset.tkConnId,
-      advertiser_id: el.dataset.tkAdvId,
-      tracked: el.checked,
-    })
-  );
+  const selections = Object.entries(tiktokState.trackedDraft).map(([key, tracked]) => {
+    const [connection_id, advertiser_id] = key.split("::");
+    return { connection_id, advertiser_id, tracked };
+  });
+  if (!selections.length) return;
+
   const btn = document.getElementById("tiktokSaveTrackedBtn");
   btn.disabled = true;
   btn.textContent = "Saving…";
   try {
-    const outcome = await withTiktokPassword(
-      { title: "Save tracked accounts", hint: "Enter the dashboard password to save your selection." },
-      (password) => postTiktokAction({ password, action: "track", selections })
-    );
-    if (outcome && !outcome.cancelled) {
-      markTiktokDirty(false);
-      setStatus(`Saved — tracking ${selections.filter((s) => s.tracked).length} advertiser account(s).`);
-      // Pull in campaigns for the freshly-selected accounts.
-      await runTiktokCampaignSync({ silent: true });
+    await postTiktokAction({ action: "track", selections });
+    tiktokState.trackedDraft = {};
+    // Reflect the saved values locally so a re-render shows them ticked.
+    for (const s of selections) {
+      const a = tiktokState.advertisers.find(
+        (x) => x.connection_id === s.connection_id && String(x.advertiser_id) === String(s.advertiser_id)
+      );
+      if (a) a.tracked = s.tracked;
     }
+    const trackedCount = tiktokState.advertisers.filter((a) => a.tracked).length;
+    setStatus(`Saved — tracking ${trackedCount} advertiser account(s). Syncing campaigns…`);
+    renderSelectedConnection();
+    await refreshTiktokData({ silent: true });
   } catch (err) {
     setStatus(`Couldn't save selection: ${err.message}`, true);
   } finally {
     btn.textContent = "Save tracked accounts";
-    btn.disabled = !tiktokState.dirty;
+    updateSaveButton();
   }
 }
 
-// Hits the TikTok MCP for every tracked advertiser account, refreshes stored
-// campaigns + their effective status, then re-merges the Detailed Metrics table.
-async function runTiktokCampaignSync({ silent } = {}) {
+// "Refresh TikTok Data" — re-scan advertisers + re-discover campaigns for every
+// tracked account, then re-merge the Detailed Metrics table. Manual fallback;
+// not needed for normal operation. No password.
+async function refreshTiktokData({ silent } = {}) {
   const btn = document.getElementById("tiktokSyncCampaignsBtn");
-  const original = btn ? btn.textContent : "";
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "Syncing…";
-  }
-  if (!silent) setStatus("Syncing TikTok campaigns…");
-  try {
-    const outcome = await withTiktokPassword(
-      { title: "Sync campaigns", hint: "Enter the dashboard password to pull campaigns from the tracked accounts." },
-      (password) => syncTiktokCampaigns(password)
-    );
-    if (outcome && !outcome.cancelled) {
-      await loadTiktokCampaigns();
-      const r = outcome.result || {};
-      if (r.note) setStatus(r.note);
-      else setStatus(`Synced ${r.campaignCount ?? 0} TikTok campaign(s) from ${r.connections ?? 0} connection(s).`);
-    }
-  } catch (err) {
-    setStatus(`Campaign sync failed: ${err.message}`, true);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = original || "Sync campaigns";
-    }
-  }
-}
-
-async function refreshTiktokConnection(connectionId, btn) {
-  const original = btn.textContent;
+  const original = "Refresh TikTok Data";
   btn.disabled = true;
-  btn.textContent = "Scanning…";
+  btn.textContent = "Refreshing…";
+  if (!silent) setStatus("Refreshing TikTok data…");
   try {
-    const outcome = await withTiktokPassword(
-      { title: "Re-scan accounts", hint: "Enter the dashboard password to re-scan this connection." },
-      (password) => postTiktokAction({ password, action: "refresh", connection_id: connectionId })
-    );
-    if (outcome && !outcome.cancelled) {
-      setStatus(`Re-scanned — ${outcome.result.advertiserCount ?? 0} advertiser account(s) found.`);
+    const r = await syncTiktokCampaigns();
+    await loadTiktokCampaigns();
+    if (document.getElementById("accountsModal").classList.contains("open")) {
       await renderTiktokAccounts();
     }
+    if (r.note) setStatus(r.note);
+    else setStatus(`Refreshed — ${r.campaignCount ?? 0} campaign(s) across ${r.connections ?? 0} connection(s).`);
   } catch (err) {
-    setStatus(`Re-scan failed: ${err.message}`, true);
+    setStatus(`Refresh failed: ${err.message}`, true);
   } finally {
     btn.disabled = false;
     btn.textContent = original;
   }
 }
 
-async function disconnectTiktokConnection(connectionId) {
+// Re-scan ONE connection's advertiser accounts. No password.
+async function rescanConnection(connectionId, btn) {
+  btn.disabled = true;
+  btn.textContent = "Scanning…";
   try {
-    const outcome = await withTiktokPassword(
-      { title: "Disconnect", hint: "Enter the dashboard password to remove this TikTok connection." },
-      (password) => postTiktokAction({ password, action: "disconnect", connection_id: connectionId })
-    );
-    if (outcome && !outcome.cancelled) {
-      setStatus("TikTok connection removed.");
-      await renderTiktokAccounts();
+    const r = await postTiktokAction({ action: "refresh", connection_id: connectionId });
+    setStatus(`Re-scanned — ${r.advertiserCount ?? 0} advertiser account(s).`);
+    await renderTiktokAccounts();
+  } catch (err) {
+    setStatus(`Re-scan failed: ${err.message}`, true);
+    btn.disabled = false;
+    btn.textContent = "Re-scan";
+  }
+}
+
+// Disconnect ONE connection — PASSWORD required.
+async function disconnectConnection(connectionId) {
+  const conn = tiktokState.connections.find((c) => c.id === connectionId);
+  const password = await askTiktokPassword({
+    title: "Disconnect TikTok connection",
+    hint: `Enter the dashboard password to remove “${conn ? connBcName(conn) : "this connection"}” and its tracked accounts.`,
+  });
+  if (!password) return;
+  try {
+    await postTiktokAction({ password, action: "disconnect", connection_id: connectionId });
+    if (tiktokState.selectedConnectionId === connectionId) tiktokState.selectedConnectionId = null;
+    for (const k of Object.keys(tiktokState.trackedDraft)) {
+      if (k.startsWith(`${connectionId}::`)) delete tiktokState.trackedDraft[k];
     }
+    setStatus("TikTok connection removed.");
+    await renderTiktokAccounts();
+    await loadTiktokCampaigns();
   } catch (err) {
     setStatus(`Couldn't disconnect: ${err.message}`, true);
   }
@@ -1020,9 +1025,11 @@ function handleTiktokReturn() {
     setStatus(`TikTok connection failed: ${qp.get("reason") || "unknown error"}`, true);
   }
 
+  const newConnId = qp.get("connection");
   history.replaceState({}, "", window.location.pathname);
 
   if (kind === "connected") {
+    if (newConnId) tiktokState.selectedConnectionId = newConnId; // focus the just-added BC
     openAccountsModal();
     renderTiktokAccounts();
   }

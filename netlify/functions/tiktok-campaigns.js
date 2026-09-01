@@ -1,23 +1,24 @@
 // GET  /.netlify/functions/tiktok-campaigns
 //        -> { campaigns: [...] }   (campaigns inside tracked advertiser accounts)
 //
-// POST /.netlify/functions/tiktok-campaigns   { password, action, ... }
-//        "sync"                : re-discover campaigns + status for every TRACKED account
+// POST /.netlify/functions/tiktok-campaigns   { action, ... }
+//        "sync"                : re-scan advertisers + re-discover campaigns for every
+//                                TRACKED account ("Refresh TikTok Data")
 //        "adgroups"            : { campaign_id } — lazy-load one campaign's ad groups +
-//                                today's spend/CPA + status (read-only, no password)
-//        "set_campaign_status" : { password, campaign_id, operation_status } — write
-//        "set_adgroup_status"  : { password, campaign_id, adgroup_id, operation_status } — write
+//                                today's spend/CPA + status
+//        "set_campaign_status" : { campaign_id, operation_status } — write
+//        "set_adgroup_status"  : { campaign_id, adgroup_id, operation_status } — write
 //
-// Every action is restricted to campaigns whose advertiser account is currently
-// marked `tracked`. All MCP calls (reads and writes) run here, server-side; no
-// tokens are ever returned to the browser.
+// None of these need the admin password. Every action is restricted server-side
+// to campaigns/ad groups whose advertiser account is currently `tracked`. All
+// MCP calls run here; no tokens are ever returned to the browser.
 
 const {
   getSupabase,
   resolveConfig,
-  checkPassword,
   SupabaseOAuthProvider,
   connectMcp,
+  discoverAndStoreAdvertisers,
   discoverAndStoreCampaigns,
   loadCampaignDetail,
   setCampaignStatus,
@@ -120,9 +121,11 @@ exports.handler = async function (event) {
       });
     }
 
-    // ---- everything below is a write / privileged ----
-    const pw = checkPassword(body.password);
-    if (!pw.ok) return json(pw.code, { error: pw.error });
+    // Writes below are NOT password-gated (per product decision): the dashboard
+    // is already behind whatever protects the site, and every write is still
+    // restricted server-side to campaigns/ad groups under a TRACKED advertiser
+    // account (resolveTrackedCampaign). Only connecting / disconnecting a TikTok
+    // account still asks for the admin password.
 
     if (action === "set_campaign_status") {
       const op = normalizeOp(body.operation_status);
@@ -270,6 +273,12 @@ async function syncAll(supabase) {
     let client;
     try {
       ({ client } = await connectMcp({ provider, serverUrl }));
+      // Refresh the account list / statuses / BC identity for this connection too.
+      try {
+        await discoverAndStoreAdvertisers({ supabase, client, connectionId });
+      } catch (_) {
+        /* campaign discovery is the priority — don't fail the whole sync on this */
+      }
       const res = await discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers: advertisers });
       summary.campaignCount += res.campaignCount;
       summary.connections += 1;

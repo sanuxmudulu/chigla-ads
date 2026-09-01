@@ -116,6 +116,12 @@ exports.handler = async function (event) {
         client,
         connectionId: conn.id,
       });
+      // Prefer the real Business Center name as the connection label once known
+      // (only if the user didn't supply a custom label).
+      const bcName = (discovery.businessCenters || []).map((b) => b.bc_name).filter(Boolean)[0];
+      if (bcName && !tx.label) {
+        await supabase.from("tiktok_connections").update({ label: bcName }).eq("id", conn.id);
+      }
     } catch (err) {
       discovery = { warn: err.message };
     }

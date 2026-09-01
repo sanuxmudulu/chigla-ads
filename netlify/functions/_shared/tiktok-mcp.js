@@ -311,14 +311,28 @@ const ADV_FIELDS = [
   "owner_bc_id",
 ];
 
+// bc_get returns `data.list[]` where the Business Center fields live under
+// `item.bc_info` ({ bc_id, name, company, status, timezone, currency, ... }).
+function extractBusinessCenters(bcListRaw) {
+  return (bcListRaw || [])
+    .map((item) => {
+      const info = item.bc_info || item;
+      const id = info.bc_id != null ? String(info.bc_id) : null;
+      if (!id) return null;
+      return { bc_id: id, bc_name: info.name || info.bc_name || info.company || null };
+    })
+    .filter(Boolean);
+}
+
 // Walks the authenticated TikTok user's Business Centers + advertiser accounts
 // and upserts them into tiktok_advertisers. Descriptive columns only — `tracked`
 // and `discovered_at` are left untouched so a re-scan preserves the selection.
+// Also records the connection's Business Center identity on tiktok_connections.
 async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
   let bcs = [];
   try {
     const d = await mcpCall(client, "bc_get", {});
-    bcs = d?.list || [];
+    bcs = extractBusinessCenters(d?.list);
   } catch {
     // A user with no Business Center still has directly-authorized advertisers.
   }
@@ -339,7 +353,7 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
     info.push(...(d?.list || []));
   }
 
-  const bcName = new Map(bcs.map((b) => [String(b.bc_id), b.bc_name || b.name || null]));
+  const bcName = new Map(bcs.map((b) => [b.bc_id, b.bc_name]));
   const now = new Date().toISOString();
   const seen = new Set();
 
@@ -380,7 +394,36 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
     if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
   }
 
-  return { advertiserCount: rows.length, businessCenterCount: bcs.length };
+  // Record the connection's Business Center identity. If bc_get returned exactly
+  // one BC, use its name/id; otherwise fall back to a count so the UI label can
+  // degrade gracefully (never invented from advertiser names).
+  const bcSeenFromAdvertisers = new Map();
+  for (const a of info) {
+    if (a.owner_bc_id) {
+      const bid = String(a.owner_bc_id);
+      bcSeenFromAdvertisers.set(bid, bcName.get(bid) || bcSeenFromAdvertisers.get(bid) || null);
+    }
+  }
+  // Prefer bc_get's list; supplement with any BC ids only seen via advertisers.
+  const bcMerged = new Map(bcs.map((b) => [b.bc_id, b.bc_name]));
+  for (const [bid, bname] of bcSeenFromAdvertisers) if (!bcMerged.has(bid)) bcMerged.set(bid, bname);
+
+  const bcList = [...bcMerged.entries()].map(([bc_id, bc_name]) => ({ bc_id, bc_name }));
+  const connPatch = { updated_at: now };
+  if (bcList.length === 1) {
+    connPatch.bc_id = bcList[0].bc_id;
+    connPatch.bc_name = bcList[0].bc_name || null;
+    connPatch.bc_count = 1;
+  } else {
+    connPatch.bc_id = null;
+    connPatch.bc_name = bcList.map((b) => b.bc_name).filter(Boolean).join(", ") || null;
+    connPatch.bc_count = bcList.length;
+  }
+  // Non-fatal: if the bc_* columns aren't added yet, the UI label just falls
+  // back to the authenticated email until the migration is run.
+  await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
+
+  return { advertiserCount: rows.length, businessCenterCount: bcList.length, businessCenters: bcList };
 }
 
 // ---------------------------------------------------------------------------

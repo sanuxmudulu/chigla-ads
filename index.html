@@ -100,6 +100,7 @@
       <table id="sourcesTable">
         <thead>
           <tr>
+            <th>On/Off</th>
             <th>Status</th>
             <th>Source</th>
             <th>Spend</th>
@@ -110,7 +111,6 @@
             <th>Earning</th>
             <th>EPC</th>
             <th>ROAS</th>
-            <th>Action</th>
           </tr>
         </thead>
         <tbody id="sourcesBody"></tbody>
@@ -167,16 +167,15 @@
       <h3>TikTok Ad Accounts</h3>
       <button id="closeAccountsModal">✕</button>
     </div>
-    <p style="margin-top:-4px;">
-      Connections authenticate through TikTok's official MCP OAuth. Open Chigla Ads in the
-      AdsPower profile for a TikTok Business login, then click <strong>Connect TikTok Ads</strong>.
-      Tick the advertiser accounts you want Chigla Ads to track.
-    </p>
+    <div id="tiktokBcSelectWrap" class="tk-bc-select" hidden>
+      <label for="tiktokBcSelect">Business Center</label>
+      <select id="tiktokBcSelect"></select>
+    </div>
     <div id="tiktokSummary" class="tk-summary"></div>
     <div id="tiktokConnectionsWrap" class="tk-wrap"></div>
     <div class="modal-actions" style="margin-top:16px;">
       <button class="icon-btn" id="tiktokConnectBtn">Connect TikTok Ads</button>
-      <button class="icon-btn" id="tiktokSyncCampaignsBtn">Sync campaigns</button>
+      <button class="icon-btn" id="tiktokSyncCampaignsBtn">Refresh TikTok Data</button>
       <button class="icon-btn primary" id="tiktokSaveTrackedBtn" disabled>Save tracked accounts</button>
     </div>
   </div>

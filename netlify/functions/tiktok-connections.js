@@ -1,10 +1,13 @@
 // GET  /.netlify/functions/tiktok-connections
 //        -> { connections: [...], advertisers: [...] }   (never includes tokens)
 //
-// POST /.netlify/functions/tiktok-connections   { password, action, ... }
-//        action "track"      : { selections: [{ connection_id, advertiser_id, tracked }] }
-//        action "refresh"    : { connection_id }   -> re-scan advertisers via MCP
-//        action "disconnect" : { connection_id }   -> forget the connection
+// POST /.netlify/functions/tiktok-connections   { action, ... }
+//        action "track"      : { selections: [{ connection_id, advertiser_id, tracked }] }  (no password)
+//        action "refresh"    : { connection_id }   -> re-scan one connection's advertisers  (no password)
+//        action "disconnect" : { password, connection_id }   -> forget the connection       (PASSWORD)
+//
+// Only "disconnect" needs the admin password. "track" / "refresh" work directly
+// once a TikTok connection is authenticated.
 
 const {
   getSupabase,
@@ -17,7 +20,7 @@ const {
 } = require("./_shared/tiktok-mcp");
 
 const CONNECTION_COLUMNS =
-  "id, label, tiktok_email, tiktok_display_name, status, last_verified_at, created_at";
+  "id, label, tiktok_email, tiktok_display_name, bc_id, bc_name, bc_count, status, last_verified_at, created_at";
 
 const ADVERTISER_COLUMNS =
   "connection_id, advertiser_id, advertiser_name, bc_id, bc_name, currency, timezone, display_timezone, status, role, country, tracked, updated_at";
@@ -48,8 +51,11 @@ exports.handler = async function (event) {
       body = {};
     }
 
-    const pw = checkPassword(body.password);
-    if (!pw.ok) return json(pw.code, { error: pw.error });
+    // Only disconnect is password-gated.
+    if (body.action === "disconnect") {
+      const pw = checkPassword(body.password);
+      if (!pw.ok) return json(pw.code, { error: pw.error });
+    }
 
     switch (body.action) {
       case "track": {

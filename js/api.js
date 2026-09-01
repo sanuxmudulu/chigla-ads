@@ -116,13 +116,15 @@ export async function fetchTiktokCampaigns() {
   return readTiktokResponse(res, "Request failed"); // { campaigns: [...] }
 }
 
-export async function syncTiktokCampaigns(password) {
+// "Refresh TikTok Data" — re-scans advertisers + re-discovers campaigns for
+// every tracked account. Not password-gated.
+export async function syncTiktokCampaigns() {
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password, action: "sync" }),
+    body: JSON.stringify({ action: "sync" }),
   });
-  return readTiktokResponse(res, "Campaign sync failed");
+  return readTiktokResponse(res, "Refresh failed");
 }
 
 // Lazy: one campaign's ad groups + today's spend/CPA + status. Read-only.
@@ -135,23 +137,23 @@ export async function fetchCampaignAdGroups(campaignId) {
   return readTiktokResponse(res, "Couldn't load ad groups");
 }
 
-// Write: pause / enable a whole campaign.
-export async function setCampaignStatus(password, campaignId, operationStatus) {
+// Write: pause / enable a whole campaign. Not password-gated (server still
+// verifies the campaign belongs to a tracked advertiser account).
+export async function setCampaignStatus(campaignId, operationStatus) {
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password, action: "set_campaign_status", campaign_id: campaignId, operation_status: operationStatus }),
+    body: JSON.stringify({ action: "set_campaign_status", campaign_id: campaignId, operation_status: operationStatus }),
   });
   return readTiktokResponse(res, "Campaign update failed");
 }
 
-// Write: pause / enable one ad group.
-export async function setAdgroupStatus(password, campaignId, adgroupId, operationStatus) {
+// Write: pause / enable one ad group. Not password-gated.
+export async function setAdgroupStatus(campaignId, adgroupId, operationStatus) {
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      password,
       action: "set_adgroup_status",
       campaign_id: campaignId,
       adgroup_id: adgroupId,
