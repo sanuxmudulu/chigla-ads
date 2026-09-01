@@ -19,8 +19,20 @@ const {
   json,
 } = require("./_shared/tiktok-mcp");
 
-const CONNECTION_COLUMNS =
-  "id, label, tiktok_email, tiktok_display_name, bc_id, bc_name, bc_count, status, last_verified_at, created_at";
+const CONNECTION_COLUMNS_BASE =
+  "id, label, tiktok_email, tiktok_display_name, status, last_verified_at, created_at";
+const CONNECTION_COLUMNS = `${CONNECTION_COLUMNS_BASE}, bc_id, bc_name, bc_count`;
+
+// Reads connections, gracefully degrading if the bc_* columns haven't been
+// added yet (migration supabase/tiktok_bc_columns.sql).
+async function readConnections(supabase) {
+  let res = await supabase.from("tiktok_connections").select(CONNECTION_COLUMNS).order("created_at", { ascending: true });
+  if (res.error && /bc_(id|name|count)/.test(res.error.message || "")) {
+    res = await supabase.from("tiktok_connections").select(CONNECTION_COLUMNS_BASE).order("created_at", { ascending: true });
+    if (!res.error) res.data = (res.data || []).map((c) => ({ ...c, bc_id: null, bc_name: null, bc_count: 0 }));
+  }
+  return res;
+}
 
 const ADVERTISER_COLUMNS =
   "connection_id, advertiser_id, advertiser_name, bc_id, bc_name, currency, timezone, display_timezone, status, role, country, tracked, updated_at";
@@ -31,7 +43,7 @@ exports.handler = async function (event) {
 
     if (event.httpMethod === "GET") {
       const [connectionsRes, advertisersRes] = await Promise.all([
-        supabase.from("tiktok_connections").select(CONNECTION_COLUMNS).order("created_at", { ascending: true }),
+        readConnections(supabase),
         supabase.from("tiktok_advertisers").select(ADVERTISER_COLUMNS).order("advertiser_name", { ascending: true }),
       ]);
       if (connectionsRes.error) return json(500, { error: "Supabase read failed", details: connectionsRes.error.message });
