@@ -310,11 +310,33 @@ td.negative { color: var(--loss); }
 #budgetModal select { width: 100%; margin-bottom: 4px; background: var(--bg-2); border: 1px solid var(--border-strong); color: var(--text-0); border-radius: var(--radius-md); padding: 8px 10px; font-size: 13px; font-family: var(--font-body); }
 #budgetAmountWrap[hidden] { display: none; }
 
-/* ---- affiliate network selector (TikTok modal) ---- */
-.tk-conn-net { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-.tk-conn-net label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); font-weight: 600; }
-.tk-conn-net select { background: var(--bg-1); border: 1px solid var(--border-strong); color: var(--text-0); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: var(--font-body); }
-.tk-conn-net-hint { font-size: 10.5px; color: var(--text-2); }
+/* ---- BC header: Glitchy/Mabac toggle + Disconnect ---- */
+.tk-conn-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.tk-net-toggle {
+  display: inline-flex; border: 1px solid var(--border-strong); border-radius: 7px; overflow: hidden; background: var(--bg-1);
+}
+.tk-net-toggle button {
+  font-family: var(--font-body); font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  padding: 5px 11px; border: none; background: transparent; color: var(--text-2); cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.tk-net-toggle button + button { border-left: 1px solid var(--border-strong); }
+.tk-net-toggle button:hover:not(.active):not(:disabled) { color: var(--text-0); }
+.tk-net-toggle button.active { background: var(--accent); color: var(--bg-0); }
+.tk-net-toggle.saving { opacity: 0.55; }
+.tk-net-toggle.saving button { cursor: progress; }
+
+.tk-disconnect {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-body); font-size: 11px; font-weight: 700;
+  padding: 5px 10px; border-radius: 7px; cursor: pointer;
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-2));
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger); transition: all 0.15s var(--ease);
+}
+.tk-disconnect:hover { background: color-mix(in srgb, var(--danger) 22%, var(--bg-2)); border-color: var(--danger); }
+.tk-disconnect-icon { font-size: 11px; line-height: 1; }
+
 @keyframes crownFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
 
 tr.new-conversion { animation: rowGlow 2.4s ease-out; }
@@ -333,21 +355,26 @@ tr.row-detail td { padding: 0; background: var(--bg-1); }
 }
 tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: auto; padding: 12px 16px; }
 
-/* ---- expanded ad-group panel — narrow, centered ---- */
+/* ---- expanded ad-group panel — narrow, centered, roomy columns ---- */
 .adgroups-loading, .adgroups-empty, .adgroups-error { font-size: 12px; color: var(--text-2); padding: 4px 2px; text-align: center; }
 .adgroups-error { color: var(--loss); }
+.adgroups-wrap { display: flex; justify-content: center; }
 .adgroups-table {
-  width: 100%; max-width: 480px; margin: 0 auto;
+  width: auto; max-width: 540px; margin: 0 auto;
   border-collapse: collapse; font-size: 12px; table-layout: fixed;
 }
 .adgroups-table th {
   text-align: left; font-weight: 600; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
-  color: var(--text-2); padding: 3px 8px; border-bottom: 1px solid var(--border);
+  color: var(--text-2); padding: 4px 16px; border-bottom: 1px solid var(--border);
 }
 .adgroups-table th.num, .adgroups-table td.num { text-align: right; }
-.adgroups-table td { padding: 7px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); vertical-align: middle; }
+.adgroups-table td { padding: 9px 16px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); vertical-align: middle; }
 .adgroups-table tr:last-child td { border-bottom: none; }
-.adgroups-table .status-badge { min-width: 0; width: 100%; text-align: center; padding-left: 4px; padding-right: 4px; }
+/* toggle + status columns hug their content; the big gaps go around the name */
+.adgroups-table td:first-child, .adgroups-table th:first-child { padding-left: 4px; padding-right: 10px; text-align: center; }
+.adgroups-table td:nth-child(2), .adgroups-table th:nth-child(2) { padding-right: 22px; }
+.adgroups-table td:nth-child(3), .adgroups-table th:nth-child(3) { padding-left: 4px; padding-right: 22px; }
+.adgroups-table .status-badge { display: inline-block; min-width: 66px; text-align: center; }
 .ag-name-cell { min-width: 0; }
 .ag-name { display: block; font-weight: 600; color: var(--text-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -543,7 +570,6 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
   flex: 1; min-width: 0; background: var(--bg-2); border: 1px solid var(--border-strong);
   color: var(--text-0); border-radius: var(--radius-md); padding: 8px 10px; font-size: 12.5px; font-family: var(--font-body);
 }
-.tk-conn-bcid { font-size: 10px; color: var(--text-2); opacity: 0.75; margin-left: 6px; }
 
 .tk-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; font-size: 12px; color: var(--text-2); }
 .tk-summary:empty { display: none; }
@@ -559,18 +585,13 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
   border: 1px solid var(--border); border-radius: var(--radius-md);
   background: var(--bg-2); padding: 12px;
 }
-.tk-conn-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.tk-conn-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.tk-conn-id { min-width: 0; }
 .tk-conn-label { font-weight: 700; font-size: 13.5px; }
 .tk-conn-sub { font-size: 11px; color: var(--text-2); margin-top: 2px; }
-.tk-conn-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.tk-mini {
-  background: var(--bg-1); border: 1px solid var(--border); color: var(--text-1);
-  font-family: var(--font-body); font-size: 11px; font-weight: 600;
-  padding: 5px 9px; border-radius: 6px; cursor: pointer; transition: all 0.15s var(--ease);
-}
-.tk-mini:hover { border-color: var(--accent); color: var(--accent); }
-.tk-mini.danger:hover { border-color: var(--danger); color: var(--danger); }
-.tk-mini:disabled { opacity: 0.5; cursor: default; }
+
+.tk-modal-actions { flex-wrap: wrap; }
+.tk-modal-actions #tiktokConnectBtn { margin-right: auto; }
 
 .tk-adv-list { display: flex; flex-direction: column; gap: 4px; }
 .tk-adv {

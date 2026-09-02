@@ -420,20 +420,12 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
     connPatch.bc_count = bcList.length;
   }
 
-  // If MABAC_BC_IDS / MABAC_BC_NAMES env is configured, keep the connection's
-  // stored affiliate_network in step with it (env is the source of truth). Any
-  // BC on that list becomes MABAC; everything else GLITCHY.
-  if (process.env.MABAC_BC_IDS || process.env.MABAC_BC_NAMES) {
-    const anyMabac = bcList.some((b) => resolveBcNetwork(b.bc_id, b.bc_name, "GLITCHY") === "MABAC");
-    connPatch.affiliate_network = anyMabac ? "MABAC" : "GLITCHY";
-  }
-
-  // Non-fatal: if the bc_* / affiliate_network columns aren't added yet, the UI
-  // label just falls back to the authenticated email until the migration is run.
-  let up = await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
-  if (up.error && /affiliate_network/.test(up.error.message || "")) {
-    delete connPatch.affiliate_network;
-    await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
+  // affiliate_network is user-controlled (modal toggle) — never touched here.
+  // Non-fatal: if the bc_* columns aren't added yet, the UI label just falls
+  // back to the authenticated email until the migration is run.
+  const up = await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
+  if (up.error && /bc_(id|name|count)/.test(up.error.message || "")) {
+    await supabase.from("tiktok_connections").update({ updated_at: now }).eq("id", connectionId);
   }
 
   return { advertiserCount: rows.length, businessCenterCount: bcList.length, businessCenters: bcList };
@@ -934,18 +926,11 @@ function normalizeNetwork(v) {
   return NETWORKS.includes(s) ? s : "GLITCHY";
 }
 
-// Which affiliate network owns a Business Center's campaigns. Deterministic,
-// no per-campaign name guessing:
-//   1. MABAC_BC_IDS env (comma-separated bc_id list) contains this bc_id  -> MABAC
-//   2. MABAC_BC_NAMES env (comma-separated, case-insensitive substring)   -> MABAC
-//   3. if either env is set, anything NOT listed is GLITCHY
-//   4. otherwise fall back to the stored tiktok_connections.affiliate_network
-function resolveBcNetwork(bcId, bcName, storedNetwork) {
-  const ids = (process.env.MABAC_BC_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const names = (process.env.MABAC_BC_NAMES || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-  if (bcId && ids.includes(String(bcId))) return "MABAC";
-  if (bcName && names.some((n) => String(bcName).toLowerCase().includes(n))) return "MABAC";
-  if (ids.length || names.length) return "GLITCHY";
+// Which affiliate network owns a Business Center's campaigns. The single source
+// of truth is the per-connection tiktok_connections.affiliate_network column
+// (set from the modal's Glitchy/Mabac toggle). Missing -> GLITCHY (preserves
+// existing behaviour).
+function resolveBcNetwork(_bcId, _bcName, storedNetwork) {
   return normalizeNetwork(storedNetwork);
 }
 

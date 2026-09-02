@@ -2,8 +2,11 @@
 //        -> { campaigns: [...] }   (campaigns inside tracked advertiser accounts)
 //
 // POST /.netlify/functions/tiktok-campaigns   { action, ... }
-//        "sync"                : re-scan advertisers + re-discover campaigns for every
-//                                TRACKED account ("Refresh TikTok Data")
+//        "sync"                : { connection_id? } — re-scan advertisers + re-discover
+//                                campaigns. Scoped to one Business Center when
+//                                connection_id is given ("Refresh Data"), else all.
+//        "budgets"            : advertiser-account caps + BC balances (all tracked)
+//        "set_advertiser_budget": { advertiser_id, budget_mode, budget } — write
 //        "adgroups"            : { campaign_id } — lazy-load one campaign's ad groups +
 //                                today's spend/CPA + status
 //        "set_campaign_status" : { campaign_id, operation_status } — write
@@ -251,7 +254,7 @@ exports.handler = async function (event) {
       }
     }
 
-    if (action === "sync") return syncAll(supabase);
+    if (action === "sync") return syncAll(supabase, body.connection_id || null);
 
     return json(400, { error: `Unknown action: ${action}` });
   } catch (err) {
@@ -345,17 +348,40 @@ async function persistCampaignStatus(supabase, campaignId, detail) {
     .eq("campaign_id", String(campaignId));
 }
 
-// ---- full re-discovery for every tracked advertiser ----
-async function syncAll(supabase) {
-  const { data: tracked, error: trackedErr } = await supabase
+// Re-discovery for tracked advertisers. `onlyConnectionId` scopes the whole
+// operation to a single Business Center/connection ("Refresh Data" button);
+// omit it for a full sync across every connection (used after "Save tracked
+// accounts").
+async function syncAll(supabase, onlyConnectionId) {
+  const { data: allTracked, error: trackedErr } = await supabase
     .from("tiktok_advertisers")
     .select("connection_id, advertiser_id, advertiser_name, status, tracked, bc_id, bc_name")
     .eq("tracked", true);
   if (trackedErr) return json(500, { error: "Supabase read failed", details: trackedErr.message });
 
-  if (!tracked || !tracked.length) {
-    await supabase.from("tiktok_campaigns").delete().neq("campaign_id", "");
-    return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked." });
+  const globalTrackedAdvIds = (allTracked || []).map((t) => String(t.advertiser_id));
+
+  // Prune campaigns whose advertiser is no longer tracked anywhere (only on a
+  // full sync — a scoped refresh must not touch other BCs).
+  if (!onlyConnectionId) {
+    if (globalTrackedAdvIds.length) {
+      await supabase.from("tiktok_campaigns").delete().not("advertiser_id", "in", `(${globalTrackedAdvIds.join(",")})`);
+    } else {
+      await supabase.from("tiktok_campaigns").delete().neq("campaign_id", "");
+      return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked." });
+    }
+  }
+
+  const tracked = onlyConnectionId
+    ? (allTracked || []).filter((t) => String(t.connection_id) === String(onlyConnectionId))
+    : allTracked || [];
+
+  if (!tracked.length) {
+    // Scoped refresh for a BC with nothing tracked -> drop its campaign rows.
+    if (onlyConnectionId) {
+      await supabase.from("tiktok_campaigns").delete().eq("connection_id", onlyConnectionId);
+    }
+    return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked for this Business Center." });
   }
 
   const byConnection = {};
@@ -365,9 +391,6 @@ async function syncAll(supabase) {
 
   const { serverUrl, redirectUrl } = resolveConfig();
   const summary = { ok: true, campaignCount: 0, connections: 0, perConnection: {} };
-
-  const trackedAdvIds = tracked.map((t) => String(t.advertiser_id));
-  await supabase.from("tiktok_campaigns").delete().not("advertiser_id", "in", `(${trackedAdvIds.join(",")})`);
 
   for (const [connectionId, advertisers] of Object.entries(byConnection)) {
     const { data: conn, error: connErr } = await supabase

@@ -648,17 +648,19 @@ function paintAdGroups(panel, s, rows) {
     return;
   }
   panel.innerHTML = `
-    <table class="adgroups-table">
-      <colgroup>
-        <col style="width:44px" /><col style="width:92px" /><col /><col style="width:76px" /><col style="width:76px" />
-      </colgroup>
-      <thead>
-        <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th></tr>
-      </thead>
-      <tbody>
-        ${rows.map((g) => adGroupRowHtml(s.campaignId, g)).join("")}
-      </tbody>
-    </table>`;
+    <div class="adgroups-wrap">
+      <table class="adgroups-table">
+        <colgroup>
+          <col style="width:40px" /><col style="width:110px" /><col style="width:190px" /><col style="width:92px" /><col style="width:92px" />
+        </colgroup>
+        <thead>
+          <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th></tr>
+        </thead>
+        <tbody>
+          ${rows.map((g) => adGroupRowHtml(s.campaignId, g)).join("")}
+        </tbody>
+      </table>
+    </div>`;
 }
 
 function adGroupRowHtml(campaignId, g) {
@@ -922,7 +924,7 @@ function closeToolsDrawer() {
 // selectedConnectionId: which connection the management view shows (multi-BC only)
 // trackedDraft: { "<connId>::<advId>": bool } — unsaved checkbox changes, survives
 //               switching the BC dropdown until Save.
-const tiktokState = { connections: [], advertisers: [], selectedConnectionId: null, trackedDraft: {} };
+const tiktokState = { connections: [], advertisers: [], selectedConnectionId: null, trackedDraft: {}, savingNetwork: null };
 let tiktokPwHandler = null;
 
 function openAccountsModal() {
@@ -935,7 +937,7 @@ function closeAccountsModal() {
 function wireTiktokEvents() {
   document.getElementById("tiktokConnectBtn").addEventListener("click", connectTiktok);
   document.getElementById("tiktokSaveTrackedBtn").addEventListener("click", saveTiktokTracked);
-  document.getElementById("tiktokSyncCampaignsBtn").addEventListener("click", () => refreshTiktokData());
+  document.getElementById("tiktokRefreshBtn").addEventListener("click", () => refreshTiktokData());
   document.getElementById("tiktokBcSelect").addEventListener("change", (e) => {
     tiktokState.selectedConnectionId = e.target.value;
     renderSelectedConnection();
@@ -950,9 +952,12 @@ function wireTiktokEvents() {
     }
   });
   wrap.addEventListener("click", (e) => {
-    const refreshBtn = e.target.closest("[data-tk-refresh]");
+    const netBtn = e.target.closest("[data-tk-net]");
+    if (netBtn && !netBtn.classList.contains("active")) {
+      setBcNetwork(netBtn.dataset.tkConn, netBtn.dataset.tkNet);
+      return;
+    }
     const disconnectBtn = e.target.closest("[data-tk-disconnect]");
-    if (refreshBtn) rescanConnection(refreshBtn.dataset.tkRefresh, refreshBtn);
     if (disconnectBtn) disconnectConnection(disconnectBtn.dataset.tkDisconnect);
   });
 
@@ -1031,10 +1036,10 @@ async function renderTiktokAccounts() {
     tiktokState.selectedConnectionId = ids[0] || null;
   }
 
-  // BC / connection dropdown — only when there's more than one connection.
+  // BC / connection dropdown at the top of the modal.
   const bcWrap = document.getElementById("tiktokBcSelectWrap");
   const bcSelect = document.getElementById("tiktokBcSelect");
-  if (tiktokState.connections.length > 1) {
+  if (tiktokState.connections.length) {
     bcSelect.innerHTML = tiktokState.connections
       .map((c) => `<option value="${c.id}" ${c.id === tiktokState.selectedConnectionId ? "selected" : ""}>${escapeHtml(connBcOptionLabel(c))}</option>`)
       .join("");
@@ -1067,21 +1072,28 @@ function renderSelectedConnection() {
     <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
     <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
 
-  const bcIdLine = c.bc_id ? `<span class="tk-conn-bcid">BC ${escapeHtml(c.bc_id)}</span>` : "";
   const rows = advs.length
     ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
     : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
 
+  const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
+  const saving = tiktokState.savingNetwork === c.id;
+
   wrap.innerHTML = `
     <div class="tk-conn">
       <div class="tk-conn-head">
-        <div>
+        <div class="tk-conn-id">
           <div class="tk-conn-label">${escapeHtml(connBcName(c))}</div>
-          <div class="tk-conn-sub">${escapeHtml(c.tiktok_email || c.tiktok_display_name || "")} ${bcIdLine}</div>
+          <div class="tk-conn-sub">${escapeHtml(c.tiktok_email || c.tiktok_display_name || "")}</div>
         </div>
-        <div class="tk-conn-actions">
-          <button class="tk-mini" data-tk-refresh="${c.id}">Re-scan</button>
-          <button class="tk-mini danger" data-tk-disconnect="${c.id}">Disconnect</button>
+        <div class="tk-conn-right">
+          <div class="tk-net-toggle${saving ? " saving" : ""}" title="Affiliate network for this Business Center's campaigns">
+            <button class="${net === "GLITCHY" ? "active" : ""}" data-tk-net="GLITCHY" data-tk-conn="${c.id}" ${saving ? "disabled" : ""}>Glitchy</button>
+            <button class="${net === "MABAC" ? "active" : ""}" data-tk-net="MABAC" data-tk-conn="${c.id}" ${saving ? "disabled" : ""}>Mabac</button>
+          </div>
+          <button class="tk-disconnect" data-tk-disconnect="${c.id}" title="Disconnect this Business Center">
+            <span class="tk-disconnect-icon">⚠</span> Disconnect
+          </button>
         </div>
       </div>
       <div class="tk-adv-list">${rows}</div>
@@ -1143,8 +1155,8 @@ function submitTiktokPw() {
 
 async function connectTiktok() {
   const password = await askTiktokPassword({
-    title: "Connect TikTok Ads",
-    hint: "Enter the dashboard password. You'll then be sent to TikTok to authorize this browser's logged-in Business account.",
+    title: "Connect New BC",
+    hint: "Enter the dashboard password. You'll then be sent to TikTok to authorize the Business Center logged in to this browser profile.",
   });
   if (!password) return;
   try {
@@ -1185,7 +1197,8 @@ async function saveTiktokTracked() {
     const trackedCount = tiktokState.advertisers.filter((a) => a.tracked).length;
     setStatus(`Saved — tracking ${trackedCount} advertiser account(s). Syncing campaigns…`);
     renderSelectedConnection();
-    await refreshTiktokData({ silent: true });
+    // Full sync so campaigns from every affected BC are consistent.
+    await refreshTiktokData({ silent: true, allBcs: true });
   } catch (err) {
     setStatus(`Couldn't save selection: ${err.message}`, true);
   } finally {
@@ -1194,17 +1207,18 @@ async function saveTiktokTracked() {
   }
 }
 
-// "Refresh TikTok Data" — re-scan advertisers + re-discover campaigns for every
-// tracked account, then re-merge the Detailed Metrics table. Manual fallback;
-// not needed for normal operation. No password.
-async function refreshTiktokData({ silent } = {}) {
-  const btn = document.getElementById("tiktokSyncCampaignsBtn");
-  const original = "Refresh TikTok Data";
+// "Refresh Data" — re-scan advertiser accounts (Approved/Suspended, new
+// accounts), re-discover tracked campaigns + ad/adgroup statuses, refresh
+// budgets/balances. Scoped to the currently selected BC unless allBcs. Does not
+// change which accounts are tracked. No password.
+async function refreshTiktokData({ silent, allBcs } = {}) {
+  const btn = document.getElementById("tiktokRefreshBtn");
   btn.disabled = true;
   btn.textContent = "Refreshing…";
   if (!silent) setStatus("Refreshing TikTok data…");
   try {
-    const r = await syncTiktokCampaigns();
+    const connId = allBcs ? null : tiktokState.selectedConnectionId;
+    const r = await syncTiktokCampaigns(connId);
     await loadTiktokCampaigns();
     loadTiktokBudgets();
     loadMabac();
@@ -1212,18 +1226,21 @@ async function refreshTiktokData({ silent } = {}) {
       await renderTiktokAccounts();
     }
     if (r.note) setStatus(r.note);
-    else setStatus(`Refreshed — ${r.campaignCount ?? 0} campaign(s) across ${r.connections ?? 0} connection(s).`);
+    else setStatus(`Refreshed — ${r.campaignCount ?? 0} campaign(s) across ${r.connections ?? 0} Business Center(s).`);
   } catch (err) {
     setStatus(`Refresh failed: ${err.message}`, true);
   } finally {
     btn.disabled = false;
-    btn.textContent = original;
+    btn.textContent = "Refresh Data";
   }
 }
 
-// Set which affiliate network supplies this connection/BC's campaign earnings.
-async function setConnectionAffiliateNetwork(connectionId, network, sel) {
-  sel.disabled = true;
+// Glitchy/Mabac toggle for one BC. Persists immediately, no password, subtle
+// saving state. Stamps the BC's campaigns with the new network and re-merges.
+async function setBcNetwork(connectionId, network) {
+  if (tiktokState.savingNetwork) return;
+  tiktokState.savingNetwork = connectionId;
+  renderSelectedConnection();
   try {
     await setConnectionNetwork(connectionId, network);
     const conn = tiktokState.connections.find((c) => c.id === connectionId);
@@ -1232,28 +1249,13 @@ async function setConnectionAffiliateNetwork(connectionId, network, sel) {
       if (String(c.connection_id) === String(connectionId)) c.affiliate_network = network;
     }
     rebuildSources();
-    setStatus(`Business Center now uses ${network === "MABAC" ? "Mabac" : "Glitchy"} for earnings.`);
+    loadMabac(); // ensure Mabac data is loaded if we just switched to it
+    setStatus(`${connBcName(conn || {})} now uses ${network === "MABAC" ? "Mabac" : "Glitchy"} for affiliate data.`);
   } catch (err) {
     setStatus(`Couldn't change network: ${err.message}`, true);
-    renderSelectedConnection(); // revert the select
   } finally {
-    sel.disabled = false;
-  }
-}
-
-// Re-scan ONE connection's advertiser accounts. No password.
-async function rescanConnection(connectionId, btn) {
-  btn.disabled = true;
-  btn.textContent = "Scanning…";
-  try {
-    const r = await postTiktokAction({ action: "refresh", connection_id: connectionId });
-    setStatus(`Re-scanned — ${r.advertiserCount ?? 0} advertiser account(s).`);
-    await renderTiktokAccounts();
-    loadTiktokBudgets();
-  } catch (err) {
-    setStatus(`Re-scan failed: ${err.message}`, true);
-    btn.disabled = false;
-    btn.textContent = "Re-scan";
+    tiktokState.savingNetwork = null;
+    renderSelectedConnection();
   }
 }
 

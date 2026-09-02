@@ -146,13 +146,15 @@ export async function fetchTiktokCampaigns() {
   return readTiktokResponse(res, "Request failed"); // { campaigns: [...] }
 }
 
-// "Refresh TikTok Data" — re-scans advertisers + re-discovers campaigns for
-// every tracked account. Not password-gated.
-export async function syncTiktokCampaigns() {
+// "Refresh Data" — re-scans advertisers + re-discovers campaigns. Pass a
+// connectionId to scope it to one Business Center; omit for a full sync across
+// every connection. Not password-gated.
+export async function syncTiktokCampaigns(connectionId) {
+  const body = connectionId ? { action: "sync", connection_id: connectionId } : { action: "sync" };
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "sync" }),
+    body: JSON.stringify(body),
   });
   return readTiktokResponse(res, "Refresh failed");
 }
