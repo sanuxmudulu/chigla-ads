@@ -650,7 +650,7 @@ function paintAdGroups(panel, s, rows) {
   panel.innerHTML = `
     <table class="adgroups-table">
       <colgroup>
-        <col style="width:44px" /><col style="width:96px" /><col /><col style="width:88px" /><col style="width:88px" />
+        <col style="width:44px" /><col style="width:92px" /><col /><col style="width:76px" /><col style="width:76px" />
       </colgroup>
       <thead>
         <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th></tr>
@@ -658,8 +658,7 @@ function paintAdGroups(panel, s, rows) {
       <tbody>
         ${rows.map((g) => adGroupRowHtml(s.campaignId, g)).join("")}
       </tbody>
-    </table>
-    <div class="adgroups-foot">TikTok · today only · CPA = cost per conversion</div>`;
+    </table>`;
 }
 
 function adGroupRowHtml(campaignId, g) {
@@ -675,10 +674,7 @@ function adGroupRowHtml(campaignId, g) {
         title: on ? "Ad group running — click to pause" : "Ad group paused — click to unpause",
       })}</td>
       <td><span class="status-badge ${tone}">${escapeHtml(g.status_label || "—")}</span></td>
-      <td class="ag-name-cell">
-        <div class="ag-name">${escapeHtml(g.adgroup_name || g.adgroup_id)}</div>
-        <div class="ag-id">${escapeHtml(g.adgroup_id)}</div>
-      </td>
+      <td class="ag-name-cell"><span class="ag-name">${escapeHtml(g.adgroup_name || g.adgroup_id)}</span></td>
       <td class="num">${money(g.spend)}</td>
       <td class="num">${money(g.cpa)}</td>
     </tr>`;
@@ -951,10 +947,7 @@ function wireTiktokEvents() {
     if (cb) {
       tiktokState.trackedDraft[`${cb.dataset.tkConnId}::${cb.dataset.tkAdvId}`] = cb.checked;
       updateSaveButton();
-      return;
     }
-    const netSel = e.target.closest("[data-tk-network]");
-    if (netSel) setConnectionAffiliateNetwork(netSel.dataset.tkNetwork, netSel.value, netSel);
   });
   wrap.addEventListener("click", (e) => {
     const refreshBtn = e.target.closest("[data-tk-refresh]");
@@ -1079,8 +1072,6 @@ function renderSelectedConnection() {
     ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
     : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
 
-  const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
-
   wrap.innerHTML = `
     <div class="tk-conn">
       <div class="tk-conn-head">
@@ -1092,14 +1083,6 @@ function renderSelectedConnection() {
           <button class="tk-mini" data-tk-refresh="${c.id}">Re-scan</button>
           <button class="tk-mini danger" data-tk-disconnect="${c.id}">Disconnect</button>
         </div>
-      </div>
-      <div class="tk-conn-net">
-        <label for="tkNet_${c.id}">Affiliate network</label>
-        <select id="tkNet_${c.id}" data-tk-network="${c.id}">
-          <option value="GLITCHY" ${net === "GLITCHY" ? "selected" : ""}>Glitchy</option>
-          <option value="MABAC" ${net === "MABAC" ? "selected" : ""}>Mabac</option>
-        </select>
-        <span class="tk-conn-net-hint">supplies clicks &amp; earnings for this BC's campaigns</span>
       </div>
       <div class="tk-adv-list">${rows}</div>
     </div>`;

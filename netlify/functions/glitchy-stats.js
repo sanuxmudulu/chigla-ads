@@ -6,7 +6,14 @@
 // no session / "New Day" concept — the day rolls over automatically at EST
 // midnight.
 
-const { todayEst, supabaseClient, fetchGlitchy, upsertTodayTotals } = require("./_shared/glitchy-daily");
+const {
+  todayEst,
+  supabaseClient,
+  fetchGlitchy,
+  upsertTodayTotals,
+  networkByCampaignName,
+} = require("./_shared/glitchy-daily");
+const { fetchMabacSubIdReport } = require("./_shared/mabac");
 
 exports.handler = async function (event) {
   try {
@@ -31,14 +38,24 @@ exports.handler = async function (event) {
     const sources = Object.keys(bySource).map((src) => ({ source: src, ...bySource[src] }));
 
     // Automatic daily history: refresh today's row whenever the requested range
-    // reaches today (i.e. the normal dashboard poll). Non-fatal if it fails.
+    // reaches today (the normal dashboard poll). Combined Glitchy + Mabac
+    // earnings by network ownership. Every part here is best-effort — a Mabac
+    // or Supabase hiccup never blocks the Glitchy response.
     if (endDate >= today) {
       const supabase = supabaseClient();
       if (supabase) {
+        let mabacSources = [];
         try {
-          await upsertTodayTotals(supabase, entries);
+          const mb = await fetchMabacSubIdReport({ startDate: today, endDate: today });
+          mabacSources = mb.sources || [];
         } catch (_) {
-          /* history write is best-effort — never block the dashboard */
+          /* Mabac optional */
+        }
+        try {
+          const networkByName = await networkByCampaignName(supabase);
+          await upsertTodayTotals(supabase, entries, { mabacSources, networkByName });
+        } catch (_) {
+          /* history write is best-effort */
         }
       }
     }

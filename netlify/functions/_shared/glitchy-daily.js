@@ -93,39 +93,107 @@ function summarizeBySource(entries) {
 // Sum only the entries dated `dateStr` (EST) — used for today's totals even
 // when the fetch covered a wider range.
 function sumEntriesForDate(entries, dateStr) {
+  const b = sumEntriesBySourceForDate(entries, dateStr);
   let payout = 0;
   let clicks = 0;
   let conversions = 0;
+  for (const s of Object.values(b)) {
+    payout += s.payout;
+    clicks += s.clicks;
+    conversions += s.conversions;
+  }
+  return { payout: Math.round(payout * 100) / 100, clicks, conversions };
+}
+
+// Per-source Glitchy totals for one EST date.
+function sumEntriesBySourceForDate(entries, dateStr) {
+  const bySource = {};
   for (const entry of entries) {
     const stat = entry.Stat || entry.stat || entry;
     if (!stat || !stat.source) continue;
     const dk = stat.date ? normalizeDateKey(stat.date, dateStr) : dateStr;
     if (dk !== dateStr) continue;
-    payout += Number(stat.payout || 0);
-    clicks += Number(stat.clicks || 0);
-    conversions += Number(stat.conversions || 0);
+    const s = (bySource[stat.source] = bySource[stat.source] || { payout: 0, clicks: 0, conversions: 0 });
+    s.payout += Number(stat.payout || 0);
+    s.clicks += Number(stat.clicks || 0);
+    s.conversions += Number(stat.conversions || 0);
   }
-  return { payout: Math.round(payout * 100) / 100, clicks, conversions };
+  return bySource;
 }
 
-// Upsert today's row in `daily_totals`. Only the columns the base table is
-// guaranteed to have (date, total_spend, total_earnings, updated_at) — the
-// calendar derives net profit and ROAS from spend + earnings. `total_spend`
-// stays 0 until TikTok metrics are merged into the daily history.
-async function upsertTodayTotals(supabase, entries) {
+// Combined affiliate earnings for a day, mirroring the frontend rebuildSources
+// network-ownership rule so daily_totals matches the dashboard KPIs:
+//   - a name declared MABAC (a tracked campaign in a Mabac BC) uses Mabac data
+//   - a name only present in Mabac (and not declared) uses Mabac data
+//   - everything else uses Glitchy data
+// Glitchy + Mabac are never summed for the same name.
+function combinedEarnings({ glitchyBySource = {}, mabacBySub1 = {}, networkByName = {} }) {
+  const names = new Set([
+    ...Object.keys(glitchyBySource),
+    ...Object.keys(mabacBySub1),
+    ...Object.keys(networkByName),
+  ]);
+  let earnings = 0;
+  let clicks = 0;
+  let conversions = 0;
+  for (const name of names) {
+    const g = glitchyBySource[name];
+    const m = mabacBySub1[name];
+    const declared = String(networkByName[name] || "").toUpperCase();
+    let net;
+    if (declared === "MABAC" || declared === "GLITCHY") net = declared;
+    else if (m && !g) net = "MABAC";
+    else net = "GLITCHY";
+    const src = net === "MABAC" ? m : g;
+    if (!src) continue;
+    earnings += net === "MABAC" ? Number(src.revenue || 0) : Number(src.payout || 0);
+    clicks += Number(src.clicks || 0);
+    conversions += Number(src.conversions || 0);
+  }
+  return { earnings: Math.round(earnings * 100) / 100, clicks, conversions };
+}
+
+// Upsert today's row in `daily_totals`. Base columns only (date, total_spend,
+// total_earnings, updated_at). `total_spend` stays 0 until TikTok per-campaign
+// metrics are merged. `opts.mabacSources` + `opts.networkByName` fold in Mabac
+// earnings by network ownership (no double-count with Glitchy).
+async function upsertTodayTotals(supabase, entries, opts = {}) {
   const today = todayEst();
-  const { payout } = sumEntriesForDate(entries, today);
+  const glitchyBySource = sumEntriesBySourceForDate(entries, today);
+  const mabacBySub1 = {};
+  for (const s of opts.mabacSources || []) if (s && s.sub1) mabacBySub1[s.sub1] = s;
+
+  const { earnings } = combinedEarnings({
+    glitchyBySource,
+    mabacBySub1,
+    networkByName: opts.networkByName || {},
+  });
+
   const { error } = await supabase.from("daily_totals").upsert(
     {
       date: today,
       total_spend: 0,
-      total_earnings: payout,
+      total_earnings: earnings,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "date" }
   );
   if (error) throw new Error(`daily_totals upsert failed: ${error.message}`);
-  return { date: today, total_earnings: payout };
+  return { date: today, total_earnings: earnings };
+}
+
+// campaign_name -> affiliate_network, from tiktok_campaigns. Empty on any error
+// (e.g. before the migration) so callers just get Glitchy-only behaviour.
+async function networkByCampaignName(supabase) {
+  try {
+    const { data, error } = await supabase.from("tiktok_campaigns").select("campaign_name, affiliate_network");
+    if (error) return {};
+    const map = {};
+    for (const r of data || []) if (r.campaign_name) map[r.campaign_name] = r.affiliate_network || "GLITCHY";
+    return map;
+  } catch (_) {
+    return {};
+  }
 }
 
 module.exports = {
@@ -135,5 +203,8 @@ module.exports = {
   fetchGlitchy,
   summarizeBySource,
   sumEntriesForDate,
+  sumEntriesBySourceForDate,
+  combinedEarnings,
+  networkByCampaignName,
   upsertTodayTotals,
 };

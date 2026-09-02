@@ -6,7 +6,14 @@
 // total_spend stays 0 until TikTok metrics are merged into the daily history —
 // so today net_profit == total_earnings and roas == 0, matching the KPI cards.
 
-const { todayEst, supabaseClient, fetchGlitchy, upsertTodayTotals } = require("./_shared/glitchy-daily");
+const {
+  todayEst,
+  supabaseClient,
+  fetchGlitchy,
+  upsertTodayTotals,
+  networkByCampaignName,
+} = require("./_shared/glitchy-daily");
+const { fetchMabacSubIdReport } = require("./_shared/mabac");
 
 exports.handler = async function (event) {
   try {
@@ -33,7 +40,15 @@ exports.handler = async function (event) {
     if (token && today >= monthStart && today <= monthEnd) {
       try {
         const { entries } = await fetchGlitchy(token, today, today);
-        refresh = await upsertTodayTotals(supabase, entries);
+        let mabacSources = [];
+        try {
+          const mb = await fetchMabacSubIdReport({ startDate: today, endDate: today });
+          mabacSources = mb.sources || [];
+        } catch (_) {
+          /* Mabac optional */
+        }
+        const networkByName = await networkByCampaignName(supabase);
+        refresh = await upsertTodayTotals(supabase, entries, { mabacSources, networkByName });
       } catch (err) {
         refresh = { error: err.message }; // non-fatal — stored history still renders
       }

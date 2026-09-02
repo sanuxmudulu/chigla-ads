@@ -4,6 +4,7 @@
 
 const CACHE_KEY = "chigla_glitchy_cache_v1";
 const DAILY_CACHE_KEY = "chigla_daily_totals_cache_v1";
+const MABAC_CACHE_KEY = "chigla_mabac_cache_v1";
 const THEME_KEY = "chigla_theme_v1";
 
 export async function fetchGlitchyStats(startDate, endDate) {
@@ -18,16 +19,33 @@ export async function fetchGlitchyStats(startDate, endDate) {
   return data;
 }
 
-// Mabac affiliate report (grouped by sub1 == campaign name). Never throws for a
-// config/API problem — returns { configured, sources: [] }.
+// Mabac affiliate report (grouped by sub1 == campaign name). Never throws.
+// Caches the last good result so a Mabac outage shows last-known data instead
+// of dropping Mabac rows to zero.
 export async function fetchMabacStats(startDate, endDate) {
   const qs = startDate && endDate ? `?startDate=${startDate}&endDate=${endDate}` : "";
-  const res = await fetch(`/.netlify/functions/mabac-stats${qs}`);
+  let data;
   try {
-    return await res.json();
+    const res = await fetch(`/.netlify/functions/mabac-stats${qs}`);
+    data = await res.json();
   } catch (_) {
-    return { configured: false, sources: [] };
+    data = null;
   }
+  if (data && data.configured && !data.error) {
+    try {
+      localStorage.setItem(MABAC_CACHE_KEY, JSON.stringify({ data, savedAt: Date.now() }));
+    } catch (_) {}
+    return data;
+  }
+  // Not configured, or an error / network failure -> fall back to last good.
+  try {
+    const raw = localStorage.getItem(MABAC_CACHE_KEY);
+    if (raw) {
+      const cached = JSON.parse(raw).data;
+      if (cached) return { ...cached, stale: true };
+    }
+  } catch (_) {}
+  return data || { configured: false, sources: [] };
 }
 
 export async function fetchDailyTotals(month) {

@@ -419,9 +419,22 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
     connPatch.bc_name = bcList.map((b) => b.bc_name).filter(Boolean).join(", ") || null;
     connPatch.bc_count = bcList.length;
   }
-  // Non-fatal: if the bc_* columns aren't added yet, the UI label just falls
-  // back to the authenticated email until the migration is run.
-  await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
+
+  // If MABAC_BC_IDS / MABAC_BC_NAMES env is configured, keep the connection's
+  // stored affiliate_network in step with it (env is the source of truth). Any
+  // BC on that list becomes MABAC; everything else GLITCHY.
+  if (process.env.MABAC_BC_IDS || process.env.MABAC_BC_NAMES) {
+    const anyMabac = bcList.some((b) => resolveBcNetwork(b.bc_id, b.bc_name, "GLITCHY") === "MABAC");
+    connPatch.affiliate_network = anyMabac ? "MABAC" : "GLITCHY";
+  }
+
+  // Non-fatal: if the bc_* / affiliate_network columns aren't added yet, the UI
+  // label just falls back to the authenticated email until the migration is run.
+  let up = await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
+  if (up.error && /affiliate_network/.test(up.error.message || "")) {
+    delete connPatch.affiliate_network;
+    await supabase.from("tiktok_connections").update(connPatch).eq("id", connectionId);
+  }
 
   return { advertiserCount: rows.length, businessCenterCount: bcList.length, businessCenters: bcList };
 }
@@ -658,7 +671,6 @@ async function loadAdGroupsForAdvertiser(client, advertiserId) {
 // Reuses a single MCP client for every advertiser in the connection.
 async function discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers, affiliateNetwork }) {
   const now = new Date().toISOString();
-  const network = normalizeNetwork(affiliateNetwork);
   const rows = [];
   const seenCampaignIds = [];
   const perAdvertiser = {};
@@ -698,7 +710,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
           advertiser_name: adv.advertiser_name || null,
           bc_id: adv.bc_id || null,
           bc_name: adv.bc_name || null,
-          affiliate_network: network,
+          affiliate_network: resolveBcNetwork(adv.bc_id, adv.bc_name, affiliateNetwork),
           campaign_name: campaign.campaign_name || cid,
           objective_type: campaign.objective_type || null,
           budget: campaign.budget != null ? Number(campaign.budget) : null,
@@ -922,6 +934,21 @@ function normalizeNetwork(v) {
   return NETWORKS.includes(s) ? s : "GLITCHY";
 }
 
+// Which affiliate network owns a Business Center's campaigns. Deterministic,
+// no per-campaign name guessing:
+//   1. MABAC_BC_IDS env (comma-separated bc_id list) contains this bc_id  -> MABAC
+//   2. MABAC_BC_NAMES env (comma-separated, case-insensitive substring)   -> MABAC
+//   3. if either env is set, anything NOT listed is GLITCHY
+//   4. otherwise fall back to the stored tiktok_connections.affiliate_network
+function resolveBcNetwork(bcId, bcName, storedNetwork) {
+  const ids = (process.env.MABAC_BC_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const names = (process.env.MABAC_BC_NAMES || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (bcId && ids.includes(String(bcId))) return "MABAC";
+  if (bcName && names.some((n) => String(bcName).toLowerCase().includes(n))) return "MABAC";
+  if (ids.length || names.length) return "GLITCHY";
+  return normalizeNetwork(storedNetwork);
+}
+
 // -------- advertiser account budget / Business Center balance --------
 //
 // Real TikTok model (verified against the live BC):
@@ -1051,6 +1078,7 @@ module.exports = {
   MCP_SCOPE,
   NETWORKS,
   normalizeNetwork,
+  resolveBcNetwork,
   auth,
   resolveConfig,
   getSupabase,
