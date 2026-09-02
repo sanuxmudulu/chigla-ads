@@ -224,21 +224,13 @@ select { cursor: pointer; }
   background: var(--bg-2); border: 1px solid var(--border-strong); color: var(--text-0);
   border-radius: var(--radius-md); padding: 6px 9px; font-size: 12px; font-family: var(--font-body); max-width: 220px;
 }
-.detail-bc-balance { display: flex; align-items: center; gap: 10px; line-height: 1.15; }
+.detail-bc-balance { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
 .detail-bc-balance[hidden] { display: none; }
-.bcbal-text { display: flex; flex-direction: column; align-items: flex-end; }
 .bcbal-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: #f4f6f8; font-weight: 700; }
 .bcbal-value { font-size: 15px; font-weight: 700; color: var(--profit); }
 .bcbal-value.ok { color: var(--profit); }
 .bcbal-value.warn { color: #ffb020; }
 .bcbal-value.bad { color: var(--loss); }
-.bcbal-topup {
-  font-family: var(--font-body); font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em;
-  padding: 5px 11px; border-radius: 6px; cursor: pointer; white-space: nowrap;
-  background: var(--bg-2); border: 1px solid var(--border-strong); color: var(--text-1);
-  transition: border-color 0.15s var(--ease), color 0.15s var(--ease), box-shadow 0.15s var(--ease);
-}
-.bcbal-topup:hover { border-color: var(--accent); color: var(--accent); box-shadow: var(--glow); }
 
 .chart-section canvas { max-height: 320px; }
 
@@ -603,17 +595,9 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .modal-error { font-size: 12.5px; color: var(--loss); min-height: 16px; margin: -6px 0 10px; }
 
-/* ---- delete-campaign + top-up modals ---- */
+/* ---- delete-campaign modal ---- */
 .del-camp-target { color: var(--text-0); font-size: 13px; margin-bottom: 8px; }
 .del-camp-target strong { color: var(--text-0); }
-.topup-balance-row {
-  display: flex; justify-content: space-between; align-items: baseline;
-  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 10px 12px; margin-bottom: 12px;
-}
-.topup-balance-row span { color: var(--text-2); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-.topup-balance-row strong { font-family: var(--font-tabular); font-size: 16px; font-weight: 700; color: var(--text-0); }
-#topupModal .modal-actions { flex-wrap: wrap; }
 
 /* ---------------- Detailed Metrics: STATUS column ---------------- */
 .status-badge {

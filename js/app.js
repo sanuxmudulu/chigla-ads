@@ -256,16 +256,6 @@ function wireEvents() {
   });
   document.getElementById("confirmDeleteCampaignBtn").addEventListener("click", confirmDeleteCampaign);
 
-  // ---- Top Up modal ----
-  document.getElementById("closeTopupModal").addEventListener("click", closeTopUpModal);
-  document.getElementById("topupCloseBtn").addEventListener("click", closeTopUpModal);
-  document.getElementById("topupModal").addEventListener("click", (e) => {
-    if (e.target.id === "topupModal") closeTopUpModal();
-  });
-  document.getElementById("topupOpenBillingBtn").addEventListener("click", () => {
-    window.open(TIKTOK_BILLING_URL, "_blank", "noopener,noreferrer");
-  });
-  document.getElementById("topupRefreshBtn").addEventListener("click", topUpRefreshBalance);
 
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     // Campaign pause/unpause button — must NOT toggle the row.
@@ -765,45 +755,7 @@ function updateBcBalanceBanner() {
   // > $10 healthy · $5–$10 warning · < $5 danger
   const tone = v > 10 ? "ok" : v >= 5 ? "warn" : "bad";
   el.hidden = false;
-  el.innerHTML = `
-    <div class="bcbal-text">
-      <span class="bcbal-label">Available Balance</span>
-      <span class="bcbal-value tabular ${tone}">${money(v)}</span>
-    </div>
-    <button type="button" class="bcbal-topup" id="bcTopUpBtn">Top Up</button>`;
-  const topBtn = document.getElementById("bcTopUpBtn");
-  if (topBtn) topBtn.addEventListener("click", () => openTopUpModal(bcId, bal));
-}
-
-// ---- Top Up (TikTok has no fund-a-BC API — link to its hosted billing) ----
-// The TikTok Ads MCP exposes no way to add external funds to a Business Center
-// (bc_transfer only moves money already inside the BC, and only for
-// monthly-invoiced BCs). We never collect card details — this just points the
-// user at TikTok's own billing page and re-checks the balance afterwards.
-const TIKTOK_BILLING_URL = "https://ads.tiktok.com/i18n/account/payment";
-
-function openTopUpModal(bcId, bal) {
-  const modal = document.getElementById("topupModal");
-  const conn = tiktokState.connections.find((c) => String(c.bc_id || "") === String(bcId));
-  document.getElementById("topupBcName").textContent = conn ? connBcName(conn) : "this Business Center";
-  document.getElementById("topupBalance").textContent = money(Number(bal.balance) || 0);
-  modal.classList.add("open");
-}
-function closeTopUpModal() {
-  document.getElementById("topupModal").classList.remove("open");
-}
-async function topUpRefreshBalance() {
-  const btn = document.getElementById("topupRefreshBtn");
-  btn.disabled = true;
-  btn.textContent = "Checking…";
-  try {
-    await loadTiktokBudgets();
-    const bal = state.bcBalances[state.detailBcFilter];
-    if (bal && bal.balance != null) document.getElementById("topupBalance").textContent = money(Number(bal.balance) || 0);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Refresh balance";
-  }
+  el.innerHTML = `<span class="bcbal-label">Available Balance</span><span class="bcbal-value tabular ${tone}">${money(v)}</span>`;
 }
 
 function toggleRowExpand(source) {
