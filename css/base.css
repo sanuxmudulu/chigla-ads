@@ -216,6 +216,19 @@ select { cursor: pointer; }
 
 .calendar-header-right { display: flex; align-items: center; gap: 10px; }
 
+.table-header-right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.detail-bc { display: flex; align-items: center; gap: 7px; }
+.detail-bc[hidden] { display: none; }
+.detail-bc label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); font-weight: 600; }
+.detail-bc select {
+  background: var(--bg-2); border: 1px solid var(--border-strong); color: var(--text-0);
+  border-radius: var(--radius-md); padding: 6px 9px; font-size: 12px; font-family: var(--font-body); max-width: 220px;
+}
+.detail-bc-balance { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+.detail-bc-balance[hidden] { display: none; }
+.bcbal-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); font-weight: 600; }
+.bcbal-value { font-size: 15px; font-weight: 700; color: var(--profit); }
+
 .chart-section canvas { max-height: 320px; }
 
 /* ---------------- Table ---------------- */
@@ -251,8 +264,47 @@ td.negative { color: var(--loss); }
 .type-badge.abo { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 60%, transparent); }
 .type-badge.cbo { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
 
-.source-name { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+#sourcesTable th.col-source, #sourcesTable td.source-name { max-width: 190px; }
+.source-name {
+  display: flex; align-items: center; gap: 6px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis;
+}
 .crown { filter: drop-shadow(0 0 6px var(--gold)); animation: crownFloat 2.4s ease-in-out infinite; }
+
+/* ---- advertiser account budget cell ---- */
+.budget-cell { white-space: nowrap; }
+.bud-none { color: var(--text-2); opacity: 0.6; }
+.bud { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; line-height: 1.2; }
+.bud-left { font-family: var(--font-tabular); font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12px; }
+.bud-left.ok { color: var(--profit); }
+.bud-left.bad { color: var(--loss); }
+.bud-left.muted { color: var(--text-2); font-weight: 600; }
+.bud-sub { font-size: 10px; color: var(--text-2); }
+.bud-edit {
+  margin-top: 2px; font-family: var(--font-body); font-size: 10px; font-weight: 700;
+  padding: 2px 7px; border-radius: 5px; cursor: pointer;
+  background: var(--bg-2); border: 1px solid var(--border); color: var(--text-1); transition: all 0.15s var(--ease);
+}
+.bud-edit:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.bud-edit:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- budget modal ---- */
+.budget-current {
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 10px 12px; margin-bottom: 14px; font-size: 12.5px; display: flex; flex-direction: column; gap: 4px;
+}
+.budget-current div { display: flex; justify-content: space-between; gap: 12px; }
+.budget-current span { color: var(--text-2); }
+.budget-current em { color: var(--text-2); font-style: normal; font-size: 11px; }
+.budget-field-label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); font-weight: 600; margin: 8px 0 5px; }
+#budgetModal select { width: 100%; margin-bottom: 4px; background: var(--bg-2); border: 1px solid var(--border-strong); color: var(--text-0); border-radius: var(--radius-md); padding: 8px 10px; font-size: 13px; font-family: var(--font-body); }
+#budgetAmountWrap[hidden] { display: none; }
+
+/* ---- affiliate network selector (TikTok modal) ---- */
+.tk-conn-net { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.tk-conn-net label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); font-weight: 600; }
+.tk-conn-net select { background: var(--bg-1); border: 1px solid var(--border-strong); color: var(--text-0); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: var(--font-body); }
+.tk-conn-net-hint { font-size: 10.5px; color: var(--text-2); }
 @keyframes crownFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
 
 tr.new-conversion { animation: rowGlow 2.4s ease-out; }

@@ -656,8 +656,9 @@ async function loadAdGroupsForAdvertiser(client, advertiserId) {
 // accounts under one connection, derives an effective status for each from the
 // CURRENT ad group + review state, and upserts them into tiktok_campaigns.
 // Reuses a single MCP client for every advertiser in the connection.
-async function discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers }) {
+async function discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers, affiliateNetwork }) {
   const now = new Date().toISOString();
+  const network = normalizeNetwork(affiliateNetwork);
   const rows = [];
   const seenCampaignIds = [];
   const perAdvertiser = {};
@@ -695,6 +696,9 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
           connection_id: connectionId,
           advertiser_id: advId,
           advertiser_name: adv.advertiser_name || null,
+          bc_id: adv.bc_id || null,
+          bc_name: adv.bc_name || null,
+          affiliate_network: network,
           campaign_name: campaign.campaign_name || cid,
           objective_type: campaign.objective_type || null,
           budget: campaign.budget != null ? Number(campaign.budget) : null,
@@ -717,9 +721,13 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
   }
 
   if (rows.length) {
-    const { error } = await supabase
-      .from("tiktok_campaigns")
-      .upsert(rows, { onConflict: "campaign_id" });
+    let { error } = await supabase.from("tiktok_campaigns").upsert(rows, { onConflict: "campaign_id" });
+    // Degrade gracefully if the bc_id/bc_name/affiliate_network columns aren't
+    // added yet (migration supabase/tiktok_bc_networks.sql).
+    if (error && /bc_(id|name)|affiliate_network/.test(error.message || "")) {
+      const stripped = rows.map(({ bc_id, bc_name, affiliate_network, ...rest }) => rest);
+      ({ error } = await supabase.from("tiktok_campaigns").upsert(stripped, { onConflict: "campaign_id" }));
+    }
     if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
   }
 
@@ -906,9 +914,143 @@ async function setAdGroupStatus({ client, advertiserId, adGroupId, operationStat
   return (res?.list || []).find((g) => String(g.adgroup_id) === String(adGroupId)) || null;
 }
 
+// -------- affiliate network association --------
+
+const NETWORKS = ["GLITCHY", "MABAC"];
+function normalizeNetwork(v) {
+  const s = String(v || "").toUpperCase();
+  return NETWORKS.includes(s) ? s : "GLITCHY";
+}
+
+// -------- advertiser account budget / Business Center balance --------
+//
+// Real TikTok model (verified against the live BC):
+//  * bc/balance/get      -> ONE shared balance pool per Business Center
+//                           (valid_account_balance). Ad accounts under a SHARED
+//                           payment portfolio all draw from this pool.
+//  * advertiser/balance/get (needs bc_id) -> per ad account:
+//        budget_mode  (UNLIMITED | MONTHLY_BUDGET | DAILY_BUDGET | CUSTOM_BUDGET)
+//        budget       (the cap amount; 0 when UNLIMITED)
+//        budget_cost  (spent against that cap)
+//        budget_remaining (cap - cost; only with the extra `fields`)
+//  * advertiser/update (bc_id + advertiser_budgets + budget_update_type=UPDATE)
+//        -> sets/changes/removes the per-account cap. Caller must be BC Admin
+//           with finance_role MANAGER.
+
+function toNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function getBcBalance({ client, bcId }) {
+  try {
+    const d = await mcpCall(client, "bc_balance_get", { bc_id: bcId });
+    return {
+      balance: toNum(d.valid_account_balance ?? d.account_balance),
+      cash_balance: toNum(d.valid_cash_balance ?? d.cash_balance),
+      currency: d.currency || "USD",
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// Every ad account's budget/cap under a BC, keyed by advertiser_id.
+async function getAdvertiserBudgets({ client, bcId }) {
+  const byId = {};
+  let page = 1;
+  for (;;) {
+    let d;
+    try {
+      d = await mcpCall(client, "advertiser_balance_get", {
+        bc_id: bcId,
+        fields: ["budget_remaining", "budget_amount_restriction"],
+        page,
+        page_size: 50,
+      });
+    } catch (err) {
+      // retry without the extra fields (older BCs)
+      if (page === 1) {
+        try {
+          d = await mcpCall(client, "advertiser_balance_get", { bc_id: bcId, page, page_size: 50 });
+        } catch (e2) {
+          return { error: e2.message };
+        }
+      } else {
+        break;
+      }
+    }
+    const list = d?.advertiser_account_list || [];
+    for (const a of list) {
+      const id = String(a.advertiser_id);
+      const mode = String(a.budget_mode || "UNLIMITED").toUpperCase();
+      const cap = toNum(a.budget);
+      const spent = toNum(a.budget_cost);
+      const remaining = a.budget_remaining != null ? toNum(a.budget_remaining) : Math.max(0, cap - spent);
+      byId[id] = {
+        advertiser_id: id,
+        budget_mode: mode,
+        capped: mode !== "UNLIMITED" && cap > 0,
+        cap,
+        spent,
+        remaining,
+        min_cap: toNum(a.budget_amount_restriction?.minimum_amount),
+        account_balance: toNum(a.valid_account_balance ?? a.account_balance),
+        currency: a.currency || "USD",
+        status: a.advertiser_status || null,
+      };
+    }
+    const info = d?.page_info || {};
+    if (!info.total_page || page >= info.total_page) break;
+    page += 1;
+    if (page > 40) break; // safety
+  }
+  return { byId };
+}
+
+// UPDATE / set / remove one ad account's cap.
+//   budgetMode: UNLIMITED | MONTHLY_BUDGET | DAILY_BUDGET | CUSTOM_BUDGET
+//   budget:     cap amount (ignored when UNLIMITED)
+async function setAdvertiserBudget({ client, bcId, advertiserId, budgetMode, budget }) {
+  const mode = String(budgetMode || "").toUpperCase();
+  const item = { advertiser_id: String(advertiserId), budget_mode: mode };
+  if (mode !== "UNLIMITED") item.budget = toNum(budget);
+
+  await mcpCall(client, "advertiser_update", {
+    bc_id: bcId,
+    budget_update_type: "UPDATE",
+    advertiser_budgets: [item],
+  });
+
+  // Re-read this one account.
+  const d = await mcpCall(client, "advertiser_balance_get", {
+    bc_id: bcId,
+    fields: ["budget_remaining", "budget_amount_restriction"],
+    filtering: { keyword: String(advertiserId) },
+    page_size: 50,
+  });
+  const a = (d?.advertiser_account_list || []).find((x) => String(x.advertiser_id) === String(advertiserId));
+  if (!a) return null;
+  const m = String(a.budget_mode || "UNLIMITED").toUpperCase();
+  const cap = toNum(a.budget);
+  const spent = toNum(a.budget_cost);
+  return {
+    advertiser_id: String(advertiserId),
+    budget_mode: m,
+    capped: m !== "UNLIMITED" && cap > 0,
+    cap,
+    spent,
+    remaining: a.budget_remaining != null ? toNum(a.budget_remaining) : Math.max(0, cap - spent),
+    account_balance: toNum(a.valid_account_balance ?? a.account_balance),
+    currency: a.currency || "USD",
+  };
+}
+
 module.exports = {
   DEFAULT_MCP_SERVER_URL,
   MCP_SCOPE,
+  NETWORKS,
+  normalizeNetwork,
   auth,
   resolveConfig,
   getSupabase,
@@ -924,4 +1066,7 @@ module.exports = {
   loadCampaignDetail,
   setCampaignStatus,
   setAdGroupStatus,
+  getBcBalance,
+  getAdvertiserBudgets,
+  setAdvertiserBudget,
 };

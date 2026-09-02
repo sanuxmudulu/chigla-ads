@@ -1,5 +1,6 @@
 import {
   fetchGlitchyStats,
+  fetchMabacStats,
   fetchDailyTotals,
   loadCache,
   fetchTiktokConnections,
@@ -10,6 +11,9 @@ import {
   fetchCampaignAdGroups,
   setCampaignStatus,
   setAdgroupStatus,
+  fetchTiktokBudgets,
+  setAdvertiserBudget,
+  setConnectionNetwork,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -48,8 +52,13 @@ const signedMoney = (n) => `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
 
 const state = {
   sources: [],
-  glitchyRows: [], // raw per-source rows from Glitchy (clicks/payout/conversions)
+  glitchyRows: [], // per-source rows from Glitchy (clicks/payout/conversions)
+  mabacRows: [], // per-sub1 rows from Mabac (clicks/conversions/revenue)
+  mabacConfigured: false,
   tiktokCampaigns: [], // rows from tiktok-campaigns (campaign_name == source)
+  budgets: {}, // advertiser_id -> { budget_mode, capped, cap, spent, remaining, account_balance, currency, bc_id }
+  bcBalances: {}, // bc_id -> { balance, currency, bc_name }
+  detailBcFilter: "all", // "all" | bc_id — VIEW filter only, never untracks anything
   adGroupsByCampaign: {}, // campaign_id -> { loadedAt, rows, error }
   pendingActions: new Set(), // in-flight campaign/adgroup writes (double-click guard)
   raw: [],
@@ -82,18 +91,48 @@ document.addEventListener("DOMContentLoaded", () => {
   startTimers();
   refreshAll();
   loadTiktokCampaigns();
+  loadTiktokBudgets();
 });
 
 // Loads stored TikTok campaign rows (fast, from Supabase) and merges them into
 // the Detailed Metrics table. Does not hit the TikTok API — that only happens
-// on an explicit "Sync campaigns".
+// on an explicit "Refresh TikTok Data".
 async function loadTiktokCampaigns() {
   try {
     const data = await fetchTiktokCampaigns();
     state.tiktokCampaigns = data.campaigns || [];
+    renderDetailBcSelector();
     rebuildSources();
   } catch (_) {
     /* non-fatal — table still renders from Glitchy data */
+  }
+}
+
+// Advertiser-account budgets + BC balances. Hits the MCP, so on load + manual
+// refresh only (not the 60s poll).
+async function loadTiktokBudgets() {
+  try {
+    const data = await fetchTiktokBudgets();
+    state.budgets = data.advertisers || {};
+    state.bcBalances = data.bc || {};
+    renderDetailBcSelector();
+    rebuildSources();
+  } catch (_) {
+    /* non-fatal — Budget column just shows — */
+  }
+}
+
+// Mabac affiliate report for today. Optional network — Glitchy keeps working
+// regardless.
+async function loadMabac() {
+  try {
+    const today = todayStr();
+    const data = await fetchMabacStats(today, today);
+    state.mabacConfigured = !!data.configured;
+    state.mabacRows = data.sources || [];
+    rebuildSources();
+  } catch (_) {
+    /* non-fatal */
   }
 }
 
@@ -153,6 +192,21 @@ function wireEvents() {
     renderChart();
   });
 
+  document.getElementById("detailBcSelect").addEventListener("change", (e) => {
+    state.detailBcFilter = e.target.value;
+    updateBcBalanceBanner();
+    rebuildSources();
+  });
+
+  // ---- Advertiser budget modal ----
+  document.getElementById("closeBudgetModal").addEventListener("click", closeBudgetModal);
+  document.getElementById("cancelBudgetBtn").addEventListener("click", closeBudgetModal);
+  document.getElementById("budgetModal").addEventListener("click", (e) => {
+    if (e.target.id === "budgetModal") closeBudgetModal();
+  });
+  document.getElementById("budgetModeSelect").addEventListener("change", syncBudgetAmountVisibility);
+  document.getElementById("confirmBudgetBtn").addEventListener("click", submitBudgetEdit);
+
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     // Campaign pause/unpause button — must NOT toggle the row.
     const campBtn = e.target.closest("[data-campaign-action]");
@@ -166,6 +220,13 @@ function wireEvents() {
     if (agBtn) {
       e.stopPropagation();
       handleAdgroupAction(agBtn);
+      return;
+    }
+    // Advertiser budget "Edit" / "Set cap" — must NOT toggle the row.
+    const budBtn = e.target.closest("[data-budget-edit]");
+    if (budBtn) {
+      e.stopPropagation();
+      openBudgetModal(budBtn.dataset.budgetEdit);
       return;
     }
     const row = e.target.closest("tr.source-row");
@@ -198,6 +259,7 @@ async function refreshAll(userTriggered) {
   refreshBtn.classList.add("spinning");
   try {
     const today = todayStr();
+    // Glitchy is the primary affiliate source and must not be affected by Mabac.
     const data = await fetchGlitchyStats(today, today);
     applyGlitchyResponse(data, { flagNewConversions: state.hasFetchedOnce });
     state.hasFetchedOnce = true;
@@ -208,6 +270,8 @@ async function refreshAll(userTriggered) {
   } finally {
     refreshBtn.classList.remove("spinning");
   }
+  // Mabac runs alongside, independently.
+  loadMabac();
 }
 
 function setStatus(msg, isError) {
@@ -235,42 +299,69 @@ function applyGlitchyResponse(data, { flagNewConversions }) {
   rebuildSources({ newConversionSources });
 }
 
-// Builds the Detailed Metrics table rows as the UNION of:
-//   - Glitchy sources (real clicks / earning / EPC), and
-//   - TikTok campaigns inside tracked advertiser accounts (SOURCE = campaign
-//     name), which appear as soon as the campaign exists even with no spend.
-// TikTok-supplied metrics (spend, CPM, CPA, CPNC, ROAS) are still 0 — the
-// metric merge is a later step. Matching key: Glitchy `source` == campaign name.
+// Builds the Detailed Metrics table rows.
+//
+// Affiliate-network ownership (deterministic, never double-counts):
+//   - A row backed by a tracked TikTok campaign uses THAT campaign's
+//     affiliate_network (from its connection). Its clicks/earning come only
+//     from that one network's data by name.
+//   - An affiliate row with no TikTok campaign: GLITCHY if it's a Glitchy
+//     source, MABAC if it's only in Mabac. Shown only in the "All Business
+//     Centers" view.
+// Glitchy earnings + Mabac earnings for the same name are NEVER summed.
+//
+// The Business Center selector (state.detailBcFilter) is a VIEW filter only —
+// it never changes tracked selections.
 function rebuildSources(opts = {}) {
-  const glitchyBySource = new Map(state.glitchyRows.map((s) => [s.source, s]));
+  const glitchyByName = new Map(state.glitchyRows.map((s) => [s.source, s]));
+  const mabacByName = new Map(state.mabacRows.map((s) => [s.sub1, s]));
+
+  const bcFilter = state.detailBcFilter || "all";
   const tiktokByName = new Map();
   for (const c of state.tiktokCampaigns) {
-    if (c && c.campaign_name) tiktokByName.set(c.campaign_name, c);
+    if (!c || !c.campaign_name) continue;
+    if (bcFilter !== "all" && String(c.bc_id || "") !== String(bcFilter)) continue;
+    tiktokByName.set(c.campaign_name, c);
   }
 
-  const names = new Set([...glitchyBySource.keys(), ...tiktokByName.keys()]);
+  const names = new Set(tiktokByName.keys());
+  if (bcFilter === "all") {
+    for (const k of glitchyByName.keys()) names.add(k);
+    for (const k of mabacByName.keys()) names.add(k);
+  }
 
   const merged = [...names].map((name) => {
-    const g = glitchyBySource.get(name);
     const tk = tiktokByName.get(name);
+    const g = glitchyByName.get(name);
+    const m = mabacByName.get(name);
 
-    const clicks = g?.clicks || 0;
-    const conversions = g?.conversions || 0;
-    const payout = g?.payout || 0;
+    // Which network owns this row's affiliate figures?
+    let network;
+    if (tk) network = String(tk.affiliate_network || "GLITCHY").toUpperCase();
+    else if (m && !g) network = "MABAC";
+    else network = "GLITCHY";
 
-    // From TikTok — not wired to real values yet, initialise at 0.
+    const aff = network === "MABAC" ? m : g;
+    const clicks = network === "MABAC" ? aff?.clicks || 0 : aff?.clicks || 0;
+    const conversions = network === "MABAC" ? aff?.conversions || 0 : aff?.conversions || 0;
+    const payout = network === "MABAC" ? aff?.revenue || 0 : aff?.payout || 0;
+
+    // TikTok-supplied metrics — not wired to real per-campaign values yet.
     const spend = 0;
     const cpm = 0;
     const cpa = 0;
-    const cpnc = 0;
-    const roas = 0;
+    const roas = spend > 0 ? payout / spend : 0;
+    const cpnc = clicks > 0 && spend > 0 ? spend / clicks : 0;
 
     const epc = clicks > 0 ? payout / clicks : 0;
     const profit = payout - spend;
 
+    const budget = tk && tk.advertiser_id ? state.budgets[String(tk.advertiser_id)] || null : null;
+
     return {
       source: name,
       offer_name: g?.offer_name || null,
+      network,
       clicks,
       conversions,
       payout,
@@ -286,9 +377,13 @@ function rebuildSources(opts = {}) {
         : null,
       hasTiktok: !!tk,
       hasGlitchy: !!g,
+      hasMabac: !!m,
       campaignId: tk ? String(tk.campaign_id) : null,
       campaignOpStatus: tk ? tk.campaign_operation_status || null : null, // ENABLE / DISABLE
+      advertiserId: tk ? String(tk.advertiser_id || "") : null,
       advertiserName: tk ? tk.advertiser_name || null : null,
+      bcId: tk ? tk.bc_id || null : null,
+      budget,
     };
   });
 
@@ -380,12 +475,13 @@ function renderTable(newConversionSources) {
       <td class="num">${money(s.payout)}</td>
       <td class="num">${money(s.epc)}</td>
       <td class="num ${s.roas >= 1 ? "positive" : "negative"}">${s.roas.toFixed(2)}x</td>
+      <td class="budget-cell">${budgetCell(s)}</td>
     `;
     tbody.appendChild(tr);
 
     const detailTr = document.createElement("tr");
     detailTr.className = "row-detail";
-    detailTr.innerHTML = `<td colspan="11"><div class="row-detail-inner"><div class="adgroups-panel" data-adgroups-for="${escapeHtml(s.campaignId || "")}"></div></div></td>`;
+    detailTr.innerHTML = `<td colspan="12"><div class="row-detail-inner"><div class="adgroups-panel" data-adgroups-for="${escapeHtml(s.campaignId || "")}"></div></div></td>`;
     tbody.appendChild(detailTr);
 
     if (state.expandedSources.has(s.source)) {
@@ -413,6 +509,83 @@ function campaignToggle(s) {
 // Shared toggle-switch markup (campaign rows + ad-group rows).
 function switchHtml({ on, pending, attrs, title }) {
   return `<button type="button" role="switch" aria-checked="${on ? "true" : "false"}" title="${escapeHtml(title || "")}" class="tk-switch${on ? " on" : ""}${pending ? " busy" : ""}" ${pending ? "disabled" : ""} ${attrs}></button>`;
+}
+
+// ADVERTISER-ACCOUNT budget/spend-cap (NOT campaign CBO budget). Keyed by
+// advertiser_id — one advertiser account can own several campaign rows.
+function budgetCell(s) {
+  if (!s.hasTiktok || !s.advertiserId) return "";
+  const b = s.budget;
+  const pending = state.pendingActions.has(`b:${s.advertiserId}`);
+  if (!b) {
+    return `<span class="bud-none" title="Budget info not loaded for this account">—</span>`;
+  }
+  const edit = `<button class="bud-edit" data-budget-edit="${escapeHtml(s.advertiserId)}" ${pending ? "disabled" : ""}>${pending ? "…" : b.capped ? "Edit" : "Set cap"}</button>`;
+  if (b.capped) {
+    const leftTone = b.remaining > 0 ? "ok" : "bad";
+    return `
+      <div class="bud" title="Spent ${money(b.spent)} of ${money(b.cap)}">
+        <span class="bud-left ${leftTone}">${money(b.remaining)} left</span>
+        <span class="bud-sub">of ${money(b.cap)} cap</span>
+        ${edit}
+      </div>`;
+  }
+  return `
+    <div class="bud" title="No spend cap on this ad account">
+      <span class="bud-left muted">Uncapped</span>
+      <span class="bud-sub">bal ${money(b.account_balance)}</span>
+      ${edit}
+    </div>`;
+}
+
+// ---- Business Center view filter (Detailed Metrics header) ----
+
+function trackedBcOptions() {
+  const map = new Map();
+  for (const c of state.tiktokCampaigns) {
+    if (c && c.bc_id) map.set(String(c.bc_id), c.bc_name || `BC ${c.bc_id}`);
+  }
+  return [...map.entries()].map(([bc_id, bc_name]) => ({ bc_id, bc_name }));
+}
+
+function renderDetailBcSelector() {
+  const wrap = document.getElementById("detailBcWrap");
+  const select = document.getElementById("detailBcSelect");
+  const opts = trackedBcOptions();
+
+  // Only worth showing once ≥ 2 BCs contribute tracked campaigns.
+  if (opts.length < 2) {
+    wrap.hidden = true;
+    if (state.detailBcFilter !== "all" && !opts.some((o) => o.bc_id === state.detailBcFilter)) {
+      state.detailBcFilter = "all";
+    }
+    updateBcBalanceBanner();
+    return;
+  }
+
+  if (!["all", ...opts.map((o) => o.bc_id)].includes(state.detailBcFilter)) {
+    state.detailBcFilter = "all";
+  }
+  select.innerHTML =
+    `<option value="all">All Business Centers</option>` +
+    opts
+      .map((o) => `<option value="${escapeHtml(o.bc_id)}" ${o.bc_id === state.detailBcFilter ? "selected" : ""}>${escapeHtml(o.bc_name)}</option>`)
+      .join("");
+  wrap.hidden = false;
+  updateBcBalanceBanner();
+}
+
+function updateBcBalanceBanner() {
+  const el = document.getElementById("detailBcBalance");
+  const bcId = state.detailBcFilter;
+  const bal = bcId !== "all" ? state.bcBalances[bcId] : null;
+  if (!bal || bal.error || bal.balance == null) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = `<span class="bcbal-label">Available Balance</span><span class="bcbal-value tabular">${money(bal.balance)}</span>`;
 }
 
 function toggleRowExpand(source) {
@@ -580,6 +753,85 @@ async function handleAdgroupAction(btn) {
   }
 }
 
+// ---- advertiser account spend-cap edit ----
+
+let budgetModalAdvId = null;
+const BUDGET_MODE_LABEL = {
+  UNLIMITED: "Uncapped",
+  MONTHLY_BUDGET: "Monthly",
+  DAILY_BUDGET: "Daily",
+  CUSTOM_BUDGET: "Custom",
+};
+
+function openBudgetModal(advertiserId) {
+  const b = state.budgets[String(advertiserId)];
+  budgetModalAdvId = String(advertiserId);
+  const s = state.sources.find((x) => x.advertiserId === budgetModalAdvId);
+  document.getElementById("budgetModalAcct").textContent =
+    (s && s.advertiserName ? `${s.advertiserName} · ` : "") + `Ad account ${budgetModalAdvId}`;
+
+  const cur = document.getElementById("budgetModalCurrent");
+  if (b && b.capped) {
+    cur.innerHTML = `
+      <div><span>Current cap</span><strong>${money(b.cap)}</strong> <em>(${BUDGET_MODE_LABEL[b.budget_mode] || b.budget_mode})</em></div>
+      <div><span>Spent</span><strong>${money(b.spent)}</strong></div>
+      <div><span>Remaining</span><strong>${money(b.remaining)}</strong></div>`;
+  } else {
+    cur.innerHTML = `<div><span>Current</span><strong>Uncapped</strong></div>
+      <div><span>Shared BC balance</span><strong>${b ? money(b.account_balance) : "—"}</strong></div>`;
+  }
+
+  document.getElementById("budgetModeSelect").value = b && b.capped ? b.budget_mode : "MONTHLY_BUDGET";
+  document.getElementById("budgetAmountInput").value = b && b.capped ? String(b.cap) : "";
+  document.getElementById("budgetModalError").textContent = "";
+  syncBudgetAmountVisibility();
+  document.getElementById("budgetModal").classList.add("open");
+}
+
+function closeBudgetModal() {
+  document.getElementById("budgetModal").classList.remove("open");
+  budgetModalAdvId = null;
+}
+
+function syncBudgetAmountVisibility() {
+  const mode = document.getElementById("budgetModeSelect").value;
+  document.getElementById("budgetAmountWrap").hidden = mode === "UNLIMITED";
+}
+
+async function submitBudgetEdit() {
+  if (!budgetModalAdvId) return;
+  const advId = budgetModalAdvId;
+  const mode = document.getElementById("budgetModeSelect").value;
+  const amount = Number(document.getElementById("budgetAmountInput").value);
+  const errEl = document.getElementById("budgetModalError");
+  errEl.textContent = "";
+
+  if (mode !== "UNLIMITED" && !(amount > 0)) {
+    errEl.textContent = "Enter a cap amount greater than 0.";
+    return;
+  }
+
+  const btn = document.getElementById("confirmBudgetBtn");
+  btn.disabled = true;
+  btn.textContent = "Updating…";
+  state.pendingActions.add(`b:${advId}`);
+  rebuildSources();
+
+  try {
+    const res = await setAdvertiserBudget(advId, mode, mode === "UNLIMITED" ? 0 : amount);
+    if (res.budget) state.budgets[advId] = { ...state.budgets[advId], ...res.budget };
+    closeBudgetModal();
+    setStatus(`Ad account cap updated — ${mode === "UNLIMITED" ? "uncapped" : money(amount) + " " + (BUDGET_MODE_LABEL[mode] || "")}.`);
+  } catch (err) {
+    errEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Update";
+    state.pendingActions.delete(`b:${advId}`);
+    rebuildSources();
+  }
+}
+
 // Real per-source hourly payout, derived from the raw Glitchy entries the
 // function already returns (not baseline-corrected, but genuinely real data).
 // Glitchy's "hour" field is already anchored to EST, so these buckets need
@@ -699,7 +951,10 @@ function wireTiktokEvents() {
     if (cb) {
       tiktokState.trackedDraft[`${cb.dataset.tkConnId}::${cb.dataset.tkAdvId}`] = cb.checked;
       updateSaveButton();
+      return;
     }
+    const netSel = e.target.closest("[data-tk-network]");
+    if (netSel) setConnectionAffiliateNetwork(netSel.dataset.tkNetwork, netSel.value, netSel);
   });
   wrap.addEventListener("click", (e) => {
     const refreshBtn = e.target.closest("[data-tk-refresh]");
@@ -824,6 +1079,8 @@ function renderSelectedConnection() {
     ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
     : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
 
+  const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
+
   wrap.innerHTML = `
     <div class="tk-conn">
       <div class="tk-conn-head">
@@ -835,6 +1092,14 @@ function renderSelectedConnection() {
           <button class="tk-mini" data-tk-refresh="${c.id}">Re-scan</button>
           <button class="tk-mini danger" data-tk-disconnect="${c.id}">Disconnect</button>
         </div>
+      </div>
+      <div class="tk-conn-net">
+        <label for="tkNet_${c.id}">Affiliate network</label>
+        <select id="tkNet_${c.id}" data-tk-network="${c.id}">
+          <option value="GLITCHY" ${net === "GLITCHY" ? "selected" : ""}>Glitchy</option>
+          <option value="MABAC" ${net === "MABAC" ? "selected" : ""}>Mabac</option>
+        </select>
+        <span class="tk-conn-net-hint">supplies clicks &amp; earnings for this BC's campaigns</span>
       </div>
       <div class="tk-adv-list">${rows}</div>
     </div>`;
@@ -958,6 +1223,8 @@ async function refreshTiktokData({ silent } = {}) {
   try {
     const r = await syncTiktokCampaigns();
     await loadTiktokCampaigns();
+    loadTiktokBudgets();
+    loadMabac();
     if (document.getElementById("accountsModal").classList.contains("open")) {
       await renderTiktokAccounts();
     }
@@ -971,6 +1238,26 @@ async function refreshTiktokData({ silent } = {}) {
   }
 }
 
+// Set which affiliate network supplies this connection/BC's campaign earnings.
+async function setConnectionAffiliateNetwork(connectionId, network, sel) {
+  sel.disabled = true;
+  try {
+    await setConnectionNetwork(connectionId, network);
+    const conn = tiktokState.connections.find((c) => c.id === connectionId);
+    if (conn) conn.affiliate_network = network;
+    for (const c of state.tiktokCampaigns) {
+      if (String(c.connection_id) === String(connectionId)) c.affiliate_network = network;
+    }
+    rebuildSources();
+    setStatus(`Business Center now uses ${network === "MABAC" ? "Mabac" : "Glitchy"} for earnings.`);
+  } catch (err) {
+    setStatus(`Couldn't change network: ${err.message}`, true);
+    renderSelectedConnection(); // revert the select
+  } finally {
+    sel.disabled = false;
+  }
+}
+
 // Re-scan ONE connection's advertiser accounts. No password.
 async function rescanConnection(connectionId, btn) {
   btn.disabled = true;
@@ -979,6 +1266,7 @@ async function rescanConnection(connectionId, btn) {
     const r = await postTiktokAction({ action: "refresh", connection_id: connectionId });
     setStatus(`Re-scanned — ${r.advertiserCount ?? 0} advertiser account(s).`);
     await renderTiktokAccounts();
+    loadTiktokBudgets();
   } catch (err) {
     setStatus(`Re-scan failed: ${err.message}`, true);
     btn.disabled = false;

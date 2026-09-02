@@ -18,6 +18,18 @@ export async function fetchGlitchyStats(startDate, endDate) {
   return data;
 }
 
+// Mabac affiliate report (grouped by sub1 == campaign name). Never throws for a
+// config/API problem — returns { configured, sources: [] }.
+export async function fetchMabacStats(startDate, endDate) {
+  const qs = startDate && endDate ? `?startDate=${startDate}&endDate=${endDate}` : "";
+  const res = await fetch(`/.netlify/functions/mabac-stats${qs}`);
+  try {
+    return await res.json();
+  } catch (_) {
+    return { configured: false, sources: [] };
+  }
+}
+
 export async function fetchDailyTotals(month) {
   const res = await fetch(`/.netlify/functions/daily-totals?month=${month}`);
   const data = await res.json();
@@ -161,6 +173,40 @@ export async function setAdgroupStatus(campaignId, adgroupId, operationStatus) {
     }),
   });
   return readTiktokResponse(res, "Ad group update failed");
+}
+
+// Read: advertiser-account budgets/caps + Business Center shared balances for
+// every tracked account. Hits the MCP — call on load / manual refresh, not on
+// the 60s poll.
+export async function fetchTiktokBudgets() {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "budgets" }),
+  });
+  return readTiktokResponse(res, "Couldn't load budgets"); // { advertisers: {...}, bc: {...} }
+}
+
+// Write: set / change / remove one advertiser account's spend cap.
+// budgetMode: UNLIMITED | MONTHLY_BUDGET | DAILY_BUDGET | CUSTOM_BUDGET
+export async function setAdvertiserBudget(advertiserId, budgetMode, budget) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "set_advertiser_budget", advertiser_id: advertiserId, budget_mode: budgetMode, budget }),
+  });
+  return readTiktokResponse(res, "Budget update failed");
+}
+
+// Config: which affiliate network supplies clicks/earnings for a connection's
+// campaigns. Not password-gated.
+export async function setConnectionNetwork(connectionId, affiliateNetwork) {
+  const res = await fetch("/.netlify/functions/tiktok-connections", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "set_network", connection_id: connectionId, affiliate_network: affiliateNetwork }),
+  });
+  return readTiktokResponse(res, "Couldn't set network");
 }
 
 // ---------------- Theme persistence ----------------

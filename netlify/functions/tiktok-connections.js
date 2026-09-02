@@ -21,15 +21,22 @@ const {
 
 const CONNECTION_COLUMNS_BASE =
   "id, label, tiktok_email, tiktok_display_name, status, last_verified_at, created_at";
-const CONNECTION_COLUMNS = `${CONNECTION_COLUMNS_BASE}, bc_id, bc_name, bc_count`;
+const CONNECTION_COLUMNS = `${CONNECTION_COLUMNS_BASE}, bc_id, bc_name, bc_count, affiliate_network`;
 
-// Reads connections, gracefully degrading if the bc_* columns haven't been
-// added yet (migration supabase/tiktok_bc_columns.sql).
+// Reads connections, gracefully degrading if the bc_* / affiliate_network
+// columns haven't been added yet (migration supabase/tiktok_bc_networks.sql).
 async function readConnections(supabase) {
   let res = await supabase.from("tiktok_connections").select(CONNECTION_COLUMNS).order("created_at", { ascending: true });
-  if (res.error && /bc_(id|name|count)/.test(res.error.message || "")) {
+  if (res.error && /bc_(id|name|count)|affiliate_network/.test(res.error.message || "")) {
     res = await supabase.from("tiktok_connections").select(CONNECTION_COLUMNS_BASE).order("created_at", { ascending: true });
-    if (!res.error) res.data = (res.data || []).map((c) => ({ ...c, bc_id: null, bc_name: null, bc_count: 0 }));
+    if (!res.error)
+      res.data = (res.data || []).map((c) => ({
+        ...c,
+        bc_id: null,
+        bc_name: null,
+        bc_count: 0,
+        affiliate_network: "GLITCHY",
+      }));
   }
   return res;
 }
@@ -70,6 +77,30 @@ exports.handler = async function (event) {
     }
 
     switch (body.action) {
+      case "set_network": {
+        const net = String(body.affiliate_network || "").toUpperCase();
+        if (net !== "GLITCHY" && net !== "MABAC") {
+          return json(400, { error: "affiliate_network must be GLITCHY or MABAC" });
+        }
+        if (!body.connection_id) return json(400, { error: "connection_id is required" });
+        const { error } = await supabase
+          .from("tiktok_connections")
+          .update({ affiliate_network: net, updated_at: new Date().toISOString() })
+          .eq("id", body.connection_id);
+        if (error) {
+          if (/affiliate_network/.test(error.message || "")) {
+            return json(400, { error: "Run the supabase/tiktok_bc_networks.sql migration first." });
+          }
+          return json(500, { error: "Update failed", details: error.message });
+        }
+        // Keep denormalised campaign rows in step.
+        await supabase
+          .from("tiktok_campaigns")
+          .update({ affiliate_network: net, updated_at: new Date().toISOString() })
+          .eq("connection_id", body.connection_id);
+        return json(200, { ok: true, affiliate_network: net });
+      }
+
       case "track": {
         const selections = Array.isArray(body.selections) ? body.selections : [];
         const now = new Date().toISOString();

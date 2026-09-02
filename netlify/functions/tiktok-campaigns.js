@@ -23,11 +23,25 @@ const {
   loadCampaignDetail,
   setCampaignStatus,
   setAdGroupStatus,
+  getBcBalance,
+  getAdvertiserBudgets,
+  setAdvertiserBudget,
   json,
 } = require("./_shared/tiktok-mcp");
 
-const CAMPAIGN_COLUMNS =
+const CAMPAIGN_COLUMNS_BASE =
   "campaign_id, connection_id, advertiser_id, advertiser_name, campaign_name, objective_type, budget, budget_mode, campaign_operation_status, campaign_secondary_status, effective_status, effective_tone, status_detail, ad_count, active_ad_count, create_time, updated_at";
+const CAMPAIGN_COLUMNS = `${CAMPAIGN_COLUMNS_BASE}, bc_id, bc_name, affiliate_network`;
+
+async function readCampaigns(supabase) {
+  let res = await supabase.from("tiktok_campaigns").select(CAMPAIGN_COLUMNS).order("campaign_name", { ascending: true });
+  if (res.error && /bc_(id|name)|affiliate_network/.test(res.error.message || "")) {
+    res = await supabase.from("tiktok_campaigns").select(CAMPAIGN_COLUMNS_BASE).order("campaign_name", { ascending: true });
+    if (!res.error)
+      res.data = (res.data || []).map((c) => ({ ...c, bc_id: null, bc_name: null, affiliate_network: "GLITCHY" }));
+  }
+  return res;
+}
 
 // Loads a stored campaign row and confirms its advertiser account is tracked.
 async function resolveTrackedCampaign(supabase, campaignId) {
@@ -40,7 +54,7 @@ async function resolveTrackedCampaign(supabase, campaignId) {
 
   const { data: adv } = await supabase
     .from("tiktok_advertisers")
-    .select("tracked, status, timezone, display_timezone")
+    .select("tracked, status, timezone, display_timezone, bc_id, bc_name")
     .eq("connection_id", campaign.connection_id)
     .eq("advertiser_id", campaign.advertiser_id)
     .maybeSingle();
@@ -75,10 +89,7 @@ exports.handler = async function (event) {
     const supabase = getSupabase();
 
     if (event.httpMethod === "GET") {
-      const { data, error } = await supabase
-        .from("tiktok_campaigns")
-        .select(CAMPAIGN_COLUMNS)
-        .order("campaign_name", { ascending: true });
+      const { data, error } = await readCampaigns(supabase);
       if (error) return json(500, { error: "Supabase read failed", details: error.message });
       return json(200, { campaigns: data || [] });
     }
@@ -93,6 +104,9 @@ exports.handler = async function (event) {
     }
 
     const action = body.action;
+
+    // ---- read-only: advertiser account budgets + BC balance ----
+    if (action === "budgets") return budgetsForTracked(supabase);
 
     // ---- read-only: lazy ad-group load for one campaign ----
     if (action === "adgroups") {
@@ -205,6 +219,38 @@ exports.handler = async function (event) {
       });
     }
 
+    if (action === "set_advertiser_budget") {
+      if (!body.advertiser_id) return json(400, { error: "advertiser_id is required" });
+      const mode = String(body.budget_mode || "").toUpperCase();
+      const allowed = ["UNLIMITED", "MONTHLY_BUDGET", "DAILY_BUDGET", "CUSTOM_BUDGET"];
+      if (!allowed.includes(mode)) return json(400, { error: `budget_mode must be one of ${allowed.join(", ")}` });
+      const amount = Number(body.budget);
+      if (mode !== "UNLIMITED" && !(amount > 0)) return json(400, { error: "budget must be a positive number" });
+
+      const r = await resolveTrackedAdvertiser(supabase, body.advertiser_id);
+      if (r.error) return r.error;
+      if (!r.bcId) {
+        return json(400, {
+          error: "This advertiser account isn't under a Business Center this connection can manage its budget for.",
+        });
+      }
+
+      try {
+        const updated = await withClient(supabase, r.connection, (client) =>
+          setAdvertiserBudget({
+            client,
+            bcId: r.bcId,
+            advertiserId: String(body.advertiser_id),
+            budgetMode: mode,
+            budget: amount,
+          })
+        );
+        return json(200, { ok: true, advertiser_id: String(body.advertiser_id), budget: updated });
+      } catch (err) {
+        return json(502, { error: "TikTok rejected the budget change", details: err.message });
+      }
+    }
+
     if (action === "sync") return syncAll(supabase);
 
     return json(400, { error: `Unknown action: ${action}` });
@@ -212,6 +258,71 @@ exports.handler = async function (event) {
     return json(500, { error: "Request failed", details: err.message });
   }
 };
+
+// Confirms an advertiser account is tracked and returns its connection + bc_id.
+async function resolveTrackedAdvertiser(supabase, advertiserId) {
+  const { data: advs } = await supabase
+    .from("tiktok_advertisers")
+    .select("connection_id, advertiser_id, tracked, bc_id, bc_name")
+    .eq("advertiser_id", String(advertiserId))
+    .eq("tracked", true);
+  const adv = (advs || [])[0];
+  if (!adv) return { error: json(403, { error: "That advertiser account is not tracked." }) };
+
+  const { data: conn } = await supabase
+    .from("tiktok_connections")
+    .select("*")
+    .eq("id", adv.connection_id)
+    .maybeSingle();
+  if (!conn) return { error: json(404, { error: "Connection not found." }) };
+
+  return { advertiser: adv, connection: conn, bcId: adv.bc_id || conn.bc_id || null };
+}
+
+// Per-advertiser budget/cap + per-BC shared balance for every tracked account.
+async function budgetsForTracked(supabase) {
+  const { data: tracked, error } = await supabase
+    .from("tiktok_advertisers")
+    .select("connection_id, advertiser_id, bc_id")
+    .eq("tracked", true);
+  if (error) return json(500, { error: "Supabase read failed", details: error.message });
+  if (!tracked || !tracked.length) return json(200, { advertisers: {}, bc: {} });
+
+  // Group by connection so we authenticate once per connection.
+  const byConnection = {};
+  for (const t of tracked) (byConnection[t.connection_id] = byConnection[t.connection_id] || []).push(t);
+
+  const { serverUrl, redirectUrl } = resolveConfig();
+  const advertisers = {};
+  const bc = {}; // bc_id -> { balance, currency, connection_id, bc_name }
+
+  for (const [connectionId, list] of Object.entries(byConnection)) {
+    const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+    if (!conn) continue;
+    const bcIds = [...new Set(list.map((t) => t.bc_id || conn.bc_id).filter(Boolean))];
+    if (!bcIds.length) continue;
+
+    const provider = new SupabaseOAuthProvider({ supabase, serverUrl, redirectUrl, connection: conn });
+    let client;
+    try {
+      ({ client } = await connectMcp({ provider, serverUrl }));
+      for (const bcId of bcIds) {
+        const [bal, budgets] = await Promise.all([
+          getBcBalance({ client, bcId }),
+          getAdvertiserBudgets({ client, bcId }),
+        ]);
+        bc[bcId] = { bc_id: bcId, bc_name: conn.bc_name || null, connection_id: connectionId, ...bal };
+        for (const [advId, b] of Object.entries(budgets.byId || {})) advertisers[advId] = { ...b, bc_id: bcId };
+      }
+    } catch (err) {
+      bc[`err:${connectionId}`] = { error: err.message };
+    } finally {
+      if (client) await client.close().catch(() => {});
+    }
+  }
+
+  return json(200, { advertisers, bc });
+}
 
 function normalizeOp(v) {
   const s = String(v || "").toUpperCase();
@@ -238,7 +349,7 @@ async function persistCampaignStatus(supabase, campaignId, detail) {
 async function syncAll(supabase) {
   const { data: tracked, error: trackedErr } = await supabase
     .from("tiktok_advertisers")
-    .select("connection_id, advertiser_id, advertiser_name, status, tracked")
+    .select("connection_id, advertiser_id, advertiser_name, status, tracked, bc_id, bc_name")
     .eq("tracked", true);
   if (trackedErr) return json(500, { error: "Supabase read failed", details: trackedErr.message });
 
@@ -279,7 +390,13 @@ async function syncAll(supabase) {
       } catch (_) {
         /* campaign discovery is the priority — don't fail the whole sync on this */
       }
-      const res = await discoverAndStoreCampaigns({ supabase, client, connectionId, trackedAdvertisers: advertisers });
+      const res = await discoverAndStoreCampaigns({
+        supabase,
+        client,
+        connectionId,
+        trackedAdvertisers: advertisers,
+        affiliateNetwork: conn.affiliate_network,
+      });
       summary.campaignCount += res.campaignCount;
       summary.connections += 1;
       summary.perConnection[connectionId] = res.perAdvertiser;

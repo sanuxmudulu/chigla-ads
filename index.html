@@ -95,6 +95,13 @@
   <section class="table-section card">
     <div class="table-header">
       <div class="section-title-row"><h2>Detailed Metrics</h2></div>
+      <div class="table-header-right">
+        <div class="detail-bc" id="detailBcWrap" hidden>
+          <label for="detailBcSelect">Business Center</label>
+          <select id="detailBcSelect"></select>
+        </div>
+        <div class="detail-bc-balance" id="detailBcBalance" hidden></div>
+      </div>
     </div>
     <div class="table-wrap">
       <table id="sourcesTable">
@@ -102,7 +109,7 @@
           <tr>
             <th>On/Off</th>
             <th>Status</th>
-            <th>Source</th>
+            <th class="col-source">Source</th>
             <th>Spend</th>
             <th>CPM</th>
             <th>CPA</th>
@@ -111,6 +118,7 @@
             <th>Earning</th>
             <th>EPC</th>
             <th>ROAS</th>
+            <th>Budget</th>
           </tr>
         </thead>
         <tbody id="sourcesBody"></tbody>
@@ -177,6 +185,34 @@
       <button class="icon-btn" id="tiktokConnectBtn">Connect TikTok Ads</button>
       <button class="icon-btn" id="tiktokSyncCampaignsBtn">Refresh TikTok Data</button>
       <button class="icon-btn primary" id="tiktokSaveTrackedBtn" disabled>Save tracked accounts</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADVERTISER BUDGET MODAL ============ -->
+<div class="modal-backdrop" id="budgetModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Account spend cap</h3>
+      <button id="closeBudgetModal">✕</button>
+    </div>
+    <p id="budgetModalAcct" style="margin-top:-4px;"></p>
+    <div class="budget-current" id="budgetModalCurrent"></div>
+    <label class="budget-field-label" for="budgetModeSelect">Cap type</label>
+    <select id="budgetModeSelect">
+      <option value="UNLIMITED">Uncapped (no limit)</option>
+      <option value="MONTHLY_BUDGET">Monthly budget</option>
+      <option value="DAILY_BUDGET">Daily budget</option>
+      <option value="CUSTOM_BUDGET">Custom (one-time) budget</option>
+    </select>
+    <div id="budgetAmountWrap">
+      <label class="budget-field-label" for="budgetAmountInput">New cap amount ($)</label>
+      <input type="number" id="budgetAmountInput" min="0" step="1" placeholder="100" />
+    </div>
+    <div class="modal-error" id="budgetModalError"></div>
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelBudgetBtn">Cancel</button>
+      <button class="icon-btn primary" id="confirmBudgetBtn">Update</button>
     </div>
   </div>
 </div>
