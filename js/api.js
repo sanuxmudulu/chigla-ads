@@ -218,6 +218,19 @@ export async function setAdvertiserBudget(advertiserId, budgetMode, budget) {
   return readTiktokResponse(res, "Budget update failed");
 }
 
+// Write: permanently delete a campaign in TikTok. Not password-gated (server
+// still verifies the campaign belongs to a tracked advertiser account). When
+// TikTok refuses because the advertiser is suspended, the campaign is hidden
+// locally instead — the response `outcome` is "deleted" or "hidden".
+export async function deleteTiktokCampaign(campaignId) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete_campaign", campaign_id: campaignId }),
+  });
+  return readTiktokResponse(res, "Campaign delete failed");
+}
+
 // Config: which affiliate network supplies clicks/earnings for a connection's
 // campaigns. Not password-gated.
 export async function setConnectionNetwork(connectionId, affiliateNetwork) {

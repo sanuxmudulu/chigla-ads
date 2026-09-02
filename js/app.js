@@ -14,6 +14,7 @@ import {
   fetchTiktokBudgets,
   setAdvertiserBudget,
   setConnectionNetwork,
+  deleteTiktokCampaign,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -50,6 +51,31 @@ const money = (n) => `$${(n || 0).toFixed(2)}`;
 const num = (n) => (n || 0).toLocaleString("en-US");
 const signedMoney = (n) => `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
 
+// Smooth ROAS → colour ramp for the ROAS cell. 0 red · 0.5 orange · 1 yellow ·
+// 1.5 yellow-green · 2+ strong green (clamped, so 2x and 5x read the same). HSL
+// so it interpolates cleanly; lightness kept high enough to stay readable on the
+// dark themes.
+function roasColor(roas) {
+  const r = Math.max(0, Math.min(2, Number(roas) || 0));
+  const stops = [
+    [0, 0],
+    [0.5, 25],
+    [1, 55],
+    [1.5, 92],
+    [2, 142],
+  ];
+  let hue = 142;
+  for (let i = 1; i < stops.length; i++) {
+    if (r <= stops[i][0]) {
+      const [x0, h0] = stops[i - 1];
+      const [x1, h1] = stops[i];
+      hue = h0 + ((h1 - h0) * (r - x0)) / (x1 - x0);
+      break;
+    }
+  }
+  return `hsl(${Math.round(hue)}, 85%, 62%)`;
+}
+
 const state = {
   sources: [],
   glitchyRows: [], // per-source rows from Glitchy (clicks/payout/conversions)
@@ -72,6 +98,9 @@ const state = {
 
 let lastUpdatedAt = null;
 let mainChartCanvas = null;
+let openRowMenuFor = null; // campaignId whose ⋮ menu is open, or null
+let rowMenuEl = null; // the floating menu element (appended to <body>)
+let deleteCampaignTarget = null; // source row pending delete confirmation
 
 // ============================== INIT ==============================
 
@@ -207,6 +236,37 @@ function wireEvents() {
   document.getElementById("budgetModeSelect").addEventListener("change", syncBudgetAmountVisibility);
   document.getElementById("confirmBudgetBtn").addEventListener("click", submitBudgetEdit);
 
+  // ---- ⋮ row menu: close on outside click / scroll / Escape ----
+  document.addEventListener("click", (e) => {
+    if (!openRowMenuFor) return;
+    if (e.target.closest(".rowmenu") || e.target.closest("[data-row-menu]")) return;
+    closeRowMenu();
+  });
+  window.addEventListener("scroll", () => closeRowMenu(), true);
+  window.addEventListener("resize", () => closeRowMenu());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeRowMenu();
+  });
+
+  // ---- delete campaign modal ----
+  document.getElementById("closeDeleteCampaignModal").addEventListener("click", closeDeleteCampaignModal);
+  document.getElementById("cancelDeleteCampaignBtn").addEventListener("click", closeDeleteCampaignModal);
+  document.getElementById("deleteCampaignModal").addEventListener("click", (e) => {
+    if (e.target.id === "deleteCampaignModal") closeDeleteCampaignModal();
+  });
+  document.getElementById("confirmDeleteCampaignBtn").addEventListener("click", confirmDeleteCampaign);
+
+  // ---- Top Up modal ----
+  document.getElementById("closeTopupModal").addEventListener("click", closeTopUpModal);
+  document.getElementById("topupCloseBtn").addEventListener("click", closeTopUpModal);
+  document.getElementById("topupModal").addEventListener("click", (e) => {
+    if (e.target.id === "topupModal") closeTopUpModal();
+  });
+  document.getElementById("topupOpenBillingBtn").addEventListener("click", () => {
+    window.open(TIKTOK_BILLING_URL, "_blank", "noopener,noreferrer");
+  });
+  document.getElementById("topupRefreshBtn").addEventListener("click", topUpRefreshBalance);
+
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     // Campaign pause/unpause button — must NOT toggle the row.
     const campBtn = e.target.closest("[data-campaign-action]");
@@ -222,11 +282,11 @@ function wireEvents() {
       handleAdgroupAction(agBtn);
       return;
     }
-    // Advertiser budget "Edit" / "Set cap" — must NOT toggle the row.
-    const budBtn = e.target.closest("[data-budget-edit]");
-    if (budBtn) {
+    // Far-right ⋮ campaign action menu — must NOT toggle the row.
+    const menuBtn = e.target.closest("[data-row-menu]");
+    if (menuBtn) {
       e.stopPropagation();
-      openBudgetModal(budBtn.dataset.budgetEdit);
+      toggleRowMenu(menuBtn);
       return;
     }
     const row = e.target.closest("tr.source-row");
@@ -444,9 +504,12 @@ function setKpi(id, text, sentiment) {
 
 function renderTable(newConversionSources) {
   const tbody = document.getElementById("sourcesBody");
+  closeRowMenu(); // any re-render invalidates the floating menu's anchor
   tbody.innerHTML = "";
 
-  const sorted = [...state.sources].sort((a, b) => b.profit - a.profit);
+  // Winners first: highest ROAS, then (tie-break) highest spend. Re-sorted on
+  // every rebuild so the table re-orders itself as fresh metrics land.
+  const sorted = [...state.sources].sort((a, b) => b.roas - a.roas || b.spend - a.spend);
   // ROAS is 0 for every row until TikTok spend is real, so a "best ROAS"
   // crown would just be an arbitrary tie — only show it once ROAS can
   // actually distinguish rows.
@@ -455,6 +518,9 @@ function renderTable(newConversionSources) {
   sorted.forEach((s) => {
     const tr = document.createElement("tr");
     tr.className = "source-row " + (s.profit >= 0 ? "profit-positive" : "profit-negative");
+    // Premium winner highlight: golden border at 2x+, add an animated glow at 3x+.
+    if (s.roas >= 3) tr.classList.add("roas-gold", "roas-fire");
+    else if (s.roas >= 2) tr.classList.add("roas-gold");
     tr.dataset.source = s.source;
     if (newConversionSources && newConversionSources.has(s.source)) {
       tr.classList.add("new-conversion");
@@ -474,14 +540,15 @@ function renderTable(newConversionSources) {
       <td class="num">${num(s.clicks)}</td>
       <td class="num">${money(s.payout)}</td>
       <td class="num">${money(s.epc)}</td>
-      <td class="num ${s.roas >= 1 ? "positive" : "negative"}">${s.roas.toFixed(2)}x</td>
+      <td class="num roas-cell" style="color:${roasColor(s.roas)}">${s.roas.toFixed(2)}x</td>
       <td class="budget-cell">${budgetCell(s)}</td>
+      <td class="row-action-cell">${actionMenuCell(s)}</td>
     `;
     tbody.appendChild(tr);
 
     const detailTr = document.createElement("tr");
     detailTr.className = "row-detail";
-    detailTr.innerHTML = `<td colspan="12"><div class="row-detail-inner"><div class="adgroups-panel" data-adgroups-for="${escapeHtml(s.campaignId || "")}"></div></div></td>`;
+    detailTr.innerHTML = `<td colspan="13"><div class="row-detail-inner"><div class="adgroups-panel" data-adgroups-for="${escapeHtml(s.campaignId || "")}"></div></div></td>`;
     tbody.appendChild(detailTr);
 
     if (state.expandedSources.has(s.source)) {
@@ -520,22 +587,132 @@ function budgetCell(s) {
   if (!b) {
     return `<span class="bud-none" title="Budget info not loaded for this account">—</span>`;
   }
-  const edit = `<button class="bud-edit" data-budget-edit="${escapeHtml(s.advertiserId)}" ${pending ? "disabled" : ""}>${pending ? "…" : b.capped ? "Edit" : "Set cap"}</button>`;
   if (b.capped) {
     const leftTone = b.remaining > 0 ? "ok" : "bad";
     return `
-      <div class="bud" title="Spent ${money(b.spent)} of ${money(b.cap)}">
+      <div class="bud${pending ? " busy" : ""}" title="Spent ${money(b.spent)} of ${money(b.cap)}">
         <span class="bud-left ${leftTone}">${money(b.remaining)} left</span>
         <span class="bud-sub">of ${money(b.cap)} cap</span>
-        ${edit}
       </div>`;
   }
   return `
-    <div class="bud" title="No spend cap on this ad account">
+    <div class="bud${pending ? " busy" : ""}" title="No spend cap on this ad account">
       <span class="bud-left muted">Uncapped</span>
       <span class="bud-sub">bal ${money(b.account_balance)}</span>
-      ${edit}
     </div>`;
+}
+
+// Far-right 3-dot menu trigger. Only for rows backed by a tracked TikTok
+// campaign — the menu (Edit budget / Delete campaign) is built on open.
+function actionMenuCell(s) {
+  if (!s.hasTiktok || !s.campaignId) return "";
+  const open = openRowMenuFor === String(s.campaignId);
+  return `<button type="button" class="rowmenu-btn${open ? " active" : ""}" data-row-menu="${escapeHtml(s.campaignId)}" aria-label="Campaign actions" title="Campaign actions">⋮</button>`;
+}
+
+// ---- far-right ⋮ campaign action menu ----
+
+function closeRowMenu() {
+  openRowMenuFor = null;
+  if (rowMenuEl) {
+    rowMenuEl.remove();
+    rowMenuEl = null;
+  }
+  document.querySelectorAll(".rowmenu-btn.active").forEach((b) => b.classList.remove("active"));
+}
+
+function toggleRowMenu(btn) {
+  const campaignId = String(btn.dataset.rowMenu || "");
+  if (openRowMenuFor === campaignId) {
+    closeRowMenu();
+    return;
+  }
+  closeRowMenu();
+
+  const s = state.sources.find((x) => String(x.campaignId) === campaignId);
+  if (!s) return;
+
+  openRowMenuFor = campaignId;
+  btn.classList.add("active");
+
+  const menu = document.createElement("div");
+  menu.className = "rowmenu";
+  menu.innerHTML = `
+    <button type="button" class="rowmenu-item" data-menu-action="edit-budget">Edit budget</button>
+    <button type="button" class="rowmenu-item danger" data-menu-action="delete-campaign">Delete campaign</button>`;
+  document.body.appendChild(menu);
+  rowMenuEl = menu;
+
+  const r = btn.getBoundingClientRect();
+  let left = r.right + window.scrollX - menu.offsetWidth;
+  if (left < 8) left = 8;
+  menu.style.top = `${r.bottom + window.scrollY + 4}px`;
+  menu.style.left = `${left}px`;
+
+  menu.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-menu-action]");
+    if (!item) return;
+    const act = item.dataset.menuAction;
+    const src = state.sources.find((x) => String(x.campaignId) === campaignId);
+    closeRowMenu();
+    if (!src) return;
+    if (act === "edit-budget") {
+      if (src.advertiserId) openBudgetModal(src.advertiserId);
+      else setStatus("No ad-account budget is available for this campaign.", true);
+    } else if (act === "delete-campaign") {
+      openDeleteCampaignModal(src);
+    }
+  });
+}
+
+// ---- delete campaign (always confirmed first) ----
+
+function openDeleteCampaignModal(s) {
+  deleteCampaignTarget = s;
+  document.getElementById("deleteCampaignName").textContent = s.source;
+  document.getElementById("deleteCampaignError").textContent = "";
+  const btn = document.getElementById("confirmDeleteCampaignBtn");
+  btn.disabled = false;
+  btn.textContent = "Delete Campaign";
+  document.getElementById("deleteCampaignModal").classList.add("open");
+}
+
+function closeDeleteCampaignModal() {
+  document.getElementById("deleteCampaignModal").classList.remove("open");
+  deleteCampaignTarget = null;
+}
+
+async function confirmDeleteCampaign() {
+  if (!deleteCampaignTarget) return;
+  const s = deleteCampaignTarget;
+  const btn = document.getElementById("confirmDeleteCampaignBtn");
+  const errEl = document.getElementById("deleteCampaignError");
+  errEl.textContent = "";
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  try {
+    const res = await deleteTiktokCampaign(s.campaignId);
+    // Remove locally right away — whether TikTok deleted it or we hid it, it
+    // should leave the table now. A background reload confirms.
+    state.tiktokCampaigns = state.tiktokCampaigns.filter((c) => String(c.campaign_id) !== String(s.campaignId));
+    delete state.adGroupsByCampaign[s.campaignId];
+    state.expandedSources.delete(s.source);
+    renderDetailBcSelector();
+    rebuildSources();
+    closeDeleteCampaignModal();
+    setStatus(
+      res.message ||
+        (res.outcome === "hidden"
+          ? "Campaign hidden from Chigla Ads."
+          : "Campaign deleted from TikTok."),
+      false
+    );
+    loadTiktokCampaigns();
+  } catch (err) {
+    errEl.textContent = err.message;
+    btn.disabled = false;
+    btn.textContent = "Delete Campaign";
+  }
 }
 
 // ---- Business Center view filter (Detailed Metrics header) ----
@@ -584,8 +761,49 @@ function updateBcBalanceBanner() {
     el.innerHTML = "";
     return;
   }
+  const v = Number(bal.balance) || 0;
+  // > $10 healthy · $5–$10 warning · < $5 danger
+  const tone = v > 10 ? "ok" : v >= 5 ? "warn" : "bad";
   el.hidden = false;
-  el.innerHTML = `<span class="bcbal-label">Available Balance</span><span class="bcbal-value tabular">${money(bal.balance)}</span>`;
+  el.innerHTML = `
+    <div class="bcbal-text">
+      <span class="bcbal-label">Available Balance</span>
+      <span class="bcbal-value tabular ${tone}">${money(v)}</span>
+    </div>
+    <button type="button" class="bcbal-topup" id="bcTopUpBtn">Top Up</button>`;
+  const topBtn = document.getElementById("bcTopUpBtn");
+  if (topBtn) topBtn.addEventListener("click", () => openTopUpModal(bcId, bal));
+}
+
+// ---- Top Up (TikTok has no fund-a-BC API — link to its hosted billing) ----
+// The TikTok Ads MCP exposes no way to add external funds to a Business Center
+// (bc_transfer only moves money already inside the BC, and only for
+// monthly-invoiced BCs). We never collect card details — this just points the
+// user at TikTok's own billing page and re-checks the balance afterwards.
+const TIKTOK_BILLING_URL = "https://ads.tiktok.com/i18n/account/payment";
+
+function openTopUpModal(bcId, bal) {
+  const modal = document.getElementById("topupModal");
+  const conn = tiktokState.connections.find((c) => String(c.bc_id || "") === String(bcId));
+  document.getElementById("topupBcName").textContent = conn ? connBcName(conn) : "this Business Center";
+  document.getElementById("topupBalance").textContent = money(Number(bal.balance) || 0);
+  modal.classList.add("open");
+}
+function closeTopUpModal() {
+  document.getElementById("topupModal").classList.remove("open");
+}
+async function topUpRefreshBalance() {
+  const btn = document.getElementById("topupRefreshBtn");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    await loadTiktokBudgets();
+    const bal = state.bcBalances[state.detailBcFilter];
+    if (bal && bal.balance != null) document.getElementById("topupBalance").textContent = money(Number(bal.balance) || 0);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Refresh balance";
+  }
 }
 
 function toggleRowExpand(source) {
@@ -651,7 +869,7 @@ function paintAdGroups(panel, s, rows) {
     <div class="adgroups-wrap">
       <table class="adgroups-table">
         <colgroup>
-          <col style="width:40px" /><col style="width:110px" /><col style="width:190px" /><col style="width:92px" /><col style="width:92px" />
+          <col style="width:40px" /><col style="width:118px" /><col style="width:210px" /><col style="width:96px" /><col style="width:96px" />
         </colgroup>
         <thead>
           <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th></tr>

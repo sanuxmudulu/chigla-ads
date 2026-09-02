@@ -118,6 +118,7 @@
             <th>EPC</th>
             <th>ROAS</th>
             <th>Budget</th>
+            <th class="col-action" aria-label="Actions"></th>
           </tr>
         </thead>
         <tbody id="sourcesBody"></tbody>
@@ -212,6 +213,43 @@
     <div class="modal-actions">
       <button class="icon-btn" id="cancelBudgetBtn">Cancel</button>
       <button class="icon-btn primary" id="confirmBudgetBtn">Update</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ DELETE CAMPAIGN MODAL ============ -->
+<div class="modal-backdrop" id="deleteCampaignModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Delete campaign?</h3>
+      <button id="closeDeleteCampaignModal">✕</button>
+    </div>
+    <p class="del-camp-target">Campaign: <strong id="deleteCampaignName"></strong></p>
+    <p>This will permanently delete the campaign from TikTok where TikTok permits it. If the ad account is suspended, the campaign is hidden from Chigla Ads instead. Historical daily performance is kept.</p>
+    <div class="modal-error" id="deleteCampaignError"></div>
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelDeleteCampaignBtn">Cancel</button>
+      <button class="icon-btn danger" id="confirmDeleteCampaignBtn">Delete Campaign</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TOP UP MODAL ============ -->
+<div class="modal-backdrop" id="topupModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Top up balance</h3>
+      <button id="closeTopupModal">✕</button>
+    </div>
+    <div class="topup-balance-row">
+      <span>Available balance</span>
+      <strong id="topupBalance">$0.00</strong>
+    </div>
+    <p>TikTok's API can't add funds to <strong id="topupBcName">this Business Center</strong>. Add money on TikTok's own billing page (opens in a new tab — no card details are entered in Chigla), then refresh the balance here.</p>
+    <div class="modal-actions">
+      <button class="icon-btn" id="topupRefreshBtn">Refresh balance</button>
+      <button class="icon-btn" id="topupCloseBtn">Close</button>
+      <button class="icon-btn primary" id="topupOpenBillingBtn">Open TikTok Billing ↗</button>
     </div>
   </div>
 </div>

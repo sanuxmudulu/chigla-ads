@@ -26,6 +26,7 @@ const {
   loadCampaignDetail,
   setCampaignStatus,
   setAdGroupStatus,
+  deleteCampaign,
   getBcBalance,
   getAdvertiserBudgets,
   setAdvertiserBudget,
@@ -37,12 +38,22 @@ const CAMPAIGN_COLUMNS_BASE =
 const CAMPAIGN_COLUMNS = `${CAMPAIGN_COLUMNS_BASE}, bc_id, bc_name, affiliate_network`;
 
 async function readCampaigns(supabase) {
-  let res = await supabase.from("tiktok_campaigns").select(CAMPAIGN_COLUMNS).order("campaign_name", { ascending: true });
+  let res = await supabase
+    .from("tiktok_campaigns")
+    .select(`${CAMPAIGN_COLUMNS}, hidden`)
+    .order("campaign_name", { ascending: true });
+  if (res.error && /hidden/.test(res.error.message || "")) {
+    // hidden column not migrated yet (supabase/tiktok_campaign_hidden.sql)
+    res = await supabase.from("tiktok_campaigns").select(CAMPAIGN_COLUMNS).order("campaign_name", { ascending: true });
+  }
   if (res.error && /bc_(id|name)|affiliate_network/.test(res.error.message || "")) {
     res = await supabase.from("tiktok_campaigns").select(CAMPAIGN_COLUMNS_BASE).order("campaign_name", { ascending: true });
     if (!res.error)
       res.data = (res.data || []).map((c) => ({ ...c, bc_id: null, bc_name: null, affiliate_network: "GLITCHY" }));
   }
+  // Campaigns hidden locally (TikTok refused deletion — suspended account) never
+  // reach the dashboard.
+  if (!res.error) res.data = (res.data || []).filter((c) => !c.hidden);
   return res;
 }
 
@@ -143,6 +154,60 @@ exports.handler = async function (event) {
     // restricted server-side to campaigns/ad groups under a TRACKED advertiser
     // account (resolveTrackedCampaign). Only connecting / disconnecting a TikTok
     // account still asks for the admin password.
+
+    if (action === "delete_campaign") {
+      if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
+      const r = await resolveTrackedCampaign(supabase, body.campaign_id);
+      if (r.error) return r.error;
+
+      const campaignId = String(r.campaign.campaign_id);
+      const campaignName = r.campaign.campaign_name || campaignId;
+      const advHealthy = ["", "STATUS_ENABLE"].includes(String(r.advertiser.status || "").toUpperCase());
+
+      try {
+        await withClient(supabase, r.connection, (client) =>
+          deleteCampaign({ client, advertiserId: r.campaign.advertiser_id, campaignId })
+        );
+      } catch (err) {
+        // TikTok refused the delete. If the advertiser account is
+        // suspended/limited we can't ever complete this write — hide the
+        // campaign locally instead so it stops cluttering the dashboard and a
+        // re-sync won't resurrect it. Do NOT present this as a real deletion.
+        if (!advHealthy) {
+          const upd = await supabase
+            .from("tiktok_campaigns")
+            .update({ hidden: true, hidden_at: new Date().toISOString() })
+            .eq("campaign_id", campaignId);
+          if (upd.error && /hidden/.test(upd.error.message || "")) {
+            return json(500, {
+              error:
+                "Campaign could not be deleted from TikTok and the local-hide column is missing. Run supabase/tiktok_campaign_hidden.sql, then retry.",
+              details: err.message,
+            });
+          }
+          return json(200, {
+            ok: true,
+            campaign_id: campaignId,
+            outcome: "hidden",
+            message: `Campaign could not be deleted from TikTok because this advertiser account is suspended. It has been hidden from Chigla Ads instead.`,
+          });
+        }
+        return json(502, {
+          error: "TikTok rejected the campaign deletion",
+          details: err.message,
+        });
+      }
+
+      // Real deletion succeeded — drop the row. A re-sync won't bring it back
+      // (campaign_get no longer returns deleted campaigns).
+      await supabase.from("tiktok_campaigns").delete().eq("campaign_id", campaignId);
+      return json(200, {
+        ok: true,
+        campaign_id: campaignId,
+        outcome: "deleted",
+        message: `Campaign “${campaignName}” was deleted from TikTok.`,
+      });
+    }
 
     if (action === "set_campaign_status") {
       const op = normalizeOp(body.operation_status);

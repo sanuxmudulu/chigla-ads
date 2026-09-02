@@ -665,6 +665,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
   const now = new Date().toISOString();
   const rows = [];
   const seenCampaignIds = [];
+  const scannedAdvIds = []; // advertisers whose campaign list we actually read
   const perAdvertiser = {};
 
   for (const adv of trackedAdvertisers) {
@@ -718,6 +719,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
           updated_at: now,
         });
       }
+      scannedAdvIds.push(advId);
       perAdvertiser[advId] = campaigns.length;
     } catch (err) {
       perAdvertiser[advId] = `error: ${err.message}`;
@@ -735,12 +737,18 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
     if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
   }
 
-  // Drop rows for campaigns that no longer exist under these tracked advertisers.
-  const advIds = trackedAdvertisers.map((a) => String(a.advertiser_id));
-  if (advIds.length) {
-    let q = supabase.from("tiktok_campaigns").delete().in("advertiser_id", advIds);
-    if (seenCampaignIds.length) q = q.not("campaign_id", "in", `(${seenCampaignIds.join(",")})`);
-    await q;
+  // Drop rows for campaigns that no longer exist — but only for advertisers we
+  // actually scanned this run (a failed campaign_get must not wipe that
+  // account's rows) and never a locally-hidden row (suspended-account case).
+  if (scannedAdvIds.length) {
+    const runDelete = (withHiddenGuard) => {
+      let q = supabase.from("tiktok_campaigns").delete().in("advertiser_id", scannedAdvIds);
+      if (seenCampaignIds.length) q = q.not("campaign_id", "in", `(${seenCampaignIds.join(",")})`);
+      if (withHiddenGuard) q = q.neq("hidden", true);
+      return q;
+    };
+    const del = await runDelete(true);
+    if (del.error && /hidden/.test(del.error.message || "")) await runDelete(false);
   }
 
   return { campaignCount: rows.length, perAdvertiser };
@@ -902,6 +910,20 @@ async function setCampaignStatus({ client, advertiserId, campaignId, operationSt
     filtering: { campaign_ids: [String(campaignId)] },
   });
   return (res?.list || []).find((c) => String(c.campaign_id) === String(campaignId)) || null;
+}
+
+// Permanently deletes a campaign in TikTok. `campaign_status_update` with
+// operation_status DELETE is the documented delete operation — "Deleted
+// campaigns cannot be modified afterward." Throws (via mcpCall) when TikTok
+// refuses, e.g. the advertiser account is suspended/limited; the caller decides
+// whether to fall back to hiding the row locally.
+async function deleteCampaign({ client, advertiserId, campaignId }) {
+  await mcpCall(client, "campaign_status_update", {
+    advertiser_id: String(advertiserId),
+    campaign_ids: [String(campaignId)],
+    operation_status: "DELETE",
+  });
+  return { ok: true };
 }
 
 async function setAdGroupStatus({ client, advertiserId, adGroupId, operationStatus }) {
@@ -1079,6 +1101,7 @@ module.exports = {
   loadCampaignDetail,
   setCampaignStatus,
   setAdGroupStatus,
+  deleteCampaign,
   getBcBalance,
   getAdvertiserBudgets,
   setAdvertiserBudget,
