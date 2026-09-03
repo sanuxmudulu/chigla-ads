@@ -232,9 +232,15 @@ function applyTiktokMetrics(data) {
   const fresh = data.metrics || {};
   const okAdv = new Set((data.okAdvertiserIds || []).map(String));
 
+  // NY day rolled over since our cached metrics belong to → do NOT carry any
+  // stale value into the new day, not even for advertisers whose report failed.
+  const dayChanged = !!(data.date && state.campaignMetricsDate && data.date !== state.campaignMetricsDate);
+
   const merged = {};
-  for (const [cid, m] of Object.entries(state.campaignMetrics)) {
-    if (!okAdv.has(String(m && m.advertiser_id))) merged[cid] = m; // stale, but its account didn't refresh
+  if (!dayChanged) {
+    for (const [cid, m] of Object.entries(state.campaignMetrics)) {
+      if (!okAdv.has(String(m && m.advertiser_id))) merged[cid] = m; // stale, but its account didn't refresh
+    }
   }
   for (const [cid, m] of Object.entries(fresh)) merged[cid] = m;
 

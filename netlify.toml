@@ -11,3 +11,8 @@
   # (Node >= 22.4). The tiktok-* functions also hand Supabase an explicit `ws`
   # transport, so they work even if this is ignored.
   AWS_LAMBDA_JS_RUNTIME = "nodejs22.x"
+
+# Daily Supabase retention job (~00:20 America/New_York). Same job runs on Vercel
+# via vercel.json "crons". See netlify/functions/cleanup.js.
+[functions."cleanup"]
+  schedule = "20 5 * * *"

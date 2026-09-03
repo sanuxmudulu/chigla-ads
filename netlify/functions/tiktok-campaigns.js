@@ -221,6 +221,14 @@ exports.handler = async function (event) {
               details: err.message,
             });
           }
+          // The campaign is gone from the user's view — clear its temporary
+          // engagement rows too (the real-delete path gets these via FK cascade;
+          // the hidden tombstone stays so a re-sync can't resurrect it).
+          try {
+            await supabase.from("engagement_orders").delete().eq("campaign_id", campaignId);
+          } catch (_) {
+            /* best-effort */
+          }
           return json(200, {
             ok: true,
             campaign_id: campaignId,
@@ -529,6 +537,32 @@ async function budgetsForTracked(supabase) {
 //   — spendToday is for the Live Performance graph only.
 async function campaignMetricsForTracked(supabase) {
   const date = dashboardToday();
+
+  // NY-day rollover: any campaign whose today_* still belongs to a past date is
+  // reset to $0 / 0 (and re-dated) BEFORE we pull fresh numbers, so it never
+  // shows yesterday's metrics today. Best-effort; the daily cron does this too
+  // for when the dashboard is closed. today_date/today_spend errors just mean
+  // the metrics migration hasn't run yet.
+  try {
+    const { error: resetErr } = await supabase
+      .from("tiktok_campaigns")
+      .update({
+        today_date: date,
+        today_spend: 0,
+        today_impressions: 0,
+        today_clicks: 0,
+        today_conversions: 0,
+        today_cpm: 0,
+        today_cpa: 0,
+      })
+      .not("today_date", "is", null)
+      .neq("today_date", date);
+    if (resetErr && !/today_(date|spend|impressions|clicks|conversions|cpm|cpa)|does not exist/.test(resetErr.message || "")) {
+      console.error(`[tiktok-metrics] stale today_* reset failed: ${resetErr.message}`);
+    }
+  } catch (_) {
+    /* best-effort */
+  }
 
   const { data: tracked, error } = await supabase
     .from("tiktok_advertisers")
