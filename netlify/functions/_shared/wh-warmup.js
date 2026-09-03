@@ -291,7 +291,21 @@ async function resolveSparkCode(client, advertiserId, rawCode) {
   }
   if (!identityId) throw new Error("Spark code authorized but no AUTH_CODE identity was found for the ad account.");
 
-  return { item_id: itemId, identity_id: identityId };
+  // 4. Post type — a photo/carousel post must be delivered as CAROUSEL_ADS, a
+  //    video post as SINGLE_VIDEO. Detect from the info response; ad_create also
+  //    retries with the other format if this guess is wrong.
+  const typeHint = String(
+    deepFindByKey(info, /(item_type|content_type|media_type|post_type|material_type|video_type)$/i) || ""
+  ).toUpperCase();
+  let postType = "VIDEO";
+  if (/CAROUSEL|PHOTO|IMAGE|SLIDE/.test(typeHint)) {
+    postType = "CAROUSEL";
+  } else if (!/VIDEO/.test(typeHint) && deepFindByKey(info, /(^|_)(photo_info|photo_list|photos|image_list|image_post_info|carousel)$/i)) {
+    postType = "CAROUSEL";
+  }
+  console.log(`[wh-warmup] spark post type: ${postType} (hint="${typeHint}")`);
+
+  return { item_id: itemId, identity_id: identityId, post_type: postType };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,14 +378,17 @@ async function createWarmupForAdvertiser({ client, advertiserId, currency, targe
     const adgroupId = String(ag?.adgroup_id || "");
     if (!adgroupId) throw new Error("adgroup_create returned no adgroup_id.");
 
-    // 3. Spark ad — Learn More CTA, generated Etsy destination.
-    const ad = await mcpCall(client, "ad_create", {
+    // 3. Spark ad — Learn More CTA, generated Etsy destination. A photo/carousel
+    //    Spark post must use ad_format CAROUSEL_ADS; a video post SINGLE_VIDEO.
+    //    Spark Ads Pull (AUTH_CODE + tiktok_item_id) needs no image_ids/music_id
+    //    for either — the post carries its own content.
+    const adCreative = (adFormat) => ({
       advertiser_id: String(advertiserId),
       adgroup_id: adgroupId,
       creatives: [
         {
           ad_name: names.ad,
-          ad_format: "SINGLE_VIDEO",
+          ad_format: adFormat,
           identity_type: "AUTH_CODE",
           identity_id: spark.identity_id,
           tiktok_item_id: spark.item_id,
@@ -381,6 +398,22 @@ async function createWarmupForAdvertiser({ client, advertiserId, currency, targe
         },
       ],
     });
+    const firstFormat = spark.post_type === "CAROUSEL" ? "CAROUSEL_ADS" : "SINGLE_VIDEO";
+    const otherFormat = firstFormat === "CAROUSEL_ADS" ? "SINGLE_VIDEO" : "CAROUSEL_ADS";
+    // TikTok's wording when the ad_format doesn't match the post's real type.
+    const FORMAT_MISMATCH = /photo post|carousel ad|can be delivered|ad_format|single[_ ]video|video post|not a (photo|video)|must be a (photo|video)/i;
+    let ad;
+    try {
+      ad = await mcpCall(client, "ad_create", adCreative(firstFormat));
+    } catch (err) {
+      if (!FORMAT_MISMATCH.test(err.message || "")) throw err;
+      console.warn(`[wh-warmup] ad_create ${firstFormat} rejected (${err.message}) — retrying as ${otherFormat}`);
+      try {
+        ad = await mcpCall(client, "ad_create", adCreative(otherFormat));
+      } catch (err2) {
+        throw new Error(`ad_create failed as ${firstFormat} (${err.message}) and as ${otherFormat} (${err2.message})`);
+      }
+    }
     const adId = String((ad?.ad_ids || [])[0] || (ad?.creatives || [])[0]?.ad_id || "");
 
     return {
