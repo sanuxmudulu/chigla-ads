@@ -3,8 +3,10 @@
 // ROAS derived per day. If the requested month contains today, today's row is
 // refreshed first so the calendar is current even on a stale tab.
 //
-// total_spend stays 0 until TikTok metrics are merged into the daily history —
-// so today net_profit == total_earnings and roas == 0, matching the KPI cards.
+// total_spend is today's real TikTok campaign spend (summed from the persisted
+// per-campaign today_spend columns by upsertTodayTotals). net_profit and roas
+// per day are derived from the stored total_spend / total_earnings — no
+// historical rows are ever rewritten, only today's is refreshed.
 
 const {
   todayEst,

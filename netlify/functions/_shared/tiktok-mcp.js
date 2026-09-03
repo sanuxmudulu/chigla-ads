@@ -24,6 +24,7 @@ const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const {
   StreamableHTTPClientTransport,
 } = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
+const { submitEngagementOrder } = require("./engagement-provider.js");
 
 const DEFAULT_MCP_SERVER_URL =
   "https://business-api.tiktok.com/open_mcp/tt-ads-mcp-flat";
@@ -665,6 +666,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
   const now = new Date().toISOString();
   const rows = [];
   const seenCampaignIds = [];
+  const activeCampaignIds = []; // genuinely-Active campaigns this run (engagement trigger)
   const scannedAdvIds = []; // advertisers whose campaign list we actually read
   const perAdvertiser = {};
 
@@ -696,6 +698,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
           reviewByAdGroupId,
         });
         seenCampaignIds.push(cid);
+        if (eff.label === "Active") activeCampaignIds.push(cid);
         rows.push({
           campaign_id: cid,
           connection_id: connectionId,
@@ -751,7 +754,116 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
     if (del.error && /hidden/.test(del.error.message || "")) await runDelete(false);
   }
 
+  // Engagement FOUNDATION only: flip PENDING/FAILED -> READY for campaigns that
+  // are genuinely Active AND already have a TikTok post URL. Idempotent (the
+  // WHERE clause makes repeat runs a no-op) and never sends anything anywhere.
+  await markEngagementReadyIfActive(supabase, activeCampaignIds);
+
   return { campaignCount: rows.length, perAdvertiser };
+}
+
+// Idempotent engagement-readiness flag. Marks a campaign READY only when it is
+// currently Active, has a non-empty tiktok_post_url (the authoritative
+// campaign_id -> post-link mapping — never derived by name/order), and isn't
+// already READY/COMPLETED. No external calls — READY is just a local lifecycle
+// flag. After flipping, it invokes the FUTURE provider hook for those campaigns
+// (a no-op today). Silently no-ops if the engagement columns aren't migrated yet
+// (supabase/tiktok_engagement.sql).
+async function markEngagementReadyIfActive(supabase, campaignIds) {
+  const ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
+  if (!ids.length) return { updated: 0 };
+  try {
+    const { data, error } = await supabase
+      .from("tiktok_campaigns")
+      .update({ engagement_status: "READY", updated_at: new Date().toISOString() })
+      .in("campaign_id", ids)
+      .not("tiktok_post_url", "is", null)
+      .neq("tiktok_post_url", "")
+      .not("engagement_status", "in", "(READY,COMPLETED)")
+      .select("campaign_id");
+    if (error) {
+      if (/engagement_status|tiktok_post_url/.test(error.message || "")) return { updated: 0, unmigrated: true };
+      throw error;
+    }
+    await autoProcessReadyEngagements(supabase, ids);
+    return { updated: (data || []).length };
+  } catch (err) {
+    console.error(`[engagement] markEngagementReadyIfActive failed: ${err.message}`);
+    return { updated: 0, error: err.message };
+  }
+}
+
+// FUTURE PROVIDER HOOK — performs NO external calls today.
+//
+// This is the single seam where an APPROVED, configured engagement provider
+// would automatically act on each READY campaign using ONLY its
+// (campaign_id, tiktok_post_url), then set engagement_status = 'COMPLETED'
+// once the provider confirms success.
+//
+// Today submitEngagementOrder() has no registered provider, so it returns
+// stored-only ({ submitted:false }) and this function changes nothing —
+// campaigns stay READY. Idempotent: only READY rows are considered, COMPLETED
+// rows are never revisited, and the COMPLETED write is itself guarded on the row
+// still being READY. Credentials (ENGAGEMENT_*_API_KEY) live only in the
+// provider module, read from process.env, never returned or logged.
+async function autoProcessReadyEngagements(supabase, campaignIds) {
+  const ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
+  if (!ids.length) return;
+
+  let ready;
+  try {
+    const { data, error } = await supabase
+      .from("tiktok_campaigns")
+      .select("campaign_id, tiktok_post_url")
+      .in("campaign_id", ids)
+      .eq("engagement_status", "READY");
+    if (error) return; // unmigrated / transient — nothing to do
+    ready = data || [];
+  } catch (_) {
+    return;
+  }
+
+  for (const c of ready) {
+    const link = String(c.tiktok_post_url || "").trim();
+    if (!link) continue;
+
+    let result;
+    try {
+      result = await submitEngagementOrder({
+        kind: "AUTO",
+        campaignId: String(c.campaign_id),
+        link,
+        quantity: 0,
+        comments: [],
+      });
+    } catch (_) {
+      continue; // provider error must never break the status refresh
+    }
+
+    // Today this branch is never taken (no provider => submitted:false).
+    if (result && result.submitted && String(result.status || "").toUpperCase() === "COMPLETED") {
+      await supabase
+        .from("tiktok_campaigns")
+        .update({ engagement_status: "COMPLETED", updated_at: new Date().toISOString() })
+        .eq("campaign_id", String(c.campaign_id))
+        .eq("engagement_status", "READY");
+      try {
+        await supabase.from("engagement_orders").insert({
+          campaign_id: String(c.campaign_id),
+          kind: "AUTO",
+          provider: result.provider || null,
+          link,
+          quantity: 0,
+          status: "COMPLETED",
+          provider_ref: result.providerRef || null,
+          note: result.message || null,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (_) {
+        /* audit row is best-effort */
+      }
+    }
+  }
 }
 
 function parseTikTokTime(raw) {
@@ -777,10 +889,28 @@ function localToday(tzName) {
   }
 }
 
+// The dashboard's single reporting boundary — the America/New_York calendar
+// date. EVERYTHING daily is keyed to this: Glitchy (todayEst), Mabac,
+// daily_totals, the calendar, and now TikTok campaign metrics. Never the
+// viewer's browser tz and never the ad account's tz. (report_integrated_get
+// still interprets the date in the ad account tz — see the note in
+// tiktok-campaigns.js's metrics action.)
+const DASHBOARD_TZ = "America/New_York";
+function dashboardToday() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: DASHBOARD_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 const num = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
+
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
 // TikTok's CPA for this business == cost per optimization conversion (the
 // instant-form / instant-page completion). `cost_per_result` is a fallback for
@@ -793,6 +923,75 @@ function tiktokCpa(m) {
   const conv = num(m.conversion) || num(m.result);
   const spend = num(m.spend);
   return conv > 0 ? spend / conv : 0;
+}
+
+// -------- campaign-level day metrics for ONE advertiser account --------
+//
+// One `report_integrated_get` (BASIC / AUCTION / AUCTION_CAMPAIGN, grouped by
+// campaign_id) returns EVERY non-deleted campaign in the advertiser account for
+// `date` — no per-campaign requests. Paginated. `date` is a YYYY-MM-DD string;
+// TikTok reads it in the ad account's own timezone (callers pass the dashboard
+// NY date and accept a small near-midnight skew for non-Eastern accounts).
+//
+// Returns { [campaign_id]: { advertiser_id, spend, impressions, clicks,
+//                            conversions, cpm, cpa } } — all finite numbers.
+const CAMPAIGN_METRIC_FIELDS = [
+  "spend",
+  "impressions",
+  "clicks",
+  "cpc",
+  "cpm",
+  "conversion",
+  "cost_per_conversion",
+  "result",
+  "cost_per_result",
+];
+
+async function loadCampaignMetricsForAdvertiser(client, advertiserId, { date } = {}) {
+  const advId = String(advertiserId);
+  const byId = {};
+  let page = 1;
+  for (;;) {
+    const rep = await mcpCall(client, "report_integrated_get", {
+      report_type: "BASIC",
+      service_type: "AUCTION",
+      data_level: "AUCTION_CAMPAIGN",
+      advertiser_id: advId,
+      dimensions: ["campaign_id"],
+      metrics: CAMPAIGN_METRIC_FIELDS,
+      start_date: date,
+      end_date: date,
+      page,
+      page_size: 1000,
+    });
+
+    for (const row of rep?.list || []) {
+      const id = String(row.dimensions?.campaign_id || "");
+      if (!id) continue;
+      const m = row.metrics || {};
+      const spend = round2(num(m.spend));
+      const impressions = Math.round(num(m.impressions));
+      const clicks = Math.round(num(m.clicks));
+      const conversions = num(m.conversion) || num(m.result);
+      const directCpm = num(m.cpm);
+      const cpm = directCpm > 0 ? round2(directCpm) : impressions > 0 ? round2((spend / impressions) * 1000) : 0;
+      byId[id] = {
+        advertiser_id: advId,
+        spend,
+        impressions,
+        clicks,
+        conversions,
+        cpm,
+        cpa: round2(tiktokCpa(m)),
+      };
+    }
+
+    const info = rep?.page_info || {};
+    if (!info.total_page || page >= info.total_page) break;
+    page += 1;
+    if (page > 50) break; // safety
+  }
+  return byId;
 }
 
 // -------- lazy: one campaign's live detail (row status + ad groups + today) --
@@ -836,7 +1035,9 @@ async function loadCampaignDetail({ client, advertiserId, advertiserStatus, camp
 
   const metricsById = {};
   if (ids.length) {
-    const today = localToday(timezone);
+    // Same NY reporting boundary as the campaign row / KPIs / daily_totals.
+    // `timezone` is kept in the signature for callers but no longer used here.
+    const today = dashboardToday();
     try {
       const rep = await mcpCall(client, "report_integrated_get", {
         report_type: "BASIC",
@@ -1094,10 +1295,14 @@ module.exports = {
   SupabaseOAuthProvider,
   connectMcp,
   mcpCall,
+  dashboardToday,
   discoverAndStoreAdvertisers,
   discoverAndStoreCampaigns,
+  markEngagementReadyIfActive,
+  autoProcessReadyEngagements,
   deriveEffectiveStatus,
   deriveAdGroupStatus,
+  loadCampaignMetricsForAdvertiser,
   loadCampaignDetail,
   setCampaignStatus,
   setAdGroupStatus,

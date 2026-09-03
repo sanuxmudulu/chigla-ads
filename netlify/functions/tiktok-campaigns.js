@@ -6,11 +6,18 @@
 //                                campaigns. Scoped to one Business Center when
 //                                connection_id is given ("Refresh Data"), else all.
 //        "budgets"            : advertiser-account caps + BC balances (all tracked)
+//        "metrics"            : today's live TikTok campaign spend/CPM/CPA for every
+//                                tracked advertiser (NY date; one report per advertiser).
+//                                Also snapshots cumulative spend per NY hour and
+//                                returns `spendToday` for the Live Performance graph.
 //        "set_advertiser_budget": { advertiser_id, budget_mode, budget } — write
 //        "adgroups"            : { campaign_id } — lazy-load one campaign's ad groups +
 //                                today's spend/CPA + status
 //        "set_campaign_status" : { campaign_id, operation_status } — write
 //        "set_adgroup_status"  : { campaign_id, adgroup_id, operation_status } — write
+//        "queue_engagement_comments": { campaign_id, service_id, comments } — store a comment
+//                                batch (uses the campaign's own stored tiktok_post_url) as an
+//                                engagement_orders row. NEVER contacts an SMM service.
 //
 // None of these need the admin password. Every action is restricted server-side
 // to campaigns/ad groups whose advertiser account is currently `tracked`. All
@@ -21,17 +28,22 @@ const {
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
+  dashboardToday,
   discoverAndStoreAdvertisers,
   discoverAndStoreCampaigns,
   loadCampaignDetail,
+  loadCampaignMetricsForAdvertiser,
   setCampaignStatus,
   setAdGroupStatus,
   deleteCampaign,
   getBcBalance,
   getAdvertiserBudgets,
   setAdvertiserBudget,
+  markEngagementReadyIfActive,
   json,
 } = require("./_shared/tiktok-mcp");
+const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
+const { submitEngagementOrder, parseComments } = require("./_shared/engagement-provider");
 
 const CAMPAIGN_COLUMNS_BASE =
   "campaign_id, connection_id, advertiser_id, advertiser_name, campaign_name, objective_type, budget, budget_mode, campaign_operation_status, campaign_secondary_status, effective_status, effective_tone, status_detail, ad_count, active_ad_count, create_time, updated_at";
@@ -54,6 +66,26 @@ async function readCampaigns(supabase) {
   // Campaigns hidden locally (TikTok refused deletion — suspended account) never
   // reach the dashboard.
   if (!res.error) res.data = (res.data || []).filter((c) => !c.hidden);
+
+  // Engagement-foundation columns, merged from a SEPARATE query so the migration
+  // (supabase/tiktok_engagement.sql) is fully optional — without it every row
+  // just reads tiktok_post_url:null / engagement_status:"PENDING".
+  if (!res.error) {
+    const eng = await supabase
+      .from("tiktok_campaigns")
+      .select("campaign_id, tiktok_post_url, engagement_status, engagement_added_at");
+    const byId = new Map();
+    if (!eng.error) for (const e of eng.data || []) byId.set(String(e.campaign_id), e);
+    res.data = (res.data || []).map((c) => {
+      const e = byId.get(String(c.campaign_id)) || {};
+      return {
+        ...c,
+        tiktok_post_url: e.tiktok_post_url ?? null,
+        engagement_status: e.engagement_status ?? "PENDING",
+        engagement_added_at: e.engagement_added_at ?? null,
+      };
+    });
+  }
   return res;
 }
 
@@ -121,6 +153,9 @@ exports.handler = async function (event) {
 
     // ---- read-only: advertiser account budgets + BC balance ----
     if (action === "budgets") return budgetsForTracked(supabase);
+
+    // ---- read-only: today's live TikTok campaign metrics (spend/CPM/CPA) ----
+    if (action === "metrics") return campaignMetricsForTracked(supabase);
 
     // ---- read-only: lazy ad-group load for one campaign ----
     if (action === "adgroups") {
@@ -319,6 +354,86 @@ exports.handler = async function (event) {
       }
     }
 
+    // ---- engagement FOUNDATION (no external calls anywhere) ----
+    //
+    // There is NO manual "attach post URL" step. `tiktok_post_url` is the
+    // authoritative per-campaign mapping and is written directly onto the
+    // campaign row by Campaign Creation Automation (not built yet) from its
+    // ordered Spark-code / post-link pairs — never derived by name or ordering.
+    // Until then it stays null and "Add comments" simply reports that.
+
+    if (action === "queue_engagement_comments") {
+      if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
+      const r = await resolveTrackedCampaign(supabase, body.campaign_id);
+      if (r.error) return r.error;
+
+      const link = (r.campaign.tiktok_post_url || "").trim();
+      if (!link) {
+        return json(400, {
+          error: "This campaign has no TikTok post URL yet. It is set automatically when the campaign is created.",
+        });
+      }
+
+      const comments = parseComments(body.comments);
+      if (!comments.length) {
+        return json(400, { error: "Enter at least one comment (one per line)." });
+      }
+      const serviceId = typeof body.service_id === "string" ? body.service_id.trim() : "";
+      if (!serviceId) {
+        return json(400, { error: "Service ID is required." });
+      }
+
+      // Store the batch. NOTHING is sent to any external service.
+      const orderRow = {
+        campaign_id: String(r.campaign.campaign_id),
+        kind: "COMMENTS",
+        provider: null,
+        service_id: serviceId,
+        link,
+        quantity: comments.length,
+        comments,
+        status: "READY",
+        note: null,
+        updated_at: new Date().toISOString(),
+      };
+      const ins = await supabase.from("engagement_orders").insert(orderRow).select().maybeSingle();
+      if (ins.error && /does not exist|schema cache|could not find the table/i.test(ins.error.message || "")) {
+        return json(500, {
+          error: "The engagement_orders table isn't migrated yet. Run supabase/tiktok_engagement.sql, then retry.",
+          details: ins.error.message,
+        });
+      }
+      if (ins.error) return json(500, { error: "Could not store the comment batch", details: ins.error.message });
+
+      // Dispatch point for a FUTURE approved provider. Today this performs no
+      // network call and just reports the order as stored/READY.
+      const result = await submitEngagementOrder({
+        provider: null,
+        kind: "COMMENTS",
+        campaignId: String(r.campaign.campaign_id),
+        serviceId,
+        link,
+        quantity: comments.length,
+        comments,
+      });
+
+      if (ins.data && (result.note || result.status)) {
+        await supabase
+          .from("engagement_orders")
+          .update({ status: result.status || "READY", note: result.message || null, updated_at: new Date().toISOString() })
+          .eq("id", ins.data.id);
+      }
+
+      return json(200, {
+        ok: true,
+        order_id: ins.data ? ins.data.id : null,
+        count: comments.length,
+        submitted: !!result.submitted,
+        status: result.status || "READY",
+        message: result.message || "Stored locally — ready for an approved provider integration.",
+      });
+    }
+
     if (action === "sync") return syncAll(supabase, body.connection_id || null);
 
     return json(400, { error: `Unknown action: ${action}` });
@@ -390,6 +505,195 @@ async function budgetsForTracked(supabase) {
   }
 
   return json(200, { advertisers, bc });
+}
+
+// Today's live TikTok campaign performance for every TRACKED advertiser account,
+// across every connection / Business Center. One report request per advertiser
+// (all its campaigns at once), one MCP client per connection.
+//
+// Reporting boundary: the America/New_York calendar date (dashboardToday()) —
+// the same clock as Glitchy / Mabac / daily_totals / the calendar. NOTE:
+// report_integrated_get reads start_date/end_date in each AD ACCOUNT's own
+// timezone, so an account not set to Eastern has a small near-midnight skew;
+// we log a server warning when that's detected. A precise fix needs an hourly
+// report and is out of scope for this endpoint.
+//
+// Partial failure is fine: an advertiser/connection that errors is recorded in
+// `errors` and its campaigns are simply absent from `metrics` (the frontend
+// keeps its last-known values for those). Never throws for a partial failure.
+//
+// Response: { ok, date, metrics: { <campaign_id>: { advertiser_id, spend, cpm,
+//   cpa, impressions, clicks, conversions } }, okAdvertiserIds: [...], errors,
+//   spendToday: { date, currentHour, cumulative, byHour: { <hour>: cumulative } } }
+//   — spendToday is for the Live Performance graph only.
+async function campaignMetricsForTracked(supabase) {
+  const date = dashboardToday();
+
+  const { data: tracked, error } = await supabase
+    .from("tiktok_advertisers")
+    .select("connection_id, advertiser_id, timezone, display_timezone")
+    .eq("tracked", true);
+  if (error) return json(500, { error: "Supabase read failed", details: error.message });
+  if (!tracked || !tracked.length) {
+    return json(200, { ok: true, date, metrics: {}, okAdvertiserIds: [], errors: {} });
+  }
+
+  // campaign_id -> { connection_id, advertiser_id, campaign_name } — used to
+  // ignore report rows for campaigns we don't track and to satisfy the NOT NULL
+  // columns when persisting.
+  const { data: known } = await supabase
+    .from("tiktok_campaigns")
+    .select("campaign_id, connection_id, advertiser_id, campaign_name, effective_status");
+  const knownById = new Map((known || []).map((c) => [String(c.campaign_id), c]));
+
+  // Engagement FOUNDATION: on this ~60s tick, flip any campaign currently stored
+  // as "Active" that has a post URL to READY. Idempotent, no external calls.
+  await markEngagementReadyIfActive(
+    supabase,
+    (known || []).filter((c) => c.effective_status === "Active").map((c) => c.campaign_id)
+  );
+
+  const byConnection = {};
+  for (const t of tracked) (byConnection[t.connection_id] = byConnection[t.connection_id] || []).push(t);
+
+  const { serverUrl, redirectUrl } = resolveConfig();
+  const metrics = {};
+  const errors = {};
+  const okAdvertiserIds = [];
+
+  // Stay comfortably inside the function time limit even with many advertisers.
+  const DEADLINE_MS = 9000;
+  const startedAt = Date.now();
+  let timedOut = false;
+
+  for (const [connectionId, list] of Object.entries(byConnection)) {
+    if (timedOut) break;
+    const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+    if (!conn) {
+      errors[`conn:${connectionId}`] = "connection not found";
+      continue;
+    }
+
+    const provider = new SupabaseOAuthProvider({ supabase, serverUrl, redirectUrl, connection: conn });
+    let client;
+    try {
+      ({ client } = await connectMcp({ provider, serverUrl }));
+    } catch (err) {
+      errors[`conn:${connectionId}`] = err.message;
+      console.error(`[tiktok-metrics] connect failed conn=${connectionId}: ${err.message}`);
+      continue;
+    }
+
+    try {
+      for (const adv of list) {
+        const advId = String(adv.advertiser_id);
+        if (Date.now() - startedAt > DEADLINE_MS) {
+          timedOut = true;
+          errors.timeout = "Stopped early to stay within the function time limit — some advertiser accounts were not refreshed this cycle.";
+          break;
+        }
+        const tz = adv.timezone || adv.display_timezone || "";
+        if (tz && !/new[_ ]?york|eastern/i.test(tz)) {
+          console.warn(`[tiktok-metrics] advertiser ${advId} tz="${tz}" — daily boundary uses the NY date, near-midnight skew possible`);
+        }
+        try {
+          const byId = await loadCampaignMetricsForAdvertiser(client, advId, { date });
+          for (const [cid, m] of Object.entries(byId)) metrics[cid] = m;
+          okAdvertiserIds.push(advId);
+        } catch (err) {
+          errors[`adv:${advId}`] = err.message;
+          console.error(`[tiktok-metrics] report failed adv=${advId}: ${err.message}`);
+        }
+      }
+    } finally {
+      await client.close().catch(() => {});
+    }
+  }
+
+  // Persist today's metrics onto the known campaign rows (one upsert). This is
+  // what daily_totals.total_spend is derived from, so it must be best-effort and
+  // must never fail the response.
+  const now = new Date().toISOString();
+  const rows = [];
+  for (const [cid, m] of Object.entries(metrics)) {
+    const k = knownById.get(cid);
+    if (!k) continue;
+    rows.push({
+      campaign_id: cid,
+      connection_id: k.connection_id,
+      advertiser_id: k.advertiser_id,
+      campaign_name: k.campaign_name,
+      today_date: date,
+      today_spend: m.spend,
+      today_impressions: m.impressions,
+      today_clicks: m.clicks,
+      today_conversions: m.conversions,
+      today_cpm: m.cpm,
+      today_cpa: m.cpa,
+      metrics_updated_at: now,
+    });
+  }
+  if (rows.length) {
+    const { error: upErr } = await supabase.from("tiktok_campaigns").upsert(rows, { onConflict: "campaign_id" });
+    if (upErr && !/today_(date|spend|impressions|clicks|conversions|cpm|cpa)|metrics_updated_at/.test(upErr.message || "")) {
+      // A real write error (not "column missing" — that just means the migration
+      // hasn't been run yet, which only affects daily_totals, not the live table).
+      errors.persist = upErr.message;
+      console.error(`[tiktok-metrics] persist failed: ${upErr.message}`);
+    }
+  }
+
+  // ---- Live Performance graph ONLY: snapshot today's cumulative spend into the
+  // current NY hour, then hand back every hour's cumulative so the frontend can
+  // derive hourly spend (delta between consecutive snapshots). Zero extra MCP
+  // calls — this is all Supabase. Never fails the response.
+  let spendToday = null;
+  try {
+    const cumulative = await tiktokSpendForToday(supabase, date); // Σ persisted today_spend
+    const hour = nyHourNow();
+    await recordSpendSnapshot(supabase, date, hour, cumulative);
+    spendToday = { date, currentHour: hour, cumulative, byHour: await readSpendSnapshots(supabase, date) };
+  } catch (err) {
+    console.error(`[tiktok-metrics] spend snapshot failed: ${err.message}`);
+  }
+
+  return json(200, { ok: true, date, metrics, okAdvertiserIds, errors, spendToday });
+}
+
+// Current hour (0-23) in America/New_York — the graph's fixed axis / boundary.
+function nyHourNow() {
+  const s = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(new Date());
+  return parseInt(s, 10) % 24; // guards the historical "24" at midnight
+}
+
+// Upsert the running cumulative into (date, hour). Overwrites the current hour on
+// every refresh; the last write before the hour rolls becomes its frozen value.
+// Silently no-ops if the migration (supabase/tiktok_spend_snapshots.sql) is unrun.
+async function recordSpendSnapshot(supabase, date, hour, cumulative) {
+  const value = Math.round((Number(cumulative) || 0) * 100) / 100;
+  const { error } = await supabase.from("tiktok_spend_snapshots").upsert(
+    { date, hour, cumulative_spend: value, updated_at: new Date().toISOString() },
+    { onConflict: "date,hour" }
+  );
+  if (error) {
+    if (/tiktok_spend_snapshots|does not exist|schema cache/i.test(error.message || "")) return;
+    throw error;
+  }
+  // Opportunistic cleanup — tiny table, keep ~14 days.
+  const cutoff = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+  await supabase.from("tiktok_spend_snapshots").delete().lt("date", cutoff);
+}
+
+// { "<hour>": cumulative_spend } for one NY date. Empty on any error / no rows.
+async function readSpendSnapshots(supabase, date) {
+  const { data, error } = await supabase
+    .from("tiktok_spend_snapshots")
+    .select("hour, cumulative_spend")
+    .eq("date", date);
+  if (error || !Array.isArray(data)) return {};
+  const byHour = {};
+  for (const r of data) byHour[String(r.hour)] = Number(r.cumulative_spend) || 0;
+  return byHour;
 }
 
 function normalizeOp(v) {

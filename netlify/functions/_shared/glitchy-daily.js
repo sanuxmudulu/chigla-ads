@@ -153,10 +153,34 @@ function combinedEarnings({ glitchyBySource = {}, mabacBySub1 = {}, networkByNam
   return { earnings: Math.round(earnings * 100) / 100, clicks, conversions };
 }
 
-// Upsert today's row in `daily_totals`. Base columns only (date, total_spend,
-// total_earnings, updated_at). `total_spend` stays 0 until TikTok per-campaign
-// metrics are merged. `opts.mabacSources` + `opts.networkByName` fold in Mabac
-// earnings by network ownership (no double-count with Glitchy).
+// Sum of today's TikTok campaign spend, read straight from the per-campaign
+// `today_spend` columns that tiktok-campaigns.js's "metrics" action keeps
+// current. Decoupled on purpose: this path (the Glitchy poll) never needs an
+// MCP client, and a TikTok outage just means daily_totals carries the last
+// value the dashboard managed to persist. Returns 0 if the columns aren't
+// migrated yet or on any error.
+async function tiktokSpendForToday(supabase, today) {
+  try {
+    const { data, error } = await supabase.from("tiktok_campaigns").select("today_spend, today_date");
+    if (error || !Array.isArray(data)) return 0;
+    let spend = 0;
+    for (const r of data) {
+      if (String(r.today_date) !== String(today)) continue; // stale / another day
+      spend += Number(r.today_spend) || 0;
+    }
+    return Math.round(spend * 100) / 100;
+  } catch (_) {
+    return 0;
+  }
+}
+
+// Upsert today's row in `daily_totals` (date, total_spend, total_earnings,
+// updated_at). `total_spend` is today's real TikTok campaign spend, summed from
+// the persisted per-campaign `today_spend` columns (see tiktokSpendForToday);
+// it is 0 only when TikTok genuinely has no spend today OR the metrics columns
+// haven't been migrated / no metrics refresh has run yet. `opts.mabacSources` +
+// `opts.networkByName` fold in Mabac earnings by network ownership (no
+// double-count with Glitchy).
 async function upsertTodayTotals(supabase, entries, opts = {}) {
   const today = todayEst();
   const glitchyBySource = sumEntriesBySourceForDate(entries, today);
@@ -169,17 +193,19 @@ async function upsertTodayTotals(supabase, entries, opts = {}) {
     networkByName: opts.networkByName || {},
   });
 
+  const totalSpend = await tiktokSpendForToday(supabase, today);
+
   const { error } = await supabase.from("daily_totals").upsert(
     {
       date: today,
-      total_spend: 0,
+      total_spend: totalSpend,
       total_earnings: earnings,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "date" }
   );
   if (error) throw new Error(`daily_totals upsert failed: ${error.message}`);
-  return { date: today, total_earnings: earnings };
+  return { date: today, total_spend: totalSpend, total_earnings: earnings };
 }
 
 // campaign_name -> affiliate_network, from tiktok_campaigns. Empty on any error
@@ -206,5 +232,6 @@ module.exports = {
   sumEntriesBySourceForDate,
   combinedEarnings,
   networkByCampaignName,
+  tiktokSpendForToday,
   upsertTodayTotals,
 };

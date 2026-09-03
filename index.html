@@ -234,6 +234,29 @@
   </div>
 </div>
 
+<!-- ============ ENGAGEMENT: ADD COMMENTS MODAL ============ -->
+<div class="modal-backdrop" id="engagementCommentsModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Add comments</h3>
+      <button id="closeEngagementCommentsModal">✕</button>
+    </div>
+    <p class="eng-target">Campaign: <strong id="engagementCommentsCampaignName"></strong></p>
+    <span class="budget-field-label">TikTok Post URL <span class="eng-hint">(from this campaign)</span></span>
+    <div class="eng-url-readonly" id="engagementCommentsUrl"></div>
+    <label class="budget-field-label" for="engagementServiceIdInput">Service ID</label>
+    <input type="text" id="engagementServiceIdInput" placeholder="e.g. 1234" autocomplete="off" />
+    <label class="budget-field-label" for="engagementCommentsInput">Comments <span class="eng-hint">(one per line)</span></label>
+    <textarea id="engagementCommentsInput" rows="6" placeholder="First comment&#10;Second comment&#10;Third comment"></textarea>
+    <div class="eng-placeholder" id="engagementCommentsResult"></div>
+    <div class="modal-error" id="engagementCommentsError"></div>
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelEngagementCommentsBtn">Cancel</button>
+      <button class="icon-btn primary" id="submitEngagementCommentsBtn">Add comments</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ TIKTOK PASSWORD MODAL ============ -->
 <div class="modal-backdrop" id="tiktokPwModal">
   <div class="modal">

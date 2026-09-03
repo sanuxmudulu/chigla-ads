@@ -7,6 +7,7 @@ import {
   startTiktokAuth,
   postTiktokAction,
   fetchTiktokCampaigns,
+  fetchTiktokMetrics,
   syncTiktokCampaigns,
   fetchCampaignAdGroups,
   setCampaignStatus,
@@ -15,6 +16,7 @@ import {
   setAdvertiserBudget,
   setConnectionNetwork,
   deleteTiktokCampaign,
+  queueEngagementComments,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -47,9 +49,20 @@ function estDateLabel() {
   const est = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
   return est.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
-const money = (n) => `$${(n || 0).toFixed(2)}`;
+const money = (n) => `$${(Number.isFinite(Number(n)) ? Number(n) : 0).toFixed(2)}`;
 const num = (n) => (n || 0).toLocaleString("en-US");
 const signedMoney = (n) => `${n >= 0 ? "+" : "-"}${money(Math.abs(n))}`;
+// Coerce anything (null / undefined / "" / NaN / Infinity) to a finite number.
+const toNum = (v) => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
+// a / b, but only when b > 0 and the result is finite — else 0. Kills every
+// NaN / Infinity path in the derived metrics (CPNC, EPC, ROAS).
+const ratio = (a, b) => {
+  const r = toNum(a) / toNum(b);
+  return toNum(b) > 0 && Number.isFinite(r) ? r : 0;
+};
 
 // Smooth ROAS → colour ramp for the ROAS cell. 0 red · 0.5 orange · 1 yellow ·
 // 1.5 yellow-green · 2+ strong green (clamped, so 2x and 5x read the same). HSL
@@ -82,6 +95,10 @@ const state = {
   mabacRows: [], // per-sub1 rows from Mabac (clicks/conversions/revenue)
   mabacConfigured: false,
   tiktokCampaigns: [], // rows from tiktok-campaigns (campaign_name == source)
+  campaignMetrics: {}, // campaign_id -> { advertiser_id, spend, cpm, cpa, impressions, clicks, conversions } — today, NY date
+  campaignMetricsDate: null, // NY date the metrics belong to
+  campaignMetricsStale: false, // last metrics refresh had a partial/total failure
+  spendToday: null, // { date, currentHour, cumulative, byHour } — Live Performance Spend series ONLY
   budgets: {}, // advertiser_id -> { budget_mode, capped, cap, spent, remaining, account_balance, currency, bc_id }
   bcBalances: {}, // bc_id -> { balance, currency, bc_name }
   detailBcFilter: "all", // "all" | bc_id — VIEW filter only, never untracks anything
@@ -97,10 +114,14 @@ const state = {
 };
 
 let lastUpdatedAt = null;
+let refreshInFlight = false; // guards refreshAll() against overlapping runs
+let metricsInFlight = false; // guards loadTiktokMetrics() against overlapping runs
 let mainChartCanvas = null;
 let openRowMenuFor = null; // campaignId whose ⋮ menu is open, or null
 let rowMenuEl = null; // the floating menu element (appended to <body>)
 let deleteCampaignTarget = null; // source row pending delete confirmation
+let engagementTarget = null; // source row for the open engagement / comments modal
+const ENGAGEMENT_SERVICE_ID_KEY = "chigla_engagement_service_id_v1";
 
 // ============================== INIT ==============================
 
@@ -165,6 +186,49 @@ async function loadMabac() {
   }
 }
 
+// Today's live TikTok campaign metrics (spend / CPM / CPA) for every tracked
+// advertiser account. Hits the MCP — runs on load and inside the 60s refresh
+// cycle. Guarded so a slow request never overlaps the next tick.
+async function loadTiktokMetrics() {
+  if (metricsInFlight) return;
+  metricsInFlight = true;
+  try {
+    const data = await fetchTiktokMetrics();
+    applyTiktokMetrics(data);
+  } catch (_) {
+    // Total failure (e.g. function 500 / offline) — keep every last-known value,
+    // just flag them as stale. Never zero out real numbers on a failed refresh.
+    state.campaignMetricsStale = true;
+  } finally {
+    metricsInFlight = false;
+  }
+}
+
+// Merge a metrics snapshot into state. For advertiser accounts that reported OK
+// this round we REPLACE their campaigns' metrics (so a campaign that genuinely
+// spent $0 today, or is gone, drops to 0 rather than keeping a stale value).
+// For advertiser accounts missing from `okAdvertiserIds` (their report failed)
+// we KEEP the previous values — a failed request must not look like real $0.
+function applyTiktokMetrics(data) {
+  if (!data || typeof data !== "object") return;
+  const fresh = data.metrics || {};
+  const okAdv = new Set((data.okAdvertiserIds || []).map(String));
+
+  const merged = {};
+  for (const [cid, m] of Object.entries(state.campaignMetrics)) {
+    if (!okAdv.has(String(m && m.advertiser_id))) merged[cid] = m; // stale, but its account didn't refresh
+  }
+  for (const [cid, m] of Object.entries(fresh)) merged[cid] = m;
+
+  state.campaignMetrics = merged;
+  state.campaignMetricsDate = data.date || null;
+  state.campaignMetricsStale = !!(data.errors && Object.keys(data.errors).length);
+  // Live Performance Spend series only — keep the last snapshot if this cycle
+  // didn't return one (e.g. the spend-snapshot table isn't migrated yet).
+  if (data.spendToday) state.spendToday = data.spendToday;
+  rebuildSources();
+}
+
 function updateDateDisplay() {
   const el = document.getElementById("dateDisplay");
   if (el) el.textContent = estDateLabel();
@@ -187,7 +251,7 @@ function renderFromCacheOrFallback() {
 // ============================== EVENTS ==============================
 
 function wireEvents() {
-  document.getElementById("refreshBtn").addEventListener("click", () => refreshAll(true));
+  document.getElementById("refreshBtn").addEventListener("click", () => refreshAll());
 
   // ---- Tools panel ----
   document.getElementById("toolsBtn").addEventListener("click", openToolsDrawer);
@@ -256,6 +320,13 @@ function wireEvents() {
   });
   document.getElementById("confirmDeleteCampaignBtn").addEventListener("click", confirmDeleteCampaign);
 
+  // ---- engagement: Add comments modal (foundation) ----
+  document.getElementById("closeEngagementCommentsModal").addEventListener("click", closeEngagementCommentsModal);
+  document.getElementById("cancelEngagementCommentsBtn").addEventListener("click", closeEngagementCommentsModal);
+  document.getElementById("engagementCommentsModal").addEventListener("click", (e) => {
+    if (e.target.id === "engagementCommentsModal") closeEngagementCommentsModal();
+  });
+  document.getElementById("submitEngagementCommentsBtn").addEventListener("click", submitEngagementComments);
 
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     // Campaign pause/unpause button — must NOT toggle the row.
@@ -304,24 +375,45 @@ function startTimers() {
 
 // ============================== DATA FETCH ==============================
 
-async function refreshAll(userTriggered) {
+// One refresh cycle: Glitchy (primary affiliate) + Mabac (optional affiliate) +
+// live TikTok campaign metrics. Runs on load and every 60s. Guarded so that if a
+// cycle is still running when the interval fires, the new one is skipped rather
+// than stacked.
+async function refreshAll() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+
   const refreshBtn = document.getElementById("refreshBtn");
   refreshBtn.classList.add("spinning");
   try {
     const today = todayStr();
-    // Glitchy is the primary affiliate source and must not be affected by Mabac.
-    const data = await fetchGlitchyStats(today, today);
-    applyGlitchyResponse(data, { flagNewConversions: state.hasFetchedOnce });
-    state.hasFetchedOnce = true;
-    lastUpdatedAt = Date.now();
-    setStatus(null);
-  } catch (err) {
-    setStatus(`Couldn't reach Glitchy: ${err.message} — showing last known data.`, true);
+
+    // Glitchy is the primary affiliate source and must not be blocked by Mabac
+    // or TikTok. Fetch it first; the other two run alongside and never throw
+    // out of here (each keeps its own last-known data on failure).
+    let glitchyErr = null;
+    const [g] = await Promise.allSettled([fetchGlitchyStats(today, today)]);
+    if (g.status === "fulfilled") {
+      applyGlitchyResponse(g.value, { flagNewConversions: state.hasFetchedOnce });
+      state.hasFetchedOnce = true;
+      lastUpdatedAt = Date.now();
+    } else {
+      glitchyErr = g.reason;
+    }
+
+    await Promise.allSettled([loadMabac(), loadTiktokMetrics()]);
+
+    if (glitchyErr) {
+      setStatus(`Couldn't reach Glitchy: ${glitchyErr.message} — showing last known data.`, true);
+    } else if (state.campaignMetricsStale) {
+      setStatus("Some TikTok campaign metrics couldn't be refreshed — showing last known values for those.");
+    } else {
+      setStatus(null);
+    }
   } finally {
     refreshBtn.classList.remove("spinning");
+    refreshInFlight = false;
   }
-  // Mabac runs alongside, independently.
-  loadMabac();
 }
 
 function setStatus(msg, isError) {
@@ -391,19 +483,28 @@ function rebuildSources(opts = {}) {
     else if (m && !g) network = "MABAC";
     else network = "GLITCHY";
 
+    // Affiliate-network figures (clicks / earnings) — from the ONE owning
+    // network only, joined by name (Glitchy source == Mabac sub1 == campaign).
     const aff = network === "MABAC" ? m : g;
-    const clicks = network === "MABAC" ? aff?.clicks || 0 : aff?.clicks || 0;
-    const conversions = network === "MABAC" ? aff?.conversions || 0 : aff?.conversions || 0;
-    const payout = network === "MABAC" ? aff?.revenue || 0 : aff?.payout || 0;
+    const clicks = toNum(network === "MABAC" ? aff?.clicks : aff?.clicks);
+    const conversions = toNum(network === "MABAC" ? aff?.conversions : aff?.conversions);
+    const payout = toNum(network === "MABAC" ? aff?.revenue : aff?.payout);
 
-    // TikTok-supplied metrics — not wired to real per-campaign values yet.
-    const spend = 0;
-    const cpm = 0;
-    const cpa = 0;
-    const roas = spend > 0 ? payout / spend : 0;
-    const cpnc = clicks > 0 && spend > 0 ? spend / clicks : 0;
+    // TikTok-side campaign metrics for TODAY (NY date), matched by campaign_id —
+    // NOT by name. Absent => genuinely no TikTok data for this campaign yet
+    // (either untracked, or a tracked campaign with zero delivery so far), which
+    // correctly reads as 0. state.campaignMetrics keeps last-known values when a
+    // report request fails (see applyTiktokMetrics).
+    const mx = tk && tk.campaign_id ? state.campaignMetrics[String(tk.campaign_id)] : null;
+    const spend = mx ? toNum(mx.spend) : 0;
+    const cpm = mx ? toNum(mx.cpm) : 0;
+    const cpa = mx ? toNum(mx.cpa) : 0;
+    const impressions = mx ? toNum(mx.impressions) : 0;
 
-    const epc = clicks > 0 ? payout / clicks : 0;
+    // Derived — every division guarded (0 when the denominator is 0 / missing).
+    const roas = ratio(payout, spend); // affiliate earnings ÷ TikTok spend
+    const cpnc = ratio(spend, clicks); // TikTok spend ÷ affiliate clicks
+    const epc = ratio(payout, clicks); // affiliate earnings ÷ affiliate clicks
     const profit = payout - spend;
 
     const budget = tk && tk.advertiser_id ? state.budgets[String(tk.advertiser_id)] || null : null;
@@ -418,6 +519,7 @@ function rebuildSources(opts = {}) {
       spend,
       cpm,
       cpa,
+      impressions,
       cpnc,
       epc,
       roas,
@@ -434,6 +536,8 @@ function rebuildSources(opts = {}) {
       advertiserName: tk ? tk.advertiser_name || null : null,
       bcId: tk ? tk.bc_id || null : null,
       budget,
+      tiktokPostUrl: tk ? tk.tiktok_post_url || null : null,
+      engagementStatus: tk ? tk.engagement_status || "PENDING" : null,
     };
   });
 
@@ -464,10 +568,13 @@ function populateChartSourceOptions(sources) {
 // ============================== KPI ROW ==============================
 
 function renderKpis() {
-  const totalSpend = state.baseSpendTotal; // always 0 until TikTok is wired in
-  const totalEarnings = state.baseEarningsTotal;
+  // Totals over the currently displayed rows (respects the Business Center view
+  // filter, same as the table). Overall ROAS is total ÷ total — NEVER an average
+  // of the per-row ROAS values.
+  const totalSpend = toNum(state.baseSpendTotal);
+  const totalEarnings = toNum(state.baseEarningsTotal);
   const netProfit = totalEarnings - totalSpend;
-  const roas = 0;
+  const roas = ratio(totalEarnings, totalSpend);
 
   setKpi("kpiSpend", money(totalSpend));
   setKpi("kpiEarnings", money(totalEarnings));
@@ -500,9 +607,8 @@ function renderTable(newConversionSources) {
   // Winners first: highest ROAS, then (tie-break) highest spend. Re-sorted on
   // every rebuild so the table re-orders itself as fresh metrics land.
   const sorted = [...state.sources].sort((a, b) => b.roas - a.roas || b.spend - a.spend);
-  // ROAS is 0 for every row until TikTok spend is real, so a "best ROAS"
-  // crown would just be an arbitrary tie — only show it once ROAS can
-  // actually distinguish rows.
+  // Crown the single best-ROAS row — but only once at least one row has a real
+  // (> 0) ROAS, so rows with no TikTok spend yet don't get an arbitrary crown.
   const bestRoas = sorted.reduce((best, s) => (s.roas > (best?.roas ?? 0) ? s : best), null);
 
   sorted.forEach((s) => {
@@ -629,6 +735,7 @@ function toggleRowMenu(btn) {
   menu.className = "rowmenu";
   menu.innerHTML = `
     <button type="button" class="rowmenu-item" data-menu-action="edit-budget">Edit budget</button>
+    <button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>
     <button type="button" class="rowmenu-item danger" data-menu-action="delete-campaign">Delete campaign</button>`;
   document.body.appendChild(menu);
   rowMenuEl = menu;
@@ -649,6 +756,8 @@ function toggleRowMenu(btn) {
     if (act === "edit-budget") {
       if (src.advertiserId) openBudgetModal(src.advertiserId);
       else setStatus("No ad-account budget is available for this campaign.", true);
+    } else if (act === "add-comments") {
+      openEngagementCommentsModal(src);
     } else if (act === "delete-campaign") {
       openDeleteCampaignModal(src);
     }
@@ -686,6 +795,7 @@ async function confirmDeleteCampaign() {
     // should leave the table now. A background reload confirms.
     state.tiktokCampaigns = state.tiktokCampaigns.filter((c) => String(c.campaign_id) !== String(s.campaignId));
     delete state.adGroupsByCampaign[s.campaignId];
+    delete state.campaignMetrics[String(s.campaignId)];
     state.expandedSources.delete(s.source);
     renderDetailBcSelector();
     rebuildSources();
@@ -702,6 +812,109 @@ async function confirmDeleteCampaign() {
     errEl.textContent = err.message;
     btn.disabled = false;
     btn.textContent = "Delete Campaign";
+  }
+}
+
+// ---- engagement FOUNDATION: "Add comments" ----
+// No external artificial-engagement / SMM service is ever contacted. This modal
+// only stages a comment batch server-side (against the campaign's OWN stored
+// tiktok_post_url) for a future APPROVED provider integration. There is no
+// manual "attach URL" step — the URL comes from Campaign Creation Automation.
+
+function currentEngagementCampaign() {
+  if (!engagementTarget) return null;
+  return state.sources.find((x) => String(x.campaignId) === String(engagementTarget)) || null;
+}
+
+// Uses the campaign's OWN stored tiktok_post_url — never asks for it. That URL
+// is written directly onto the campaign row by Campaign Creation Automation
+// (not built yet); until then it is null and this modal says so and blocks.
+function openEngagementCommentsModal(s) {
+  if (!s || !s.campaignId) return;
+  engagementTarget = String(s.campaignId);
+  const hasUrl = !!s.tiktokPostUrl;
+
+  document.getElementById("engagementCommentsCampaignName").textContent = s.source;
+  const urlEl = document.getElementById("engagementCommentsUrl");
+  urlEl.textContent = hasUrl
+    ? s.tiktokPostUrl
+    : "No post URL on this campaign yet — it is set automatically when the campaign is created.";
+  urlEl.classList.toggle("missing", !hasUrl);
+
+  document.getElementById("engagementServiceIdInput").value = loadServiceId();
+  document.getElementById("engagementCommentsInput").value = "";
+  const resultEl = document.getElementById("engagementCommentsResult");
+  resultEl.textContent = "";
+  resultEl.className = "eng-placeholder";
+  document.getElementById("engagementCommentsError").textContent = "";
+
+  const btn = document.getElementById("submitEngagementCommentsBtn");
+  btn.disabled = !hasUrl;
+  btn.textContent = "Add comments";
+  document.getElementById("engagementCommentsModal").classList.add("open");
+}
+
+function closeEngagementCommentsModal() {
+  document.getElementById("engagementCommentsModal").classList.remove("open");
+  engagementTarget = null;
+}
+
+function loadServiceId() {
+  try {
+    return localStorage.getItem(ENGAGEMENT_SERVICE_ID_KEY) || "";
+  } catch (_) {
+    return "";
+  }
+}
+function saveServiceId(v) {
+  try {
+    if (v) localStorage.setItem(ENGAGEMENT_SERVICE_ID_KEY, v);
+  } catch (_) {}
+}
+
+async function submitEngagementComments() {
+  const s = currentEngagementCampaign();
+  if (!s) return;
+  const errEl = document.getElementById("engagementCommentsError");
+  const resultEl = document.getElementById("engagementCommentsResult");
+  const btn = document.getElementById("submitEngagementCommentsBtn");
+  errEl.textContent = "";
+  resultEl.textContent = "";
+  resultEl.className = "eng-placeholder";
+
+  if (!s.tiktokPostUrl) {
+    errEl.textContent = "This campaign has no post URL yet — it's set automatically when the campaign is created.";
+    return;
+  }
+  const serviceId = document.getElementById("engagementServiceIdInput").value.trim();
+  if (!serviceId) {
+    errEl.textContent = "Enter a Service ID.";
+    return;
+  }
+  const lines = document
+    .getElementById("engagementCommentsInput")
+    .value.split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    errEl.textContent = "Enter at least one comment (one per line).";
+    return;
+  }
+
+  saveServiceId(serviceId);
+  btn.disabled = true;
+  btn.textContent = "Adding…";
+  try {
+    const res = await queueEngagementComments(s.campaignId, serviceId, lines);
+    resultEl.classList.add("ok");
+    resultEl.textContent =
+      res.message ||
+      `${res.count || lines.length} comment(s) staged for campaign “${s.source}”. Ready for an approved provider integration — nothing was sent.`;
+    btn.textContent = "Done";
+  } catch (err) {
+    errEl.textContent = err.message;
+    btn.disabled = false;
+    btn.textContent = "Add comments";
   }
 }
 
@@ -1051,6 +1264,41 @@ function hourlyPayoutCombined() {
   return buckets;
 }
 
+// Hourly TikTok spend for the Live Performance graph, derived from the
+// cumulative-spend snapshots the metrics refresh stores each NY hour:
+//   hour H spend = cumulative(H) − cumulative(nearest earlier hour, else 0)
+// Completed hours use their frozen snapshot; the current (unfinished) hour uses
+// the live cumulative minus the last completed-hour snapshot. Hours we never
+// captured stay null (a gap, not a wrong bar); future hours stay null.
+// Aggregate only — shown just for "All Sources Combined".
+function hourlySpendSeries() {
+  const st = state.spendToday;
+  if (!st || st.date !== todayStr() || state.chartSource !== "__all__") return Array(24).fill(null);
+
+  const byHour = st.byHour || {};
+  const curH = Number.isFinite(st.currentHour) ? st.currentHour : currentEstHour();
+  const liveCum = toNum(st.cumulative);
+  const at = (h) => (byHour[String(h)] != null ? toNum(byHour[String(h)]) : null);
+
+  const out = Array(24).fill(null);
+  for (let h = 0; h <= curH && h < 24; h++) {
+    const thisCum = h === curH ? liveCum : at(h);
+    if (thisCum == null) continue; // never captured this completed hour — leave a gap
+
+    let prev = 0;
+    for (let p = h - 1; p >= 0; p--) {
+      const v = at(p);
+      if (v != null) {
+        prev = v;
+        break;
+      }
+    }
+    const delta = thisCum - prev;
+    out[h] = delta > 0 ? Math.round(delta * 100) / 100 : 0; // clamp: no negative bars at a reset
+  }
+  return out;
+}
+
 function renderChart() {
   if (!mainChartCanvas || !window.Chart) return;
 
@@ -1060,7 +1308,7 @@ function renderChart() {
   const hourLabels = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
   const limit = currentEstHour() + 1;
 
-  const spendFull = Array(24).fill(0); // no hourly shape until TikTok is connected
+  const spendFull = hourlySpendSeries();
   let earningsFull;
   if (state.chartSource === "__all__") {
     earningsFull = hourlyPayoutCombined();
@@ -1392,6 +1640,7 @@ async function refreshTiktokData({ silent, allBcs } = {}) {
     await loadTiktokCampaigns();
     loadTiktokBudgets();
     loadMabac();
+    loadTiktokMetrics();
     if (document.getElementById("accountsModal").classList.contains("open")) {
       await renderTiktokAccounts();
     }

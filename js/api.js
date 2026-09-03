@@ -207,6 +207,20 @@ export async function fetchTiktokBudgets() {
   return readTiktokResponse(res, "Couldn't load budgets"); // { advertisers: {...}, bc: {...} }
 }
 
+// Read: today's live TikTok campaign metrics (spend / CPM / CPA / impressions /
+// clicks / conversions) for every tracked advertiser account, keyed by
+// campaign_id. NY reporting date. Hits the MCP — call on load / the 60s refresh,
+// not more often. Partial failures come back 200 with a populated `errors` map
+// (the caller keeps last-known values for the affected advertisers).
+export async function fetchTiktokMetrics() {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "metrics" }),
+  });
+  return readTiktokResponse(res, "Couldn't load campaign metrics"); // { metrics, okAdvertiserIds, errors, date }
+}
+
 // Write: set / change / remove one advertiser account's spend cap.
 // budgetMode: UNLIMITED | MONTHLY_BUDGET | DAILY_BUDGET | CUSTOM_BUDGET
 export async function setAdvertiserBudget(advertiserId, budgetMode, budget) {
@@ -229,6 +243,18 @@ export async function deleteTiktokCampaign(campaignId) {
     body: JSON.stringify({ action: "delete_campaign", campaign_id: campaignId }),
   });
   return readTiktokResponse(res, "Campaign delete failed");
+}
+
+// Engagement FOUNDATION. Stores a comment batch (one per line) against the
+// campaign's OWN stored tiktok_post_url as an engagement_orders row with status
+// READY. Does NOT contact any provider / SMM service.
+export async function queueEngagementComments(campaignId, serviceId, comments) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "queue_engagement_comments", campaign_id: campaignId, service_id: serviceId, comments }),
+  });
+  return readTiktokResponse(res, "Couldn't queue the comments");
 }
 
 // Config: which affiliate network supplies clicks/earnings for a connection's
