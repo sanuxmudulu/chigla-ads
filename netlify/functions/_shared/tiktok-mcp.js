@@ -811,16 +811,33 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
   return { campaignCount: rows.length, perAdvertiser };
 }
 
+// Drop any campaign_id that belongs to a temporary automation (WH Warmup) — those
+// must NEVER enter normal engagement processing. WH campaigns live only in
+// wh_warmup_campaigns (they're already excluded from tiktok_campaigns), so this
+// is defence-in-depth. Returns the safe subset.
+async function withoutTemporaryCampaigns(supabase, ids) {
+  if (!ids.length) return ids;
+  try {
+    const { data } = await supabase.from("wh_warmup_campaigns").select("campaign_id").in("campaign_id", ids);
+    const wh = new Set((data || []).map((r) => String(r.campaign_id)));
+    return ids.filter((id) => !wh.has(id));
+  } catch (_) {
+    return ids; // table not migrated -> nothing to exclude
+  }
+}
+
 // Idempotent engagement-readiness flag. Marks a campaign READY only when it is
 // currently Active, has a non-empty tiktok_post_url (the authoritative
 // campaign_id -> post-link mapping — never derived by name/order), and isn't
 // already READY/COMPLETED. No external calls — READY is just a local lifecycle
 // flag. After flipping, it invokes the FUTURE provider hook for those campaigns
 // (a no-op today). Silently no-ops if the engagement columns aren't migrated yet
-// (supabase/tiktok_engagement.sql).
+// (supabase/tiktok_engagement.sql). WH Warmup campaigns are explicitly excluded.
 async function markEngagementReadyIfActive(supabase, campaignIds) {
-  const ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
+  let ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
   if (!ids.length) return { updated: 0 };
+  ids = await withoutTemporaryCampaigns(supabase, ids);
+  if (!ids.length) return { updated: 0, skipped: "wh_warmup" };
   try {
     const { data, error } = await supabase
       .from("tiktok_campaigns")
@@ -856,7 +873,9 @@ async function markEngagementReadyIfActive(supabase, campaignIds) {
 // still being READY. Credentials (ENGAGEMENT_*_API_KEY) live only in the
 // provider module, read from process.env, never returned or logged.
 async function autoProcessReadyEngagements(supabase, campaignIds) {
-  const ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
+  let ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
+  if (!ids.length) return;
+  ids = await withoutTemporaryCampaigns(supabase, ids); // never touch WH Warmup
   if (!ids.length) return;
 
   let ready;

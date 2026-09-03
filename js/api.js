@@ -245,9 +245,19 @@ export async function deleteTiktokCampaign(campaignId) {
   return readTiktokResponse(res, "Campaign delete failed");
 }
 
+// Set / clear a campaign's TikTok post URL. Pass "" to clear. No external calls.
+export async function setCampaignPostUrl(campaignId, tiktokPostUrl) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "set_post_url", campaign_id: campaignId, tiktok_post_url: tiktokPostUrl }),
+  });
+  return readTiktokResponse(res, "Couldn't save the post URL"); // { tiktok_post_url }
+}
+
 // Engagement FOUNDATION. Stores a comment batch (one per line) against the
-// campaign's OWN stored tiktok_post_url as an engagement_orders row with status
-// READY. Does NOT contact any provider / SMM service.
+// campaign's tiktok_post_url as an engagement_orders row with status READY.
+// Does NOT contact any provider / SMM service.
 export async function queueEngagementComments(campaignId, serviceId, comments) {
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
@@ -255,6 +265,31 @@ export async function queueEngagementComments(campaignId, serviceId, comments) {
     body: JSON.stringify({ action: "queue_engagement_comments", campaign_id: campaignId, service_id: serviceId, comments }),
   });
   return readTiktokResponse(res, "Couldn't queue the comments");
+}
+
+// ---------------- Campaign Creator (auto-duplicate initial ad group) ----------------
+// Foundation only. Nothing registers campaigns yet — that's the future
+// Campaign Creator tool's job. `processCampaignCreatorDuplication` runs on the
+// existing ~60s refresh; it's a no-op while the table is empty.
+
+export async function processCampaignCreatorDuplication() {
+  const res = await fetch("/.netlify/functions/campaign-creator", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "process_duplication" }),
+  });
+  return readTiktokResponse(res, "Campaign-Creator duplication failed");
+}
+
+// Called by the future Campaign Creator after it builds campaign -> initial
+// ad group -> ad. Records the exact payloads so duplicates are an exact replay.
+export async function registerCampaignCreatorCampaign(payload) {
+  const res = await fetch("/.netlify/functions/campaign-creator", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "register", ...payload }),
+  });
+  return readTiktokResponse(res, "Couldn't register the campaign");
 }
 
 // ---------------- Comment templates (global, reusable) ----------------

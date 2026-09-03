@@ -23,6 +23,7 @@ const HANDLERS = {
   "wh-warmup": () => require("../netlify/functions/wh-warmup.js"),
   "cleanup": () => require("../netlify/functions/cleanup.js"),
   "comment-templates": () => require("../netlify/functions/comment-templates.js"),
+  "campaign-creator": () => require("../netlify/functions/campaign-creator.js"),
 };
 
 module.exports = async (req, res) => {

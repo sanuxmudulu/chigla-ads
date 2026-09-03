@@ -16,6 +16,7 @@ import {
   setAdvertiserBudget,
   setConnectionNetwork,
   deleteTiktokCampaign,
+  setCampaignPostUrl,
   queueEngagementComments,
   listCommentTemplates,
   createCommentTemplate,
@@ -24,6 +25,7 @@ import {
   createWhWarmup,
   cleanupWhWarmup,
   fetchWhCountries,
+  processCampaignCreatorDuplication,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -124,6 +126,7 @@ let lastUpdatedAt = null;
 let refreshInFlight = false; // guards refreshAll() against overlapping runs
 let metricsInFlight = false; // guards loadTiktokMetrics() against overlapping runs
 let whCleanupInFlight = false; // guards the WH Warmup cleanup poll
+let ccDupeInFlight = false; // guards the Campaign-Creator duplication poll
 let mainChartCanvas = null;
 let openRowMenuFor = null; // campaignId whose ⋮ menu is open, or null
 let rowMenuEl = null; // the floating menu element (appended to <body>)
@@ -224,6 +227,21 @@ async function runWhWarmupCleanup() {
     /* non-fatal — next cycle retries */
   } finally {
     whCleanupInFlight = false;
+  }
+}
+
+// Campaign Creator — auto-duplicate the initial ad group once Active. Piggybacks
+// the ~60s refresh, guarded. No-op while campaign_creator_campaigns is empty
+// (nothing registers campaigns until the Campaign Creator tool is built).
+async function runCampaignCreatorDuplication() {
+  if (ccDupeInFlight) return;
+  ccDupeInFlight = true;
+  try {
+    await processCampaignCreatorDuplication();
+  } catch (_) {
+    /* non-fatal — next cycle retries */
+  } finally {
+    ccDupeInFlight = false;
   }
 }
 
@@ -432,7 +450,7 @@ async function refreshAll() {
       glitchyErr = g.reason;
     }
 
-    await Promise.allSettled([loadMabac(), loadTiktokMetrics(), runWhWarmupCleanup()]);
+    await Promise.allSettled([loadMabac(), loadTiktokMetrics(), runWhWarmupCleanup(), runCampaignCreatorDuplication()]);
 
     if (glitchyErr) {
       setStatus(`Couldn't reach Glitchy: ${glitchyErr.message} — showing last known data.`, true);
@@ -944,8 +962,13 @@ function selectTemplate(id) {
   if (!t) return;
   ecState.selectedId = String(id);
   ecState.confirmDeleteId = null;
-  document.getElementById("engagementCommentsInput").value = (t.comments || []).join("\n");
+  document.getElementById("engagementCommentsError").textContent = "";
   renderTemplateList();
+}
+
+function selectedTemplateComments() {
+  const t = ecState.templates.find((x) => String(x.id) === String(ecState.selectedId));
+  return t && Array.isArray(t.comments) ? t.comments.map((c) => String(c).trim()).filter(Boolean) : [];
 }
 
 function openTemplateForm(id) {
@@ -991,7 +1014,6 @@ async function saveTemplateForm() {
     ecState.templates.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     // A just-created / just-edited template becomes the selected one.
     ecState.selectedId = String(saved.id);
-    document.getElementById("engagementCommentsInput").value = (saved.comments || []).join("\n");
     renderTemplateList();
     showEcView("main");
   } catch (err) {
@@ -1014,13 +1036,13 @@ async function confirmTemplateDelete(id) {
   renderTemplateList();
 }
 
-// Uses the campaign's OWN stored tiktok_post_url — never asks for it. That URL
-// is written directly onto the campaign row by Campaign Creation Automation
-// (not built yet); until then it is null and this modal says so and blocks.
+// The TikTok Post URL is prefilled from the campaign's stored tiktok_post_url
+// (Campaign Creation Automation will usually have set it), but stays editable.
+// Editing it here saves back to the campaign's tiktok_post_url before staging.
+// Exactly one saved template must be selected — there is no manual comments box.
 function openEngagementCommentsModal(s) {
   if (!s || !s.campaignId) return;
   engagementTarget = String(s.campaignId);
-  const hasUrl = !!s.tiktokPostUrl;
 
   ecState.selectedId = null;
   ecState.confirmDeleteId = null;
@@ -1028,21 +1050,15 @@ function openEngagementCommentsModal(s) {
   showEcView("main");
 
   document.getElementById("engagementCommentsCampaignName").textContent = s.source;
-  const urlEl = document.getElementById("engagementCommentsUrl");
-  urlEl.textContent = hasUrl
-    ? s.tiktokPostUrl
-    : "No post URL on this campaign yet — it is set automatically when the campaign is created.";
-  urlEl.classList.toggle("missing", !hasUrl);
-
+  document.getElementById("engagementCommentsUrl").value = s.tiktokPostUrl || "";
   document.getElementById("engagementServiceIdInput").value = loadServiceId();
-  document.getElementById("engagementCommentsInput").value = "";
   const resultEl = document.getElementById("engagementCommentsResult");
   resultEl.textContent = "";
   resultEl.className = "eng-placeholder";
   document.getElementById("engagementCommentsError").textContent = "";
 
   const btn = document.getElementById("submitEngagementCommentsBtn");
-  btn.disabled = !hasUrl;
+  btn.disabled = false;
   btn.textContent = "Add comments";
   document.getElementById("engagementCommentsModal").classList.add("open");
 
@@ -1080,8 +1096,9 @@ async function submitEngagementComments() {
   resultEl.textContent = "";
   resultEl.className = "eng-placeholder";
 
-  if (!s.tiktokPostUrl) {
-    errEl.textContent = "This campaign has no post URL yet — it's set automatically when the campaign is created.";
+  const url = document.getElementById("engagementCommentsUrl").value.trim();
+  if (!url) {
+    errEl.textContent = "Enter the TikTok post URL for this campaign.";
     return;
   }
   const serviceId = document.getElementById("engagementServiceIdInput").value.trim();
@@ -1089,13 +1106,13 @@ async function submitEngagementComments() {
     errEl.textContent = "Enter a Service ID.";
     return;
   }
-  const lines = document
-    .getElementById("engagementCommentsInput")
-    .value.split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  if (!ecState.selectedId) {
+    errEl.textContent = "Select a comment template.";
+    return;
+  }
+  const lines = selectedTemplateComments();
   if (!lines.length) {
-    errEl.textContent = "Enter at least one comment (one per line).";
+    errEl.textContent = "That template has no comments — edit it first.";
     return;
   }
 
@@ -1103,6 +1120,14 @@ async function submitEngagementComments() {
   btn.disabled = true;
   btn.textContent = "Adding…";
   try {
+    // If the URL was edited (or the campaign had none), persist it to the
+    // campaign's tiktok_post_url first so the rest of the app stays in sync.
+    if (url !== (s.tiktokPostUrl || "")) {
+      const r = await setCampaignPostUrl(s.campaignId, url);
+      const tk = state.tiktokCampaigns.find((c) => String(c.campaign_id) === String(s.campaignId));
+      if (tk) tk.tiktok_post_url = r.tiktok_post_url ?? url;
+      rebuildSources();
+    }
     const res = await queueEngagementComments(s.campaignId, serviceId, lines);
     resultEl.classList.add("ok");
     resultEl.textContent =

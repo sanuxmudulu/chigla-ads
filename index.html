@@ -334,20 +334,19 @@
     <!-- MAIN view -->
     <div id="ecMain">
       <p class="eng-target">Campaign: <strong id="engagementCommentsCampaignName"></strong></p>
-      <span class="budget-field-label">TikTok Post URL <span class="eng-hint">(from this campaign)</span></span>
-      <div class="eng-url-readonly" id="engagementCommentsUrl"></div>
+
+      <label class="budget-field-label" for="engagementCommentsUrl">TikTok Post URL</label>
+      <input type="text" id="engagementCommentsUrl" placeholder="https://www.tiktok.com/@handle/video/…" autocomplete="off" />
 
       <label class="budget-field-label" for="engagementServiceIdInput">Service ID</label>
       <input type="text" id="engagementServiceIdInput" placeholder="e.g. 5824" autocomplete="off" />
 
       <div class="ec-tpl-head">
-        <span class="budget-field-label" style="margin:0;">Templates</span>
+        <span class="budget-field-label" style="margin:0;">Templates <span class="eng-hint">(pick one)</span></span>
         <button type="button" class="ec-tpl-add" id="ecTplAddBtn" title="New template">+</button>
       </div>
       <div class="ec-tpl-list" id="ecTplList"></div>
 
-      <label class="budget-field-label" for="engagementCommentsInput">Comments <span class="eng-hint">(one per line)</span></label>
-      <textarea id="engagementCommentsInput" rows="6" placeholder="First comment&#10;Second comment&#10;Third comment"></textarea>
       <div class="eng-placeholder" id="engagementCommentsResult"></div>
       <div class="modal-error" id="engagementCommentsError"></div>
       <div class="modal-actions">

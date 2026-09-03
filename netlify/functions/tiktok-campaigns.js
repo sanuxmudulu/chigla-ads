@@ -15,8 +15,10 @@
 //                                today's spend/CPA + status
 //        "set_campaign_status" : { campaign_id, operation_status } — write
 //        "set_adgroup_status"  : { campaign_id, adgroup_id, operation_status } — write
+//        "set_post_url"       : { campaign_id, tiktok_post_url } — set/clear a campaign's
+//                                TikTok post URL (validated https tiktok.com link; no external calls)
 //        "queue_engagement_comments": { campaign_id, service_id, comments } — store a comment
-//                                batch (uses the campaign's own stored tiktok_post_url) as an
+//                                batch (against the campaign's tiktok_post_url) as an
 //                                engagement_orders row. NEVER contacts an SMM service.
 //
 // None of these need the admin password. Every action is restricted server-side
@@ -365,11 +367,46 @@ exports.handler = async function (event) {
 
     // ---- engagement FOUNDATION (no external calls anywhere) ----
     //
-    // There is NO manual "attach post URL" step. `tiktok_post_url` is the
-    // authoritative per-campaign mapping and is written directly onto the
-    // campaign row by Campaign Creation Automation (not built yet) from its
-    // ordered Spark-code / post-link pairs — never derived by name or ordering.
-    // Until then it stays null and "Add comments" simply reports that.
+    // `tiktok_post_url` is the authoritative per-campaign mapping. Campaign
+    // Creation Automation will write it directly on each campaign it creates
+    // (from the ordered Spark-code / post-link pairs). The Add-comments modal
+    // also lets it be set/edited manually via set_post_url.
+
+    if (action === "set_post_url") {
+      if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
+      const r = await resolveTrackedCampaign(supabase, body.campaign_id);
+      if (r.error) return r.error;
+
+      const raw = typeof body.tiktok_post_url === "string" ? body.tiktok_post_url.trim() : "";
+      let url = null;
+      if (raw) {
+        let parsed;
+        try {
+          parsed = new URL(raw);
+        } catch (_) {
+          return json(400, { error: "Enter a valid URL (https://www.tiktok.com/…)." });
+        }
+        if (parsed.protocol !== "https:" || !/(^|\.)tiktok\.com$/i.test(parsed.hostname)) {
+          return json(400, { error: "That doesn't look like a TikTok post URL (must be an https tiktok.com link)." });
+        }
+        url = parsed.toString();
+      }
+
+      const patch = {
+        tiktok_post_url: url,
+        engagement_added_at: url ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+      };
+      const upd = await supabase.from("tiktok_campaigns").update(patch).eq("campaign_id", String(r.campaign.campaign_id));
+      if (upd.error && /tiktok_post_url|engagement_added_at/.test(upd.error.message || "")) {
+        return json(500, {
+          error: "Engagement columns aren't migrated yet. Run supabase/tiktok_engagement.sql, then retry.",
+          details: upd.error.message,
+        });
+      }
+      if (upd.error) return json(500, { error: "Update failed", details: sbErr(upd.error) });
+      return json(200, { ok: true, campaign_id: String(r.campaign.campaign_id), tiktok_post_url: url });
+    }
 
     if (action === "queue_engagement_comments") {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
