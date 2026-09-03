@@ -114,19 +114,80 @@ async function resolveCountryLocationId(client, advertiserId, countryName) {
 // Spark auth code -> { item_id, identity_id } for this advertiser
 // ---------------------------------------------------------------------------
 
+// A safe fingerprint of the code — length + structural booleans only, NEVER the
+// code itself — for server-side debugging in the function logs.
+function sparkFingerprint(s) {
+  const c = String(s || "");
+  return `len=${c.length} hash=${c.startsWith("#")} plus=${c.includes("+")} pct2b=${/%2[bB]/.test(c)} eq=${c.endsWith("=")} ws=${/\s/.test(c)}`;
+}
+
+// The TikTok copied code is used EXACTLY as pasted. Only if a call rejects it as
+// an "incorrect/invalid code" do we fall back to the alternatives TikTok's docs
+// mention (`+` -> `%2B`, which some request paths require) and, last, dropping a
+// leading `#`. Ordered most-faithful first.
+function sparkCandidates(base) {
+  const out = [];
+  const add = (c) => {
+    if (c && !out.includes(c)) out.push(c);
+  };
+  // If the user pasted a code that was already `%2B`-encoded (e.g. copied out of
+  // a URL), the literal `+` is the faithful form — try that first.
+  const decoded = /%2[bB]/.test(base) ? base.replace(/%2[bB]/g, "+") : base;
+  add(decoded); // 1. exactly as pasted (or `%2B` decoded back to `+`)
+  add(base); // 2. the raw paste, if it differed from (1)
+  if (decoded.includes("+")) add(decoded.replace(/\+/g, "%2B")); // 3. documented `+` -> `%2B`
+  if (decoded.startsWith("#")) {
+    const noHash = decoded.slice(1);
+    add(noHash); // 4. without a leading `#`
+    if (noHash.includes("+")) add(noHash.replace(/\+/g, "%2B")); // 5. no `#` + `+` -> `%2B`
+  }
+  return out;
+}
+
+const SPARK_FORMAT_ERR = /incorrect|invalid|post code|auth[_ ]?code|not\s+valid/i;
+
 async function resolveSparkCode(client, advertiserId, rawCode) {
-  const code = String(rawCode || "").trim().replace(/\+/g, "%2B");
-  if (!code) throw new Error("No Spark code provided.");
+  // Only trim surrounding whitespace/newlines from the copy — never touch #, +, =.
+  const base = String(rawCode || "").trim();
+  if (!base) throw new Error("No Spark code provided.");
 
-  // 1. Put the creator's authorization into effect for this ad account.
-  await mcpCall(client, "tt_video_authorize_apply", { advertiser_id: String(advertiserId), auth_code: code });
+  const candidates = sparkCandidates(base);
+  console.log(`[wh-warmup] spark ${sparkFingerprint(base)} candidates=${candidates.length}`);
 
-  // 2. Read the authorized post -> item_id.
-  const info = await mcpCall(client, "tt_video_info_get", { advertiser_id: String(advertiserId), auth_code: code });
+  // 1. Put the creator's authorization into effect — try each candidate form
+  //    until one is accepted. Applying an already-applied authorization is fine,
+  //    so retrying is safe.
+  let workingCode = null;
+  let lastErr = null;
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      await mcpCall(client, "tt_video_authorize_apply", {
+        advertiser_id: String(advertiserId),
+        auth_code: candidates[i],
+      });
+      workingCode = candidates[i];
+      if (i > 0) console.log(`[wh-warmup] spark authorized with candidate #${i + 1}`);
+      break;
+    } catch (err) {
+      lastErr = err;
+      // A non-format error (network, permissions, quota, duet) -> stop, surface it.
+      if (!SPARK_FORMAT_ERR.test(err.message || "")) throw err;
+      console.warn(`[wh-warmup] spark candidate #${i + 1} rejected: ${err.message}`);
+    }
+  }
+  if (!workingCode) {
+    throw new Error(
+      `Spark authorization failed for every code format tried [${sparkFingerprint(base)}]. ` +
+        `If the post is a duet/stitch it needs the original owner's code too. Last error: ${lastErr?.message || "unknown"}`
+    );
+  }
+
+  // 2. Read the authorized post -> item_id (same form that just worked).
+  const info = await mcpCall(client, "tt_video_info_get", { advertiser_id: String(advertiserId), auth_code: workingCode });
   const itemId = String(
     info?.item_id ?? info?.tiktok_item_id ?? info?.video_info?.item_id ?? info?.video?.item_id ?? ""
   );
-  if (!itemId) throw new Error("Spark code did not resolve to a post.");
+  if (!itemId) throw new Error("Spark code authorized but did not resolve to a post (no item_id).");
 
   // 3. Find the AUTH_CODE identity created/associated by the authorization.
   let identityId = String(info?.identity_id ?? info?.identity?.identity_id ?? "");

@@ -92,12 +92,21 @@ async function createBatch(supabase, body) {
   const advertiserIds = [...new Set((body.advertiser_ids || []).map(String).filter(Boolean))];
   const targetCountry = String(body.target_country || "").trim();
   const locationId = String(body.location_id || "").trim() || null;
-  const sparkCode = String(body.spark_code || "").trim();
+  const rawSpark = String(body.spark_code || "");
+  const sparkCode = rawSpark.trim(); // ONLY strip surrounding whitespace/newlines — # + = are kept
 
   if (!connectionId) return json(400, { error: "connection_id is required" });
   if (!advertiserIds.length) return json(400, { error: "Select at least one advertiser account." });
   if (!targetCountry) return json(400, { error: "Enter a target country." });
   if (!sparkCode) return json(400, { error: "Enter a Spark code." });
+
+  // Safe fingerprint (never the code) so the exact characters can be verified in
+  // the function logs across the input path.
+  console.log(
+    `[wh-warmup] spark in: rawLen=${rawSpark.length} trimmedLen=${sparkCode.length} ` +
+      `hash=${sparkCode.startsWith("#")} plus=${sparkCode.includes("+")} pct2b=${/%2[bB]/.test(sparkCode)} ` +
+      `eq=${sparkCode.endsWith("=")} space=${sparkCode.includes(" ")}`
+  );
 
   const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
   if (!conn) return json(404, { error: "Connection not found." });
