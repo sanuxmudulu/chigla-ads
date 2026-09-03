@@ -11,6 +11,7 @@
 
 const {
   getSupabase,
+  sbErr,
   resolveConfig,
   checkPassword,
   SupabaseOAuthProvider,
@@ -53,8 +54,8 @@ exports.handler = async function (event) {
         readConnections(supabase),
         supabase.from("tiktok_advertisers").select(ADVERTISER_COLUMNS).order("advertiser_name", { ascending: true }),
       ]);
-      if (connectionsRes.error) return json(500, { error: "Supabase read failed", details: connectionsRes.error.message });
-      if (advertisersRes.error) return json(500, { error: "Supabase read failed", details: advertisersRes.error.message });
+      if (connectionsRes.error) return json(500, { error: "Supabase read failed", details: sbErr(connectionsRes.error) });
+      if (advertisersRes.error) return json(500, { error: "Supabase read failed", details: sbErr(advertisersRes.error) });
       return json(200, {
         connections: connectionsRes.data || [],
         advertisers: advertisersRes.data || [],
@@ -125,7 +126,7 @@ exports.handler = async function (event) {
           .select("*")
           .eq("id", body.connection_id)
           .maybeSingle();
-        if (error) return json(500, { error: "Supabase read failed", details: error.message });
+        if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
         if (!conn) return json(404, { error: "Connection not found" });
 
         const { serverUrl, redirectUrl } = resolveConfig();

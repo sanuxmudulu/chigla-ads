@@ -25,6 +25,7 @@
 
 const {
   getSupabase,
+  sbErr,
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
@@ -136,7 +137,7 @@ exports.handler = async function (event) {
 
     if (event.httpMethod === "GET") {
       const { data, error } = await readCampaigns(supabase);
-      if (error) return json(500, { error: "Supabase read failed", details: error.message });
+      if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
       return json(200, { campaigns: data || [] });
     }
 
@@ -468,7 +469,7 @@ async function budgetsForTracked(supabase) {
     .from("tiktok_advertisers")
     .select("connection_id, advertiser_id, bc_id")
     .eq("tracked", true);
-  if (error) return json(500, { error: "Supabase read failed", details: error.message });
+  if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
   if (!tracked || !tracked.length) return json(200, { advertisers: {}, bc: {} });
 
   // Group by connection so we authenticate once per connection.
@@ -533,7 +534,7 @@ async function campaignMetricsForTracked(supabase) {
     .from("tiktok_advertisers")
     .select("connection_id, advertiser_id, timezone, display_timezone")
     .eq("tracked", true);
-  if (error) return json(500, { error: "Supabase read failed", details: error.message });
+  if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
   if (!tracked || !tracked.length) {
     return json(200, { ok: true, date, metrics: {}, okAdvertiserIds: [], errors: {} });
   }
@@ -726,7 +727,7 @@ async function syncAll(supabase, onlyConnectionId) {
     .from("tiktok_advertisers")
     .select("connection_id, advertiser_id, advertiser_name, status, tracked, bc_id, bc_name")
     .eq("tracked", true);
-  if (trackedErr) return json(500, { error: "Supabase read failed", details: trackedErr.message });
+  if (trackedErr) return json(500, { error: "Supabase read failed", details: sbErr(trackedErr) });
 
   const globalTrackedAdvIds = (allTracked || []).map((t) => String(t.advertiser_id));
 

@@ -39,8 +39,8 @@ function normalizeDateKey(raw, fallback) {
 // @supabase/supabase-js builds inside createClient() (Netlify's Lambda Node
 // runtime does not reliably expose a global WebSocket). Realtime is unused.
 function supabaseClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_KEY;
+  const url = (process.env.SUPABASE_URL || "").trim();
+  const key = (process.env.SUPABASE_SERVICE_KEY || "").trim();
   if (!url || !key) return null;
   const opts = { auth: { persistSession: false } };
   if (WebSocketImpl) opts.realtime = { transport: WebSocketImpl };

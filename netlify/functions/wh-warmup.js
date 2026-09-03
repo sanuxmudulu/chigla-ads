@@ -17,6 +17,7 @@
 
 const {
   getSupabase,
+  sbErr,
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
@@ -175,7 +176,7 @@ async function cleanupBatch(supabase) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, checked: 0, deleted: 0, failed: 0, pending: 0, unmigrated: true });
     }
-    return json(500, { error: "Supabase read failed", details: error.message });
+    return json(500, { error: "Supabase read failed", details: sbErr(error) });
   }
   if (!rows || !rows.length) return json(200, { ok: true, checked: 0, deleted: 0, failed: 0, pending: 0 });
 
@@ -257,7 +258,7 @@ async function listWarmups(supabase) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, campaigns: [], unmigrated: true });
     }
-    return json(500, { error: "Supabase read failed", details: error.message });
+    return json(500, { error: "Supabase read failed", details: sbErr(error) });
   }
   return json(200, { ok: true, campaigns: data || [] });
 }

@@ -67,11 +67,39 @@ function resolveConfig() {
   return { serverUrl, redirectUrl, base };
 }
 
+// Postgrest wraps a fetch failure with the underlying `cause` in `error.details`
+// ("... Caused by: Error: getaddrinfo ENOTFOUND <host> ...") but only the bare
+// `error.message` ("TypeError: fetch failed") in `error.message`. Always surface
+// `details` so URL / DNS / TLS problems are diagnosable from the response.
+function sbErr(error) {
+  if (!error) return "unknown error";
+  const d = String(error.details || "");
+  // postgrest-js puts the real root cause on a "Caused by:" line (DNS / TLS /
+  // Invalid URL); fall back to the first detail line, else the bare message.
+  const causedBy = (d.match(/Caused by:[^\n]*/) || [])[0];
+  const extra = (causedBy || d.split("\n")[0] || "").trim();
+  return extra && extra !== error.message ? `${error.message} — ${extra}` : error.message || "Supabase error";
+}
+
 function getSupabase() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_KEY;
+  // .trim() defends against the single most common hosting-env mistake: a
+  // trailing newline / space pasted into the value, which makes the URL string
+  // concatenation inside supabase-js produce an invalid URL -> "fetch failed".
+  const url = (process.env.SUPABASE_URL || "").trim();
+  const key = (process.env.SUPABASE_SERVICE_KEY || "").trim();
   if (!url || !key) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY env vars in Netlify.");
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY env vars.");
+  }
+  // Catch the obviously-wrong values (DB connection string, dashboard link,
+  // trailing path) but stay permissive about the host (custom domains allowed).
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("SUPABASE_URL is not a valid URL.");
+  }
+  if (parsed.protocol !== "https:" || parsed.pathname.replace(/\/+$/, "") !== "" || parsed.search) {
+    throw new Error("SUPABASE_URL must be the bare project URL, e.g. https://<project-ref>.supabase.co");
   }
   // @supabase/supabase-js builds a RealtimeClient inside createClient(), which
   // demands a WebSocket constructor at construction time. Netlify's Lambda Node
@@ -1311,6 +1339,7 @@ module.exports = {
   auth,
   resolveConfig,
   getSupabase,
+  sbErr,
   checkPassword,
   json,
   SupabaseOAuthProvider,
