@@ -1363,6 +1363,7 @@ module.exports = {
   discoverAndStoreCampaigns,
   markEngagementReadyIfActive,
   autoProcessReadyEngagements,
+  withoutTemporaryCampaigns,
   deriveEffectiveStatus,
   deriveAdGroupStatus,
   loadCampaignMetricsForAdvertiser,

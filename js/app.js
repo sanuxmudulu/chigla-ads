@@ -587,6 +587,7 @@ function rebuildSources(opts = {}) {
       budget,
       tiktokPostUrl: tk ? tk.tiktok_post_url || null : null,
       engagementStatus: tk ? tk.engagement_status || "PENDING" : null,
+      isWhWarmup: tk ? !!tk.is_wh_warmup : false,
     };
   });
 
@@ -784,9 +785,13 @@ function toggleRowMenu(btn) {
 
   const menu = document.createElement("div");
   menu.className = "rowmenu";
+  // WH Warmup campaigns appear in Detailed Metrics but never enter engagement.
+  const addComments = s.isWhWarmup
+    ? ""
+    : `<button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>`;
   menu.innerHTML = `
     <button type="button" class="rowmenu-item" data-menu-action="edit-budget">Edit budget</button>
-    <button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>
+    ${addComments}
     <button type="button" class="rowmenu-item danger" data-menu-action="delete-campaign">Delete campaign</button>`;
   document.body.appendChild(menu);
   rowMenuEl = menu;
@@ -882,10 +887,27 @@ function currentEngagementCampaign() {
 // the textarea stays freely editable for this one order.
 const ecState = { templates: [], selectedId: null, confirmDeleteId: null, editId: null };
 
+// THE shared comment-counting rule: one comment per non-empty trimmed line.
+// Accepts a raw textarea string OR an array (stored template.comments). Blank
+// and whitespace-only lines never count. Used by the live counter, the template
+// list count, Save validation, and the selected-template comments sent to the
+// order — so every surface agrees on the number.
+function commentLines(input) {
+  const lines = Array.isArray(input) ? input : String(input || "").split(/\r?\n/);
+  return lines.map((l) => String(l).trim()).filter(Boolean);
+}
+function commentCountLabel(input) {
+  const n = commentLines(input).length;
+  return `${n} comment${n === 1 ? "" : "s"}`;
+}
+
 function wireCommentTemplateEvents() {
   document.getElementById("ecTplAddBtn").addEventListener("click", () => openTemplateForm(null));
   document.getElementById("ecTplCancelBtn").addEventListener("click", () => showEcView("main"));
   document.getElementById("ecTplSaveBtn").addEventListener("click", saveTemplateForm);
+
+  const cInput = document.getElementById("ecTplCommentsInput");
+  cInput.addEventListener("input", updateTemplateCommentCount);
 
   document.getElementById("ecTplList").addEventListener("click", (e) => {
     const sel = e.target.closest("[data-tpl-select]");
@@ -906,6 +928,11 @@ function wireCommentTemplateEvents() {
     const confirmDel = e.target.closest("[data-tpl-del-confirm]");
     if (confirmDel) confirmTemplateDelete(confirmDel.dataset.tplDelConfirm);
   });
+}
+
+function updateTemplateCommentCount() {
+  const el = document.getElementById("ecTplCommentsCount");
+  if (el) el.textContent = commentCountLabel(document.getElementById("ecTplCommentsInput").value);
 }
 
 function showEcView(which) {
@@ -949,8 +976,9 @@ function renderTemplateList() {
                <button type="button" data-tpl-edit="${escapeHtml(t.id)}" title="Edit">✎</button>
                <button type="button" data-tpl-del="${escapeHtml(t.id)}" title="Delete">🗑</button>
              </div>`;
+      const label = `${t.name} — ${commentCountLabel(t.comments)}`;
       return `<div class="ec-tpl-row${selected ? " selected" : ""}" data-tpl-id="${escapeHtml(t.id)}">
-        <button type="button" class="ec-tpl-name" data-tpl-select="${escapeHtml(t.id)}">${escapeHtml(t.name)}</button>
+        <button type="button" class="ec-tpl-name" data-tpl-select="${escapeHtml(t.id)}">${escapeHtml(label)}</button>
         ${right}
       </div>`;
     })
@@ -968,7 +996,7 @@ function selectTemplate(id) {
 
 function selectedTemplateComments() {
   const t = ecState.templates.find((x) => String(x.id) === String(ecState.selectedId));
-  return t && Array.isArray(t.comments) ? t.comments.map((c) => String(c).trim()).filter(Boolean) : [];
+  return t ? commentLines(t.comments) : [];
 }
 
 function openTemplateForm(id) {
@@ -976,8 +1004,9 @@ function openTemplateForm(id) {
   const t = id ? ecState.templates.find((x) => String(x.id) === String(id)) : null;
   document.getElementById("ecTplFormTitle").textContent = id ? "Edit template" : "New template";
   document.getElementById("ecTplNameInput").value = t ? t.name : "";
-  document.getElementById("ecTplCommentsInput").value = t ? (t.comments || []).join("\n") : "";
+  document.getElementById("ecTplCommentsInput").value = t ? commentLines(t.comments).join("\n") : "";
   document.getElementById("ecTplFormError").textContent = "";
+  updateTemplateCommentCount();
   const btn = document.getElementById("ecTplSaveBtn");
   btn.disabled = false;
   btn.textContent = "Save";
@@ -987,11 +1016,7 @@ function openTemplateForm(id) {
 
 async function saveTemplateForm() {
   const name = document.getElementById("ecTplNameInput").value.trim();
-  const comments = document
-    .getElementById("ecTplCommentsInput")
-    .value.split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const comments = commentLines(document.getElementById("ecTplCommentsInput").value);
   const errEl = document.getElementById("ecTplFormError");
   errEl.textContent = "";
   if (!name) return (errEl.textContent = "Enter a template name.");

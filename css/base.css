@@ -635,6 +635,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .ec-tpl-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; max-height: 148px; overflow-y: auto; }
 .ec-tpl-list:empty { display: none; }
 .ec-tpl-empty { font-size: 11.5px; color: var(--text-2); padding: 2px 0 8px; }
+.ec-cc { font-size: 11.5px; color: var(--text-2); margin: -6px 0 10px; text-align: right; }
 .ec-tpl-row {
   display: flex; align-items: center; gap: 6px; padding: 6px 8px;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-2);

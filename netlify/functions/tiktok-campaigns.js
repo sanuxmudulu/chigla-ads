@@ -43,6 +43,7 @@ const {
   getAdvertiserBudgets,
   setAdvertiserBudget,
   markEngagementReadyIfActive,
+  withoutTemporaryCampaigns,
   json,
 } = require("./_shared/tiktok-mcp");
 const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
@@ -88,6 +89,18 @@ async function readCampaigns(supabase) {
         engagement_added_at: e.engagement_added_at ?? null,
       };
     });
+  }
+
+  // Flag WH Warmup campaigns so the UI can show them in Detailed Metrics but keep
+  // them out of engagement (Add comments). They're excluded server-side too.
+  if (!res.error) {
+    try {
+      const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id");
+      const whIds = new Set((wh || []).map((r) => String(r.campaign_id)));
+      res.data = (res.data || []).map((c) => ({ ...c, is_wh_warmup: whIds.has(String(c.campaign_id)) }));
+    } catch (_) {
+      res.data = (res.data || []).map((c) => ({ ...c, is_wh_warmup: false }));
+    }
   }
   return res;
 }
@@ -376,6 +389,9 @@ exports.handler = async function (event) {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
       const r = await resolveTrackedCampaign(supabase, body.campaign_id);
       if (r.error) return r.error;
+      if (!(await withoutTemporaryCampaigns(supabase, [String(body.campaign_id)])).length) {
+        return json(400, { error: "WH Warmup campaigns can't be used for engagement." });
+      }
 
       const raw = typeof body.tiktok_post_url === "string" ? body.tiktok_post_url.trim() : "";
       let url = null;
@@ -412,6 +428,9 @@ exports.handler = async function (event) {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
       const r = await resolveTrackedCampaign(supabase, body.campaign_id);
       if (r.error) return r.error;
+      if (!(await withoutTemporaryCampaigns(supabase, [String(body.campaign_id)])).length) {
+        return json(400, { error: "WH Warmup campaigns can't be used for engagement." });
+      }
 
       const link = (r.campaign.tiktok_post_url || "").trim();
       if (!link) {
