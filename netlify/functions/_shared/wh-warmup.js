@@ -146,6 +146,49 @@ function sparkCandidates(base) {
 
 const SPARK_FORMAT_ERR = /incorrect|invalid|post code|auth[_ ]?code|not\s+valid/i;
 
+// A structure-only description of an MCP response: key names + value *types*
+// (and, for strings, only their length) — NEVER any value, so the Spark
+// code / tokens / captions can't leak into the function logs.
+function describeShape(v, depth = 0) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) {
+    if (!v.length) return "[]";
+    return `[${describeShape(v[0], depth + 1)}]x${v.length}`;
+  }
+  const t = typeof v;
+  if (t !== "object") {
+    if (t === "string") return `str(${v.length})`;
+    return t; // number | boolean
+  }
+  if (depth >= 4) return "{…}";
+  const parts = Object.keys(v)
+    .slice(0, 40)
+    .map((k) => `${k}:${describeShape(v[k], depth + 1)}`);
+  return `{${parts.join(", ")}}`;
+}
+
+// A TikTok post/item id is a long all-digit string (currently 19 chars).
+const looksLikeItemId = (s) => typeof s === "string" && /^\d{15,25}$/.test(s);
+
+// Breadth-first walk: first primitive value whose KEY matches `keyRe` and whose
+// value passes `ok` (default: any non-empty scalar). Used so we read whatever
+// field the MCP server actually puts the item / identity id in.
+function deepFindByKey(root, keyRe, ok) {
+  const pass = ok || ((val) => (typeof val === "string" || typeof val === "number") && String(val).length > 0);
+  const queue = [root];
+  let seen = 0;
+  while (queue.length && seen < 5000) {
+    const node = queue.shift();
+    seen++;
+    if (node == null || typeof node !== "object") continue;
+    for (const [k, val] of Object.entries(node)) {
+      if (keyRe.test(k) && pass(val, k)) return val;
+      if (val && typeof val === "object") queue.push(val);
+    }
+  }
+  return null;
+}
+
 async function resolveSparkCode(client, advertiserId, rawCode) {
   // Only trim surrounding whitespace/newlines from the copy — never touch #, +, =.
   const base = String(rawCode || "").trim();
@@ -182,24 +225,64 @@ async function resolveSparkCode(client, advertiserId, rawCode) {
     );
   }
 
-  // 2. Read the authorized post -> item_id (same form that just worked).
-  const info = await mcpCall(client, "tt_video_info_get", { advertiser_id: String(advertiserId), auth_code: workingCode });
-  const itemId = String(
-    info?.item_id ?? info?.tiktok_item_id ?? info?.video_info?.item_id ?? info?.video?.item_id ?? ""
-  );
-  if (!itemId) throw new Error("Spark code authorized but did not resolve to a post (no item_id).");
+  // 2. Read the authorized post -> item_id (same code form that just worked).
+  const info = await mcpCall(client, "tt_video_info_get", {
+    advertiser_id: String(advertiserId),
+    auth_code: workingCode,
+  });
+  console.log(`[wh-warmup] tt_video_info_get shape: ${describeShape(info)}`);
 
-  // 3. Find the AUTH_CODE identity created/associated by the authorization.
-  let identityId = String(info?.identity_id ?? info?.identity?.identity_id ?? "");
+  // The MCP server may nest this under video_info / video_infos[] / data — take
+  // whatever key ends in "item_id" and holds an id-shaped value, then fall back
+  // to any long all-digit string anywhere in the response.
+  // Don't mistake another 19-digit id (advertiser, BC, TT user, identity…) for
+  // the post id in the broad fallback.
+  const NOT_ITEM_ID = /(advertiser|bc|business_center|owner|creator|author|tt_user|user|identity|account|campaign|adgroup|ad)_id$/i;
+  let itemId = String(
+    deepFindByKey(info, /(^|_)item_id$/i, (v) => looksLikeItemId(String(v))) ||
+      deepFindByKey(info, /(^|_)(tiktok_item_id|post_id)$/i, (v) => looksLikeItemId(String(v))) ||
+      deepFindByKey(info, /_id$/i, (v, k) => looksLikeItemId(String(v)) && !NOT_ITEM_ID.test(k || "")) ||
+      ""
+  );
+
+  // Fallback: the authorized post also shows up in the account's Spark posts list.
+  if (!itemId) {
+    try {
+      const list = await mcpCall(client, "tt_video_list_get", {
+        advertiser_id: String(advertiserId),
+        page_size: 50,
+      });
+      console.log(`[wh-warmup] tt_video_list_get shape: ${describeShape(list)}`);
+      const rows = list?.list || list?.videos || list?.video_list || (Array.isArray(list) ? list : []);
+      const authVid = String(deepFindByKey(info, /(^|_)video_id$/i) || "");
+      const hit =
+        (authVid && rows.find((r) => String(deepFindByKey(r, /(^|_)video_id$/i) || "") === authVid)) ||
+        rows[0];
+      if (hit) itemId = String(deepFindByKey(hit, /(^|_)item_id$/i, (v) => looksLikeItemId(String(v))) || "");
+    } catch (e) {
+      console.warn(`[wh-warmup] tt_video_list_get fallback failed: ${e.message}`);
+    }
+  }
+
+  if (!itemId) {
+    throw new Error(
+      `Spark code authorized but did not resolve to a post (no item_id). ` +
+        `Response shape: ${describeShape(info)}`
+    );
+  }
+
+  // 3. Identity: prefer one carried in the info response, else look it up.
+  let identityId = String(deepFindByKey(info, /(^|_)identity_id$/i) || "");
   if (!identityId) {
     const creator = norm(
-      info?.username || info?.unique_id || info?.display_name || info?.nickname || info?.author_name
+      deepFindByKey(info, /(^|_)(username|unique_id|display_name|nickname|author_name|profile_name)$/i) || ""
     );
     const ids = await mcpCall(client, "identity_get", {
       advertiser_id: String(advertiserId),
       identity_type: "AUTH_CODE",
       page_size: 100,
     });
+    console.log(`[wh-warmup] identity_get(AUTH_CODE) shape: ${describeShape(ids)}`);
     const idList = ids?.identity_list || ids?.list || [];
     const match = creator
       ? idList.find((x) => norm(x.display_name) === creator || norm(x.identity_id) === creator || norm(x.profile_name) === creator)
