@@ -22,6 +22,7 @@ const HANDLERS = {
   "tiktok-auth-callback": () => require("../netlify/functions/tiktok-auth-callback.js"),
   "wh-warmup": () => require("../netlify/functions/wh-warmup.js"),
   "cleanup": () => require("../netlify/functions/cleanup.js"),
+  "comment-templates": () => require("../netlify/functions/comment-templates.js"),
 };
 
 module.exports = async (req, res) => {

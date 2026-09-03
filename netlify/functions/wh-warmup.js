@@ -11,6 +11,10 @@
 //
 //   "list"     (no body)   -> WH campaigns + their cleanup status (monitoring UI)
 //
+//   "countries" { connection_id, advertiser_id }
+//        -> valid country-level TikTok target locations for that advertiser
+//           ({ countries: [{ location_id, name, code }] }); drives the autocomplete
+//
 // No admin password (same posture as the other tiktok-* write actions — every
 // write is scoped server-side to advertiser accounts under the given connection).
 // All MCP calls run here; no tokens are ever returned to the browser.
@@ -23,7 +27,7 @@ const {
   connectMcp,
   json,
 } = require("./_shared/tiktok-mcp");
-const { createWarmupForAdvertiser, cleanupOneWarmup } = require("./_shared/wh-warmup");
+const { createWarmupForAdvertiser, cleanupOneWarmup, listCountryRegions } = require("./_shared/wh-warmup");
 
 async function withClient(supabase, connection, fn) {
   const { serverUrl, redirectUrl } = resolveConfig();
@@ -53,6 +57,7 @@ exports.handler = async function (event) {
     if (body.action === "create") return createBatch(supabase, body);
     if (body.action === "cleanup") return cleanupBatch(supabase);
     if (body.action === "list") return listWarmups(supabase);
+    if (body.action === "countries") return countriesFor(supabase, body);
 
     return json(400, { error: `Unknown action: ${body.action}` });
   } catch (err) {
@@ -64,10 +69,29 @@ exports.handler = async function (event) {
 // create
 // ---------------------------------------------------------------------------
 
+// Valid country-level TikTok target locations for one advertiser (drives the
+// WH settings-screen autocomplete). { countries: [{ location_id, name, code }] }
+async function countriesFor(supabase, body) {
+  const connectionId = body.connection_id;
+  const advertiserId = String(body.advertiser_id || "");
+  if (!connectionId || !advertiserId) return json(400, { error: "connection_id and advertiser_id are required" });
+
+  const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+  if (!conn) return json(404, { error: "Connection not found." });
+
+  try {
+    const countries = await withClient(supabase, conn, (client) => listCountryRegions(client, advertiserId));
+    return json(200, { ok: true, countries });
+  } catch (err) {
+    return json(502, { error: "Couldn't load TikTok countries", details: err.message });
+  }
+}
+
 async function createBatch(supabase, body) {
   const connectionId = body.connection_id;
   const advertiserIds = [...new Set((body.advertiser_ids || []).map(String).filter(Boolean))];
   const targetCountry = String(body.target_country || "").trim();
+  const locationId = String(body.location_id || "").trim() || null;
   const sparkCode = String(body.spark_code || "").trim();
 
   if (!connectionId) return json(400, { error: "connection_id is required" });
@@ -106,6 +130,7 @@ async function createBatch(supabase, body) {
           advertiserId: advId,
           currency: adv.currency,
           targetCountry,
+          locationId,
           sparkCode,
         });
         // Record IMMEDIATELY so a mid-batch failure never leaves an untracked

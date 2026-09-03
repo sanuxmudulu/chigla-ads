@@ -64,10 +64,10 @@ const norm = (s) => String(s || "").trim().toLowerCase();
 // Country -> TikTok location_id  (Traffic / Website / TikTok placement)
 // ---------------------------------------------------------------------------
 
-async function resolveCountryLocationId(client, advertiserId, countryName) {
-  const q = norm(countryName);
-  if (!q) throw new Error("No target country provided.");
-
+// Every country-level TikTok delivery location for this advertiser (Traffic /
+// Website / TikTok placement). -> [{ location_id, name, code }] sorted by name.
+// Used both by the WH settings-screen autocomplete and by resolveCountryLocationId.
+async function listCountryRegions(client, advertiserId) {
   const d = await mcpCall(client, "tool_region_get", {
     advertiser_id: String(advertiserId),
     placements: ["PLACEMENT_TIKTOK"],
@@ -81,17 +81,33 @@ async function resolveCountryLocationId(client, advertiserId, countryName) {
   const countries = list.filter((r) => !r.level || /country|nation/.test(level(r)));
   const pool = countries.length ? countries : list;
 
-  const code = (r) => norm(r.region_code || r.location_code || r.country_code || "");
-  const nm = (r) => norm(r.name || r.location_name || r.region_name || "");
+  const out = [];
+  const seen = new Set();
+  for (const r of pool) {
+    const id = String(r.location_id ?? r.region_id ?? r.id ?? "");
+    const name = String(r.name || r.location_name || r.region_name || "").trim();
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      location_id: id,
+      name,
+      code: String(r.region_code || r.location_code || r.country_code || "").trim(),
+    });
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
 
+async function resolveCountryLocationId(client, advertiserId, countryName) {
+  const q = norm(countryName);
+  if (!q) throw new Error("No target country provided.");
+
+  const pool = await listCountryRegions(client, advertiserId);
   const hit =
-    pool.find((r) => nm(r) === q || code(r) === q) ||
-    pool.find((r) => nm(r).includes(q) || q.includes(nm(r)));
+    pool.find((r) => norm(r.name) === q || norm(r.code) === q) ||
+    pool.find((r) => norm(r.name).includes(q) || q.includes(norm(r.name)));
   if (!hit) throw new Error(`Could not resolve a TikTok location for "${countryName}".`);
-
-  const id = String(hit.location_id ?? hit.region_id ?? hit.id ?? "");
-  if (!id) throw new Error(`TikTok location for "${countryName}" has no id.`);
-  return { location_id: id, name: hit.name || countryName };
+  return { location_id: hit.location_id, name: hit.name };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +156,16 @@ async function resolveSparkCode(client, advertiserId, rawCode) {
 // the error as `.rolledBackCampaignId`.
 // ---------------------------------------------------------------------------
 
-async function createWarmupForAdvertiser({ client, advertiserId, currency, targetCountry, sparkCode }) {
+async function createWarmupForAdvertiser({ client, advertiserId, currency, targetCountry, locationId, sparkCode }) {
   const names = whNames();
   const budget = whDailyBudget(currency);
 
   // Read-only resolutions FIRST — a bad country/Spark code creates nothing.
-  const loc = await resolveCountryLocationId(client, advertiserId, targetCountry);
+  // The UI sends a location_id picked from this advertiser's own valid country
+  // list; use it directly. Fall back to name resolution only if it wasn't sent.
+  const loc = locationId
+    ? { location_id: String(locationId), name: String(targetCountry || locationId) }
+    : await resolveCountryLocationId(client, advertiserId, targetCountry);
   const spark = await resolveSparkCode(client, advertiserId, sparkCode);
 
   let campaignId = null;
@@ -365,6 +385,7 @@ async function cleanupOneWarmup({ client, row, advertiserStatus, timezone }) {
 module.exports = {
   whDailyBudget,
   whNames,
+  listCountryRegions,
   resolveCountryLocationId,
   resolveSparkCode,
   createWarmupForAdvertiser,

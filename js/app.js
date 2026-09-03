@@ -17,8 +17,13 @@ import {
   setConnectionNetwork,
   deleteTiktokCampaign,
   queueEngagementComments,
+  listCommentTemplates,
+  createCommentTemplate,
+  updateCommentTemplate,
+  deleteCommentTemplate,
   createWhWarmup,
   cleanupWhWarmup,
+  fetchWhCountries,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -352,6 +357,7 @@ function wireEvents() {
     if (e.target.id === "engagementCommentsModal") closeEngagementCommentsModal();
   });
   document.getElementById("submitEngagementCommentsBtn").addEventListener("click", submitEngagementComments);
+  wireCommentTemplateEvents();
 
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     // Campaign pause/unpause button — must NOT toggle the row.
@@ -709,7 +715,9 @@ function budgetCell(s) {
     return `<span class="bud-none" title="Budget info not loaded for this account">—</span>`;
   }
   if (b.capped) {
-    const leftTone = b.remaining > 0 ? "ok" : "bad";
+    // remaining >= $3 green · >$1 and <$3 yellow · <=$1 red
+    const rem = toNum(b.remaining);
+    const leftTone = rem >= 3 ? "ok" : rem > 1 ? "warn" : "bad";
     return `
       <div class="bud${pending ? " busy" : ""}" title="Spent ${money(b.spent)} of ${money(b.cap)}">
         <span class="bud-left ${leftTone}">${money(b.remaining)} left</span>
@@ -851,6 +859,161 @@ function currentEngagementCampaign() {
   return state.sources.find((x) => String(x.campaignId) === String(engagementTarget)) || null;
 }
 
+// Global reusable comment templates (Supabase `comment_templates`). Never
+// touched by any cleanup. Selecting one loads its comments into the textarea;
+// the textarea stays freely editable for this one order.
+const ecState = { templates: [], selectedId: null, confirmDeleteId: null, editId: null };
+
+function wireCommentTemplateEvents() {
+  document.getElementById("ecTplAddBtn").addEventListener("click", () => openTemplateForm(null));
+  document.getElementById("ecTplCancelBtn").addEventListener("click", () => showEcView("main"));
+  document.getElementById("ecTplSaveBtn").addEventListener("click", saveTemplateForm);
+
+  document.getElementById("ecTplList").addEventListener("click", (e) => {
+    const sel = e.target.closest("[data-tpl-select]");
+    if (sel) return selectTemplate(sel.dataset.tplSelect);
+    const edit = e.target.closest("[data-tpl-edit]");
+    if (edit) return openTemplateForm(edit.dataset.tplEdit);
+    const del = e.target.closest("[data-tpl-del]");
+    if (del) {
+      ecState.confirmDeleteId = del.dataset.tplDel;
+      renderTemplateList();
+      return;
+    }
+    if (e.target.closest("[data-tpl-del-cancel]")) {
+      ecState.confirmDeleteId = null;
+      renderTemplateList();
+      return;
+    }
+    const confirmDel = e.target.closest("[data-tpl-del-confirm]");
+    if (confirmDel) confirmTemplateDelete(confirmDel.dataset.tplDelConfirm);
+  });
+}
+
+function showEcView(which) {
+  document.getElementById("ecMain").hidden = which !== "main";
+  document.getElementById("ecTemplateForm").hidden = which !== "form";
+  document.getElementById("engagementCommentsTitle").textContent =
+    which === "form" ? (ecState.editId ? "Edit template" : "New template") : "Add comments";
+}
+
+async function loadCommentTemplates() {
+  const listEl = document.getElementById("ecTplList");
+  try {
+    const data = await listCommentTemplates();
+    ecState.templates = (data.templates || []).map((t) => ({
+      ...t,
+      comments: Array.isArray(t.comments) ? t.comments : [],
+    }));
+  } catch (_) {
+    ecState.templates = [];
+  }
+  renderTemplateList();
+  void listEl;
+}
+
+function renderTemplateList() {
+  const el = document.getElementById("ecTplList");
+  if (!ecState.templates.length) {
+    el.innerHTML = `<div class="ec-tpl-empty">No templates yet — click + to create one.</div>`;
+    return;
+  }
+  el.innerHTML = ecState.templates
+    .map((t) => {
+      const selected = String(ecState.selectedId) === String(t.id);
+      const right =
+        String(ecState.confirmDeleteId) === String(t.id)
+          ? `<div class="ec-tpl-confirm">Can't be undone.
+               <button type="button" data-tpl-del-confirm="${escapeHtml(t.id)}">Confirm</button>
+               <button type="button" data-tpl-del-cancel title="Cancel">✕</button>
+             </div>`
+          : `<div class="ec-tpl-actions">
+               <button type="button" data-tpl-edit="${escapeHtml(t.id)}" title="Edit">✎</button>
+               <button type="button" data-tpl-del="${escapeHtml(t.id)}" title="Delete">🗑</button>
+             </div>`;
+      return `<div class="ec-tpl-row${selected ? " selected" : ""}" data-tpl-id="${escapeHtml(t.id)}">
+        <button type="button" class="ec-tpl-name" data-tpl-select="${escapeHtml(t.id)}">${escapeHtml(t.name)}</button>
+        ${right}
+      </div>`;
+    })
+    .join("");
+}
+
+function selectTemplate(id) {
+  const t = ecState.templates.find((x) => String(x.id) === String(id));
+  if (!t) return;
+  ecState.selectedId = String(id);
+  ecState.confirmDeleteId = null;
+  document.getElementById("engagementCommentsInput").value = (t.comments || []).join("\n");
+  renderTemplateList();
+}
+
+function openTemplateForm(id) {
+  ecState.editId = id ? String(id) : null;
+  const t = id ? ecState.templates.find((x) => String(x.id) === String(id)) : null;
+  document.getElementById("ecTplFormTitle").textContent = id ? "Edit template" : "New template";
+  document.getElementById("ecTplNameInput").value = t ? t.name : "";
+  document.getElementById("ecTplCommentsInput").value = t ? (t.comments || []).join("\n") : "";
+  document.getElementById("ecTplFormError").textContent = "";
+  const btn = document.getElementById("ecTplSaveBtn");
+  btn.disabled = false;
+  btn.textContent = "Save";
+  showEcView("form");
+  document.getElementById("ecTplNameInput").focus();
+}
+
+async function saveTemplateForm() {
+  const name = document.getElementById("ecTplNameInput").value.trim();
+  const comments = document
+    .getElementById("ecTplCommentsInput")
+    .value.split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const errEl = document.getElementById("ecTplFormError");
+  errEl.textContent = "";
+  if (!name) return (errEl.textContent = "Enter a template name.");
+  if (!comments.length) return (errEl.textContent = "Enter at least one comment (one per line).");
+
+  const btn = document.getElementById("ecTplSaveBtn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const res = ecState.editId
+      ? await updateCommentTemplate(ecState.editId, name, comments)
+      : await createCommentTemplate(name, comments);
+    const saved = { ...res.template, comments: Array.isArray(res.template.comments) ? res.template.comments : comments };
+    if (ecState.editId) {
+      const i = ecState.templates.findIndex((x) => String(x.id) === String(ecState.editId));
+      if (i >= 0) ecState.templates[i] = saved;
+    } else {
+      ecState.templates.push(saved);
+    }
+    ecState.templates.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    // A just-created / just-edited template becomes the selected one.
+    ecState.selectedId = String(saved.id);
+    document.getElementById("engagementCommentsInput").value = (saved.comments || []).join("\n");
+    renderTemplateList();
+    showEcView("main");
+  } catch (err) {
+    errEl.textContent = err.message;
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+}
+
+async function confirmTemplateDelete(id) {
+  try {
+    await deleteCommentTemplate(id);
+  } catch (err) {
+    setStatus(`Couldn't delete template: ${err.message}`, true);
+    return;
+  }
+  ecState.templates = ecState.templates.filter((x) => String(x.id) !== String(id));
+  if (String(ecState.selectedId) === String(id)) ecState.selectedId = null;
+  ecState.confirmDeleteId = null;
+  renderTemplateList();
+}
+
 // Uses the campaign's OWN stored tiktok_post_url — never asks for it. That URL
 // is written directly onto the campaign row by Campaign Creation Automation
 // (not built yet); until then it is null and this modal says so and blocks.
@@ -858,6 +1021,11 @@ function openEngagementCommentsModal(s) {
   if (!s || !s.campaignId) return;
   engagementTarget = String(s.campaignId);
   const hasUrl = !!s.tiktokPostUrl;
+
+  ecState.selectedId = null;
+  ecState.confirmDeleteId = null;
+  ecState.editId = null;
+  showEcView("main");
 
   document.getElementById("engagementCommentsCampaignName").textContent = s.source;
   const urlEl = document.getElementById("engagementCommentsUrl");
@@ -877,18 +1045,23 @@ function openEngagementCommentsModal(s) {
   btn.disabled = !hasUrl;
   btn.textContent = "Add comments";
   document.getElementById("engagementCommentsModal").classList.add("open");
+
+  document.getElementById("ecTplList").innerHTML = `<div class="ec-tpl-empty">Loading templates…</div>`;
+  loadCommentTemplates();
 }
 
 function closeEngagementCommentsModal() {
   document.getElementById("engagementCommentsModal").classList.remove("open");
   engagementTarget = null;
+  showEcView("main"); // never leave the modal parked on the template form
 }
 
+const DEFAULT_SERVICE_ID = "5824";
 function loadServiceId() {
   try {
-    return localStorage.getItem(ENGAGEMENT_SERVICE_ID_KEY) || "";
+    return localStorage.getItem(ENGAGEMENT_SERVICE_ID_KEY) || DEFAULT_SERVICE_ID;
   } catch (_) {
-    return "";
+    return DEFAULT_SERVICE_ID;
   }
 }
 function saveServiceId(v) {
@@ -952,6 +1125,11 @@ const whState = {
   connectionId: null,
   selected: new Set(), // advertiser_ids chosen on step 1
   step: 1,
+  countries: [], // [{ location_id, name, code }] — from TikTok for the picked advertiser
+  countriesForAdv: null, // advertiser_id the country list was fetched for
+  countryLoading: false,
+  selectedCountry: null, // { location_id, name } — a confirmed pick; required to create
+  suggestActive: -1, // keyboard-highlighted suggestion index
 };
 
 function wireWhWarmupEvents() {
@@ -987,6 +1165,113 @@ function wireWhWarmupEvents() {
     syncWhSelectAll();
     updateWhNextButton();
   });
+
+  // ---- Target country autocomplete ----
+  const cIn = document.getElementById("whCountryInput");
+  cIn.addEventListener("input", () => {
+    // Any keystroke invalidates a previous pick — a valid suggestion must be chosen.
+    whState.selectedCountry = null;
+    document.getElementById("whCountryOk").textContent = "";
+    renderCountrySuggest(cIn.value);
+  });
+  cIn.addEventListener("focus", () => renderCountrySuggest(cIn.value));
+  cIn.addEventListener("keydown", (e) => {
+    const box = document.getElementById("whCountrySuggest");
+    if (box.hidden) return;
+    const opts = [...box.querySelectorAll("button")];
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      whState.suggestActive = Math.max(0, Math.min(opts.length - 1, whState.suggestActive + (e.key === "ArrowDown" ? 1 : -1)));
+      opts.forEach((o, i) => o.classList.toggle("active", i === whState.suggestActive));
+    } else if (e.key === "Enter" && opts[whState.suggestActive]) {
+      e.preventDefault();
+      pickCountry(opts[whState.suggestActive].dataset.locId, opts[whState.suggestActive].dataset.name);
+    } else if (e.key === "Escape") {
+      hideCountrySuggest();
+    }
+  });
+  cIn.addEventListener("blur", () => setTimeout(hideCountrySuggest, 150)); // let a click land first
+  document.getElementById("whCountrySuggest").addEventListener("mousedown", (e) => {
+    const b = e.target.closest("button[data-loc-id]");
+    if (b) {
+      e.preventDefault();
+      pickCountry(b.dataset.locId, b.dataset.name);
+    }
+  });
+}
+
+function hideCountrySuggest() {
+  const box = document.getElementById("whCountrySuggest");
+  box.hidden = true;
+  box.innerHTML = "";
+  whState.suggestActive = -1;
+}
+
+function renderCountrySuggest(query) {
+  const box = document.getElementById("whCountrySuggest");
+  whState.suggestActive = -1;
+
+  if (whState.countryLoading) {
+    box.hidden = false;
+    box.innerHTML = `<div class="wh-country-none">Loading countries…</div>`;
+    return;
+  }
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) {
+    hideCountrySuggest();
+    return;
+  }
+  if (!whState.countries.length) {
+    box.hidden = false;
+    box.innerHTML = `<div class="wh-country-none">No country list — pick an account first.</div>`;
+    return;
+  }
+
+  const starts = [];
+  const contains = [];
+  for (const c of whState.countries) {
+    const n = c.name.toLowerCase();
+    if (n.startsWith(q) || c.code.toLowerCase() === q) starts.push(c);
+    else if (n.includes(q)) contains.push(c);
+  }
+  const hits = [...starts, ...contains].slice(0, 8);
+  if (!hits.length) {
+    box.hidden = false;
+    box.innerHTML = `<div class="wh-country-none">No TikTok country matches “${escapeHtml(query)}”.</div>`;
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = hits
+    .map(
+      (c) =>
+        `<button type="button" data-loc-id="${escapeHtml(c.location_id)}" data-name="${escapeHtml(c.name)}">${escapeHtml(c.name)}</button>`
+    )
+    .join("");
+}
+
+function pickCountry(locationId, name) {
+  whState.selectedCountry = { location_id: String(locationId), name: String(name) };
+  document.getElementById("whCountryInput").value = name;
+  document.getElementById("whCountryOk").textContent = `✓ ${name}`;
+  hideCountrySuggest();
+}
+
+async function loadWhCountries(advertiserId) {
+  if (!advertiserId) return;
+  if (whState.countriesForAdv === advertiserId && whState.countries.length) return; // cached for this advertiser
+  whState.countryLoading = true;
+  whState.countries = [];
+  whState.countriesForAdv = advertiserId;
+  renderCountrySuggest(document.getElementById("whCountryInput").value);
+  try {
+    const data = await fetchWhCountries(whState.connectionId, advertiserId);
+    whState.countries = data.countries || [];
+  } catch (_) {
+    whState.countries = [];
+  } finally {
+    whState.countryLoading = false;
+    renderCountrySuggest(document.getElementById("whCountryInput").value);
+  }
 }
 
 function whAdvsForConnection() {
@@ -1004,6 +1289,12 @@ async function openWhWarmupModal() {
   closeToolsDrawer();
   whState.selected.clear();
   whState.step = 1;
+  whState.countries = [];
+  whState.countriesForAdv = null;
+  whState.selectedCountry = null;
+  document.getElementById("whCountryInput").value = "";
+  document.getElementById("whCountryOk").textContent = "";
+  document.getElementById("whSparkInput").value = "";
   document.getElementById("whWarmupModal").classList.add("open");
   whGoToStep(1);
   document.getElementById("whAdvList").innerHTML = `<p class="tk-loading">Loading accounts…</p>`;
@@ -1042,6 +1333,11 @@ function whGoToStep(n) {
   document.getElementById("whStep1").hidden = n !== 1;
   document.getElementById("whStep2").hidden = n !== 2;
   document.getElementById("whStep3").hidden = n !== 3;
+  if (n === 1) {
+    // Re-picking accounts invalidates the country list (it's per-advertiser).
+    whState.selectedCountry = null;
+    document.getElementById("whCountryOk").textContent = "";
+  }
   document.getElementById("whWarmupTitle").textContent =
     n === 1 ? "WH Warmup — accounts" : n === 2 ? "WH Warmup — settings" : "WH Warmup — results";
   if (n === 2) {
@@ -1053,6 +1349,8 @@ function whGoToStep(n) {
     const btn = document.getElementById("whCreateBtn");
     btn.disabled = false;
     btn.textContent = "Create WH Warmup";
+    // Country list comes from ONE selected advertiser's own valid TikTok regions.
+    loadWhCountries([...whState.selected][0] || null);
   }
 }
 
@@ -1101,14 +1399,17 @@ function updateWhNextButton() {
 }
 
 async function submitWhWarmup() {
-  const country = document.getElementById("whCountryInput").value.trim();
+  const typed = document.getElementById("whCountryInput").value.trim();
   const spark = document.getElementById("whSparkInput").value.trim();
   const errEl = document.getElementById("whStep2Error");
   const progressEl = document.getElementById("whCreateProgress");
   const btn = document.getElementById("whCreateBtn");
   errEl.textContent = "";
 
-  if (!country) return (errEl.textContent = "Enter a target country.");
+  const picked = whState.selectedCountry;
+  if (!picked || picked.name.toLowerCase() !== typed.toLowerCase()) {
+    return (errEl.textContent = "Pick a target country from the suggestions.");
+  }
   if (!spark) return (errEl.textContent = "Enter a Spark code.");
   const ids = [...whState.selected];
   if (!ids.length) return whGoToStep(1);
@@ -1119,7 +1420,7 @@ async function submitWhWarmup() {
   progressEl.textContent = `Creating ${ids.length} warmup campaign${ids.length === 1 ? "" : "s"}… this can take a minute.`;
 
   try {
-    const res = await createWhWarmup(whState.connectionId, ids, country, spark);
+    const res = await createWhWarmup(whState.connectionId, ids, picked.name, spark, picked.location_id);
     renderWhResults(res.results || [], res.warning);
     whGoToStep(3);
     // Kick a cleanup pass so newly-Active ones start deleting promptly.

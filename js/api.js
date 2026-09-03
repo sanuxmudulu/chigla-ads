@@ -257,6 +257,37 @@ export async function queueEngagementComments(campaignId, serviceId, comments) {
   return readTiktokResponse(res, "Couldn't queue the comments");
 }
 
+// ---------------- Comment templates (global, reusable) ----------------
+
+export async function listCommentTemplates() {
+  const res = await fetch("/.netlify/functions/comment-templates");
+  return readTiktokResponse(res, "Couldn't load templates"); // { templates: [...] }
+}
+export async function createCommentTemplate(name, comments) {
+  const res = await fetch("/.netlify/functions/comment-templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "create", name, comments }),
+  });
+  return readTiktokResponse(res, "Couldn't save the template"); // { template }
+}
+export async function updateCommentTemplate(id, name, comments) {
+  const res = await fetch("/.netlify/functions/comment-templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "update", id, name, comments }),
+  });
+  return readTiktokResponse(res, "Couldn't update the template"); // { template }
+}
+export async function deleteCommentTemplate(id) {
+  const res = await fetch("/.netlify/functions/comment-templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete", id }),
+  });
+  return readTiktokResponse(res, "Couldn't delete the template");
+}
+
 // Config: which affiliate network supplies clicks/earnings for a connection's
 // campaigns. Not password-gated.
 export async function setConnectionNetwork(connectionId, affiliateNetwork) {
@@ -272,7 +303,7 @@ export async function setConnectionNetwork(connectionId, affiliateNetwork) {
 // Bulk temporary Traffic-CBO warmup campaigns that auto-delete once Active.
 // All TikTok writes are server-side; nothing sensitive is returned here.
 
-export async function createWhWarmup(connectionId, advertiserIds, targetCountry, sparkCode) {
+export async function createWhWarmup(connectionId, advertiserIds, targetCountry, sparkCode, locationId) {
   const res = await fetch("/.netlify/functions/wh-warmup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -281,10 +312,22 @@ export async function createWhWarmup(connectionId, advertiserIds, targetCountry,
       connection_id: connectionId,
       advertiser_ids: advertiserIds,
       target_country: targetCountry,
+      location_id: locationId || null,
       spark_code: sparkCode,
     }),
   });
   return readTiktokResponse(res, "WH Warmup creation failed"); // { results: [...] }
+}
+
+// Valid country-level TikTok target locations for one advertiser (WH country
+// autocomplete). { countries: [{ location_id, name, code }] }
+export async function fetchWhCountries(connectionId, advertiserId) {
+  const res = await fetch("/.netlify/functions/wh-warmup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "countries", connection_id: connectionId, advertiser_id: advertiserId }),
+  });
+  return readTiktokResponse(res, "Couldn't load countries");
 }
 
 // Poll + auto-delete WH campaigns that have reached Active. Idempotent; called

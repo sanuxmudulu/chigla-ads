@@ -286,8 +286,12 @@
         <div class="wh-kv"><span>Placement</span><strong>TikTok only</strong></div>
         <div class="wh-kv"><span>Optimization</span><strong>Click · lowest-cost bid</strong></div>
         <div class="wh-kv"><span>Schedule</span><strong>Starts 3h ago (delivers immediately)</strong></div>
-        <label class="budget-field-label" for="whCountryInput">Target country</label>
-        <input type="text" id="whCountryInput" placeholder="e.g. United States" autocomplete="off" />
+        <label class="budget-field-label" for="whCountryInput">Target country <span class="eng-hint">(pick a suggestion)</span></label>
+        <div class="wh-country-wrap">
+          <input type="text" id="whCountryInput" placeholder="Type a country, e.g. fra…" autocomplete="off" />
+          <div class="wh-country-suggest" id="whCountrySuggest" hidden></div>
+        </div>
+        <p class="wh-country-ok" id="whCountryOk"></p>
       </div>
 
       <div class="wh-form-section">
@@ -321,23 +325,49 @@
 
 <!-- ============ ENGAGEMENT: ADD COMMENTS MODAL ============ -->
 <div class="modal-backdrop" id="engagementCommentsModal">
-  <div class="modal">
+  <div class="modal ec-modal">
     <div class="modal-header">
-      <h3>Add comments</h3>
+      <h3 id="engagementCommentsTitle">Add comments</h3>
       <button id="closeEngagementCommentsModal">✕</button>
     </div>
-    <p class="eng-target">Campaign: <strong id="engagementCommentsCampaignName"></strong></p>
-    <span class="budget-field-label">TikTok Post URL <span class="eng-hint">(from this campaign)</span></span>
-    <div class="eng-url-readonly" id="engagementCommentsUrl"></div>
-    <label class="budget-field-label" for="engagementServiceIdInput">Service ID</label>
-    <input type="text" id="engagementServiceIdInput" placeholder="e.g. 1234" autocomplete="off" />
-    <label class="budget-field-label" for="engagementCommentsInput">Comments <span class="eng-hint">(one per line)</span></label>
-    <textarea id="engagementCommentsInput" rows="6" placeholder="First comment&#10;Second comment&#10;Third comment"></textarea>
-    <div class="eng-placeholder" id="engagementCommentsResult"></div>
-    <div class="modal-error" id="engagementCommentsError"></div>
-    <div class="modal-actions">
-      <button class="icon-btn" id="cancelEngagementCommentsBtn">Cancel</button>
-      <button class="icon-btn primary" id="submitEngagementCommentsBtn">Add comments</button>
+
+    <!-- MAIN view -->
+    <div id="ecMain">
+      <p class="eng-target">Campaign: <strong id="engagementCommentsCampaignName"></strong></p>
+      <span class="budget-field-label">TikTok Post URL <span class="eng-hint">(from this campaign)</span></span>
+      <div class="eng-url-readonly" id="engagementCommentsUrl"></div>
+
+      <label class="budget-field-label" for="engagementServiceIdInput">Service ID</label>
+      <input type="text" id="engagementServiceIdInput" placeholder="e.g. 5824" autocomplete="off" />
+
+      <div class="ec-tpl-head">
+        <span class="budget-field-label" style="margin:0;">Templates</span>
+        <button type="button" class="ec-tpl-add" id="ecTplAddBtn" title="New template">+</button>
+      </div>
+      <div class="ec-tpl-list" id="ecTplList"></div>
+
+      <label class="budget-field-label" for="engagementCommentsInput">Comments <span class="eng-hint">(one per line)</span></label>
+      <textarea id="engagementCommentsInput" rows="6" placeholder="First comment&#10;Second comment&#10;Third comment"></textarea>
+      <div class="eng-placeholder" id="engagementCommentsResult"></div>
+      <div class="modal-error" id="engagementCommentsError"></div>
+      <div class="modal-actions">
+        <button class="icon-btn" id="cancelEngagementCommentsBtn">Cancel</button>
+        <button class="icon-btn primary" id="submitEngagementCommentsBtn">Add comments</button>
+      </div>
+    </div>
+
+    <!-- CREATE / EDIT TEMPLATE view -->
+    <div id="ecTemplateForm" hidden>
+      <h4 class="ec-tpl-form-title" id="ecTplFormTitle">New template</h4>
+      <label class="budget-field-label" for="ecTplNameInput">Template Name</label>
+      <input type="text" id="ecTplNameInput" placeholder="e.g. Hype comments" autocomplete="off" />
+      <label class="budget-field-label" for="ecTplCommentsInput">Comments <span class="eng-hint">(one per line)</span></label>
+      <textarea id="ecTplCommentsInput" rows="7" placeholder="First comment&#10;Second comment"></textarea>
+      <div class="modal-error" id="ecTplFormError"></div>
+      <div class="modal-actions">
+        <button class="icon-btn" id="ecTplCancelBtn">Cancel</button>
+        <button class="icon-btn primary" id="ecTplSaveBtn">Save</button>
+      </div>
     </div>
   </div>
 </div>
