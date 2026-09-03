@@ -38,20 +38,30 @@ const MCP_SCOPE = "mcp:tt4b";
 function resolveConfig() {
   const serverUrl = process.env.TIKTOK_MCP_SERVER_URL || DEFAULT_MCP_SERVER_URL;
 
+  // Vercel exposes the host without a protocol.
+  // VERCEL_PROJECT_PRODUCTION_URL is the STABLE production domain (best for a
+  // stable OAuth redirect); VERCEL_URL is per-deployment (fallback only).
+  const withHttps = (h) => (h ? (/^https?:\/\//.test(h) ? h : `https://${h}`) : "");
+  const vercelBase =
+    withHttps(process.env.VERCEL_PROJECT_PRODUCTION_URL) || withHttps(process.env.VERCEL_URL);
+
   const base = (
-    process.env.APP_BASE_URL ||
+    process.env.APP_BASE_URL || // set this explicitly on Vercel (production URL / custom domain)
+    vercelBase || // Vercel auto-provided
     process.env.URL || // Netlify: site's primary URL
     process.env.DEPLOY_PRIME_URL || // Netlify: deploy-specific URL
     ""
   ).replace(/\/+$/, "");
 
+  // Path stays under /.netlify/functions/ on BOTH platforms: Netlify serves it
+  // natively; Vercel rewrites it to /api/... via vercel.json.
   const redirectUrl =
     process.env.TIKTOK_OAUTH_REDIRECT_URL ||
     (base ? `${base}/.netlify/functions/tiktok-auth-callback` : null);
 
   if (!redirectUrl) {
     throw new Error(
-      "Cannot resolve the OAuth redirect URL. Set APP_BASE_URL (or TIKTOK_OAUTH_REDIRECT_URL) in Netlify."
+      "Cannot resolve the OAuth redirect URL. Set APP_BASE_URL (or TIKTOK_OAUTH_REDIRECT_URL) in the deployment's environment variables."
     );
   }
   return { serverUrl, redirectUrl, base };
