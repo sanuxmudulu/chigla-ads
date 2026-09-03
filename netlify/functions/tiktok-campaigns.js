@@ -173,6 +173,21 @@ exports.handler = async function (event) {
     // ---- read-only: today's live TikTok campaign metrics (spend/CPM/CPA) ----
     if (action === "metrics") return campaignMetricsForTracked(supabase);
 
+    // ---- read-only: engagement orders for one campaign (likes / saves / comments) ----
+    if (action === "engagement_orders") {
+      if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
+      const { data, error } = await supabase
+        .from("engagement_orders")
+        .select("kind, provider, service_id, quantity, status, provider_ref, note, updated_at")
+        .eq("campaign_id", String(body.campaign_id))
+        .order("updated_at", { ascending: false });
+      if (error && /does not exist|schema cache|could not find the table/i.test(error.message || "")) {
+        return json(200, { ok: true, orders: [], unmigrated: true });
+      }
+      if (error) return json(500, { error: "Could not read engagement orders", details: sbErr(error) });
+      return json(200, { ok: true, orders: data || [] });
+    }
+
     // ---- read-only: lazy ad-group load for one campaign ----
     if (action === "adgroups") {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
@@ -448,7 +463,7 @@ exports.handler = async function (event) {
         return json(400, { error: "Service ID is required." });
       }
 
-      // Store the batch. NOTHING is sent to any external service.
+      // Store the batch first (so a provider failure still leaves a record).
       const orderRow = {
         campaign_id: String(r.campaign.campaign_id),
         kind: "COMMENTS",
@@ -470,10 +485,9 @@ exports.handler = async function (event) {
       }
       if (ins.error) return json(500, { error: "Could not store the comment batch", details: ins.error.message });
 
-      // Dispatch point for a FUTURE approved provider. Today this performs no
-      // network call and just reports the order as stored/READY.
+      // Dispatch to the COMMENTS provider (DripFeedPanel) using the modal's
+      // Service ID. With no ENGAGEMENT_COMMENTS_API_KEY this is stored-only.
       const result = await submitEngagementOrder({
-        provider: null,
         kind: "COMMENTS",
         campaignId: String(r.campaign.campaign_id),
         serviceId,
@@ -482,10 +496,16 @@ exports.handler = async function (event) {
         comments,
       });
 
-      if (ins.data && (result.note || result.status)) {
+      if (ins.data) {
         await supabase
           .from("engagement_orders")
-          .update({ status: result.status || "READY", note: result.message || null, updated_at: new Date().toISOString() })
+          .update({
+            status: result.status || "READY",
+            provider: result.provider || null,
+            provider_ref: result.providerRef || null,
+            note: result.message || null,
+            updated_at: new Date().toISOString(),
+          })
           .eq("id", ins.data.id);
       }
 
@@ -495,6 +515,7 @@ exports.handler = async function (event) {
         count: comments.length,
         submitted: !!result.submitted,
         status: result.status || "READY",
+        provider_ref: result.providerRef || null,
         message: result.message || "Stored locally — ready for an approved provider integration.",
       });
     }

@@ -18,6 +18,7 @@ import {
   deleteTiktokCampaign,
   setCampaignPostUrl,
   queueEngagementComments,
+  fetchEngagementOrders,
   listCommentTemplates,
   createCommentTemplate,
   updateCommentTemplate,
@@ -1089,6 +1090,46 @@ function openEngagementCommentsModal(s) {
 
   document.getElementById("ecTplList").innerHTML = `<div class="ec-tpl-empty">Loading templates…</div>`;
   loadCommentTemplates();
+  loadEngagementOrders(String(s.campaignId));
+}
+
+// Shows what the Active-trigger auto-placed for this campaign (likes / saves)
+// and any prior comment batch. Read-only.
+async function loadEngagementOrders(campaignId) {
+  const el = document.getElementById("ecAutoOrders");
+  if (!el) return;
+  el.hidden = true;
+  el.innerHTML = "";
+  let orders = [];
+  try {
+    const data = await fetchEngagementOrders(campaignId);
+    orders = data.orders || [];
+  } catch (_) {
+    return;
+  }
+  if (engagementTarget !== String(campaignId)) return; // modal moved on
+  if (!orders.length) return;
+
+  const latest = {};
+  for (const o of orders) if (!latest[o.kind]) latest[o.kind] = o; // orders come newest-first
+  const tone = (s) => {
+    const u = String(s || "").toUpperCase();
+    if (["SUBMITTED", "COMPLETED"].includes(u) || /progress|complete|process/i.test(s)) return "ok";
+    if (u === "FAILED" || /cancel|error/i.test(s)) return "bad";
+    return "warn";
+  };
+  const rows = ["LIKES", "SAVES", "COMMENTS"]
+    .filter((k) => latest[k])
+    .map((k) => {
+      const o = latest[k];
+      const qty = o.quantity ? `${o.quantity} ` : "";
+      const ref = o.provider_ref ? ` · #${escapeHtml(String(o.provider_ref))}` : "";
+      const label = o.status === "SUBMITTED" ? "ordered" : (o.status || "").toLowerCase();
+      return `<div class="ec-auto-row ${tone(o.status)}">${qty}${k.toLowerCase()} — ${escapeHtml(label)}${ref}</div>`;
+    })
+    .join("");
+  el.innerHTML = rows;
+  el.hidden = !rows;
 }
 
 function closeEngagementCommentsModal() {

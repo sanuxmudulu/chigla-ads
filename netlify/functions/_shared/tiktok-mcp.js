@@ -24,7 +24,7 @@ const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const {
   StreamableHTTPClientTransport,
 } = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
-const { submitEngagementOrder } = require("./engagement-provider.js");
+const { submitEngagementOrder, providerConfigured } = require("./engagement-provider.js");
 
 const DEFAULT_MCP_SERVER_URL =
   "https://business-api.tiktok.com/open_mcp/tt-ads-mcp-flat";
@@ -853,19 +853,23 @@ async function markEngagementReadyIfActive(supabase, campaignIds) {
   }
 }
 
-// FUTURE PROVIDER HOOK — performs NO external calls today.
+// AUTO ENGAGEMENT — likes + saves, placed the moment a campaign is genuinely
+// Active AND has a tiktok_post_url. Comments are NEVER auto-placed (the operator
+// adds those by hand in the Add-comments modal).
 //
-// This is the single seam where an APPROVED, configured engagement provider
-// would automatically act on each READY campaign using ONLY its
-// (campaign_id, tiktok_post_url), then set engagement_status = 'COMPLETED'
-// once the provider confirms success.
+// Fully idempotent: one engagement_orders row per (campaign_id, kind). A row that
+// already reached SUBMITTED/COMPLETED is never re-ordered. A FAILED row is
+// retried on the next Active tick up to AUTO_ORDER_ATTEMPT_CAP, then left alone.
+// When both LIKES and SAVES have a SUBMITTED/COMPLETED row the campaign flips to
+// engagement_status='COMPLETED'. If neither kind has an API key configured the
+// campaign stays READY (so configuring a key later still fires it).
 //
-// Today submitEngagementOrder() has no registered provider, so it returns
-// stored-only ({ submitted:false }) and this function changes nothing —
-// campaigns stay READY. Idempotent: only READY rows are considered, COMPLETED
-// rows are never revisited, and the COMPLETED write is itself guarded on the row
-// still being READY. Credentials (ENGAGEMENT_*_API_KEY) live only in the
-// provider module, read from process.env, never returned or logged.
+// Credentials (ENGAGEMENT_*_API_KEY) live only in engagement-provider.js, read
+// from process.env, never returned to the browser or logged.
+const AUTO_ENGAGEMENT_KINDS = ["LIKES", "SAVES"];
+const AUTO_ORDER_ATTEMPT_CAP = 4;
+const AUTO_ENGAGEMENT_BUDGET_MS = 6000; // stay well inside the function limit
+
 async function autoProcessReadyEngagements(supabase, campaignIds) {
   let ids = [...new Set((campaignIds || []).map(String).filter(Boolean))];
   if (!ids.length) return;
@@ -880,52 +884,127 @@ async function autoProcessReadyEngagements(supabase, campaignIds) {
       .in("campaign_id", ids)
       .eq("engagement_status", "READY");
     if (error) return; // unmigrated / transient — nothing to do
-    ready = data || [];
+    ready = (data || []).filter((c) => String(c.tiktok_post_url || "").trim());
   } catch (_) {
     return;
   }
+  if (!ready.length) return;
 
+  // Existing auto orders for this batch, keyed campaign_id -> kind -> row.
+  const existing = {};
+  const cidList = ready.map((c) => String(c.campaign_id));
+  let ex = await supabase
+    .from("engagement_orders")
+    .select("id, campaign_id, kind, status, attempts, provider_ref")
+    .in("campaign_id", cidList)
+    .in("kind", AUTO_ENGAGEMENT_KINDS);
+  if (ex.error && /attempts/.test(ex.error.message || "")) {
+    ex = await supabase
+      .from("engagement_orders")
+      .select("id, campaign_id, kind, status, provider_ref")
+      .in("campaign_id", cidList)
+      .in("kind", AUTO_ENGAGEMENT_KINDS);
+  }
+  if (ex.error) return; // table missing / transient — nothing safe to do this tick
+  for (const r of ex.data || []) {
+    (existing[String(r.campaign_id)] = existing[String(r.campaign_id)] || {})[r.kind] = r;
+  }
+
+  const deadline = Date.now() + AUTO_ENGAGEMENT_BUDGET_MS;
   for (const c of ready) {
-    const link = String(c.tiktok_post_url || "").trim();
-    if (!link) continue;
+    if (Date.now() > deadline) break; // rest stay READY -> next tick picks them up
+    const cid = String(c.campaign_id);
+    const link = String(c.tiktok_post_url).trim();
+    const byKind = existing[cid] || {};
+    let allSettled = true;
 
-    let result;
-    try {
-      result = await submitEngagementOrder({
-        kind: "AUTO",
-        campaignId: String(c.campaign_id),
-        link,
-        quantity: 0,
-        comments: [],
-      });
-    } catch (_) {
-      continue; // provider error must never break the status refresh
+    for (const kind of AUTO_ENGAGEMENT_KINDS) {
+      const settled = await ensureAutoOrder(supabase, cid, kind, link, byKind[kind]);
+      if (!settled) allSettled = false;
     }
 
-    // Today this branch is never taken (no provider => submitted:false).
-    if (result && result.submitted && String(result.status || "").toUpperCase() === "COMPLETED") {
+    if (allSettled) {
       await supabase
         .from("tiktok_campaigns")
         .update({ engagement_status: "COMPLETED", updated_at: new Date().toISOString() })
-        .eq("campaign_id", String(c.campaign_id))
+        .eq("campaign_id", cid)
         .eq("engagement_status", "READY");
-      try {
-        await supabase.from("engagement_orders").insert({
-          campaign_id: String(c.campaign_id),
-          kind: "AUTO",
-          provider: result.provider || null,
-          link,
-          quantity: 0,
-          status: "COMPLETED",
-          provider_ref: result.providerRef || null,
-          note: result.message || null,
-          updated_at: new Date().toISOString(),
-        });
-      } catch (_) {
-        /* audit row is best-effort */
-      }
     }
   }
+}
+
+// Places (or retries) ONE auto engagement order for a campaign. Returns true
+// ONLY when a real order was placed for this kind (status SUBMITTED/COMPLETED).
+// A campaign flips to engagement_status COMPLETED only when every auto kind
+// returns true — so a permanently-failing kind keeps it READY (visible in the
+// Add-comments modal) rather than masking the failure.
+async function ensureAutoOrder(supabase, campaignId, kind, link, row) {
+  const st = row ? String(row.status).toUpperCase() : null;
+  if (st === "SUBMITTED" || st === "COMPLETED") return true;
+  if (st === "FAILED" && Number(row.attempts || 0) >= AUTO_ORDER_ATTEMPT_CAP) return false; // gave up retrying
+  if (!providerConfigured(kind)) return false; // no API key — leave the campaign READY
+
+  const now = new Date().toISOString();
+  const stripAttempts = (obj) => {
+    const { attempts, ...rest } = obj;
+    return rest;
+  };
+
+  // Claim a row BEFORE calling the panel so a concurrent tick can't double-order
+  // (the partial unique index on (campaign_id, kind) enforces this).
+  let rowId = row ? row.id : null;
+  if (!rowId) {
+    const claim = {
+      campaign_id: campaignId,
+      kind,
+      link,
+      quantity: 0,
+      status: "PENDING",
+      attempts: 0,
+      updated_at: now,
+    };
+    let ins = await supabase.from("engagement_orders").insert(claim).select("id").maybeSingle();
+    if (ins.error && /attempts/.test(ins.error.message || "")) {
+      ins = await supabase.from("engagement_orders").insert(stripAttempts(claim)).select("id").maybeSingle();
+    }
+    if (ins.error) {
+      // Unique-violation => another invocation owns it this tick; try again next.
+      return false;
+    }
+    rowId = ins.data ? ins.data.id : null;
+  }
+
+  let result;
+  try {
+    result = await submitEngagementOrder({ kind, campaignId, link });
+  } catch (_) {
+    // Bump attempts so a persistent error still hits the cap eventually.
+    if (rowId) {
+      const bump = { attempts: Number(row?.attempts || 0) + 1, status: "FAILED", updated_at: new Date().toISOString() };
+      let u = await supabase.from("engagement_orders").update(bump).eq("id", rowId);
+      if (u.error && /attempts/.test(u.error.message || "")) {
+        await supabase.from("engagement_orders").update({ status: "FAILED", updated_at: bump.updated_at }).eq("id", rowId);
+      }
+    }
+    return false; // a provider error must never break the status refresh
+  }
+
+  const patch = {
+    provider: result.provider || null,
+    quantity: result.quantity || 0,
+    status: result.submitted ? "SUBMITTED" : result.ok ? "READY" : "FAILED",
+    provider_ref: result.providerRef || null,
+    note: result.message || null,
+    attempts: Number(row?.attempts || 0) + (result.submitted ? 0 : 1),
+    updated_at: new Date().toISOString(),
+  };
+  if (rowId) {
+    let upd = await supabase.from("engagement_orders").update(patch).eq("id", rowId);
+    if (upd.error && /attempts/.test(upd.error.message || "")) {
+      await supabase.from("engagement_orders").update(stripAttempts(patch)).eq("id", rowId);
+    }
+  }
+  return !!result.submitted;
 }
 
 function parseTikTokTime(raw) {

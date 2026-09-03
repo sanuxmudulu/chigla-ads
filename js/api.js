@@ -255,9 +255,10 @@ export async function setCampaignPostUrl(campaignId, tiktokPostUrl) {
   return readTiktokResponse(res, "Couldn't save the post URL"); // { tiktok_post_url }
 }
 
-// Engagement FOUNDATION. Stores a comment batch (one per line) against the
-// campaign's tiktok_post_url as an engagement_orders row with status READY.
-// Does NOT contact any provider / SMM service.
+// Queue a comment batch (one per line) against the campaign's tiktok_post_url.
+// Server-side it is stored as an engagement_orders row and, if
+// ENGAGEMENT_COMMENTS_API_KEY is configured, sent to the comments provider
+// (DripFeedPanel) with the given Service ID. No credentials are ever returned.
 export async function queueEngagementComments(campaignId, serviceId, comments) {
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
@@ -265,6 +266,18 @@ export async function queueEngagementComments(campaignId, serviceId, comments) {
     body: JSON.stringify({ action: "queue_engagement_comments", campaign_id: campaignId, service_id: serviceId, comments }),
   });
   return readTiktokResponse(res, "Couldn't queue the comments");
+}
+
+// Read-only: the engagement orders (likes / saves / comments) recorded for one
+// campaign, newest first. Used by the Add-comments modal to show what the
+// Active-trigger auto-placed. { orders: [{ kind, provider, status, provider_ref, quantity, note }] }
+export async function fetchEngagementOrders(campaignId) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "engagement_orders", campaign_id: campaignId }),
+  });
+  return readTiktokResponse(res, "Couldn't load engagement orders");
 }
 
 // ---------------- Campaign Creator (auto-duplicate initial ad group) ----------------
