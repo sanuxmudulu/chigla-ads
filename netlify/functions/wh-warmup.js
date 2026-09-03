@@ -254,8 +254,16 @@ async function cleanupBatch(supabase) {
             timezone: adv.timezone || adv.display_timezone || null,
           });
           await patchRow(supabase, r.campaign_id, out.patch);
-          if (out.status === "DELETED") tally.deleted += 1;
-          else if (out.status === "FAILED") tally.failed += 1;
+          if (out.status === "DELETED") {
+            tally.deleted += 1;
+            // The WH campaign is gone from TikTok — pull its Detailed Metrics row
+            // now instead of waiting for the next discovery sync to prune it.
+            try {
+              await supabase.from("tiktok_campaigns").delete().eq("campaign_id", String(r.campaign_id));
+            } catch (e) {
+              console.error(`[wh-warmup] tiktok_campaigns cleanup ${r.campaign_id} failed: ${e.message}`);
+            }
+          } else if (out.status === "FAILED") tally.failed += 1;
           else tally.pending += 1;
         }
       });

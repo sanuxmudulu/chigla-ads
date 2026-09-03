@@ -161,11 +161,26 @@ function combinedEarnings({ glitchyBySource = {}, mabacBySub1 = {}, networkByNam
 // migrated yet or on any error.
 async function tiktokSpendForToday(supabase, today) {
   try {
-    const { data, error } = await supabase.from("tiktok_campaigns").select("today_spend, today_date");
+    const { data, error } = await supabase
+      .from("tiktok_campaigns")
+      .select("campaign_id, today_spend, today_date");
     if (error || !Array.isArray(data)) return 0;
+
+    // WH Warmup campaigns show in Detailed Metrics while they exist but their
+    // throwaway warmup spend must never land in the permanent daily_totals
+    // calendar. Drop them here (best-effort; table may not be migrated).
+    let whIds = new Set();
+    try {
+      const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id");
+      whIds = new Set((wh || []).map((r) => String(r.campaign_id)));
+    } catch (_) {
+      /* no WH table — nothing to exclude */
+    }
+
     let spend = 0;
     for (const r of data) {
       if (String(r.today_date) !== String(today)) continue; // stale / another day
+      if (whIds.has(String(r.campaign_id))) continue; // WH Warmup — not calendar spend
       spend += Number(r.today_spend) || 0;
     }
     return Math.round(spend * 100) / 100;
