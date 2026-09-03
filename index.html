@@ -151,6 +151,13 @@
       <span>Calendar</span>
     </button>
 
+    <button class="tools-item" id="toolsWhWarmupBtn">
+      <span class="tools-item-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"></path><path d="M5 10a7 7 0 1 0 14 0"></path><path d="M8.5 13.5c1 1.5 6 1.5 7 0"></path></svg>
+      </span>
+      <span>WH Warmup</span>
+    </button>
+
     <div class="tools-expandable" id="toolsThemesGroup">
       <button class="tools-item tools-expand-toggle" id="toolsThemesToggle">
         <span class="tools-item-icon">
@@ -230,6 +237,84 @@
     <div class="modal-actions">
       <button class="icon-btn" id="cancelDeleteCampaignBtn">Cancel</button>
       <button class="icon-btn danger" id="confirmDeleteCampaignBtn">Delete Campaign</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ WH WARMUP MODAL ============ -->
+<div class="modal-backdrop" id="whWarmupModal">
+  <div class="modal modal-lg wh-modal">
+    <div class="modal-header">
+      <h3 id="whWarmupTitle">WH Warmup</h3>
+      <button id="closeWhWarmupModal">✕</button>
+    </div>
+
+    <!-- STEP 1 — BC / advertiser selection -->
+    <div class="wh-step" id="whStep1">
+      <div class="tk-bc-select">
+        <label for="whBcSelect">Business Center</label>
+        <select id="whBcSelect"></select>
+      </div>
+      <div id="whSummary" class="tk-summary"></div>
+      <div class="wh-selectall">
+        <label><input type="checkbox" id="whSelectAll" /> Select all Approved accounts</label>
+      </div>
+      <div id="whAdvList" class="tk-wrap wh-adv-list"></div>
+      <div class="modal-error" id="whStep1Error"></div>
+      <div class="modal-actions">
+        <button class="icon-btn" id="whCancelBtn1">Cancel</button>
+        <button class="icon-btn primary" id="whNextBtn" disabled>Next</button>
+      </div>
+    </div>
+
+    <!-- STEP 2 — settings -->
+    <div class="wh-step" id="whStep2" hidden>
+      <p class="wh-selcount" id="whSelCount"></p>
+
+      <div class="wh-form-section">
+        <div class="wh-form-title">Campaign</div>
+        <div class="wh-kv"><span>Objective</span><strong>Traffic</strong></div>
+        <div class="wh-kv"><span>Campaign name</span><strong>Traffic#### <em>(random, per account)</em></strong></div>
+        <div class="wh-kv"><span>CBO</span><strong>On · Daily</strong></div>
+        <div class="wh-kv"><span>Daily budget</span><strong id="whBudgetNote">lowest valid CBO daily budget</strong></div>
+      </div>
+
+      <div class="wh-form-section">
+        <div class="wh-form-title">Ad group</div>
+        <div class="wh-kv"><span>Ad group name</span><strong>AG#### <em>(random)</em></strong></div>
+        <div class="wh-kv"><span>Destination</span><strong>Website · https://etsy.com/&lt;random&gt;/ <em>(per account)</em></strong></div>
+        <div class="wh-kv"><span>Placement</span><strong>TikTok only</strong></div>
+        <div class="wh-kv"><span>Optimization</span><strong>Click · lowest-cost bid</strong></div>
+        <div class="wh-kv"><span>Schedule</span><strong>Starts 3h ago (delivers immediately)</strong></div>
+        <label class="budget-field-label" for="whCountryInput">Target country</label>
+        <input type="text" id="whCountryInput" placeholder="e.g. United States" autocomplete="off" />
+      </div>
+
+      <div class="wh-form-section">
+        <div class="wh-form-title">Ad</div>
+        <div class="wh-kv"><span>Ad name</span><strong>AD#### <em>(random)</em></strong></div>
+        <div class="wh-kv"><span>Type</span><strong>Spark Ad</strong></div>
+        <div class="wh-kv"><span>CTA</span><strong>Learn More</strong></div>
+        <label class="budget-field-label" for="whSparkInput">Spark Code <span class="eng-hint">(same code for every account)</span></label>
+        <input type="text" id="whSparkInput" placeholder="Paste the creator's Spark authorization code" autocomplete="off" />
+      </div>
+
+      <div class="eng-placeholder" id="whCreateProgress"></div>
+      <div class="modal-error" id="whStep2Error"></div>
+      <div class="modal-actions">
+        <button class="icon-btn" id="whBackBtn">Back</button>
+        <button class="icon-btn" id="whCancelBtn2">Cancel</button>
+        <button class="icon-btn primary" id="whCreateBtn">Create WH Warmup</button>
+      </div>
+    </div>
+
+    <!-- STEP 3 — results -->
+    <div class="wh-step" id="whStep3" hidden>
+      <p class="wh-selcount">Results — WH campaigns auto-delete once they reach Active.</p>
+      <div id="whResults" class="wh-results"></div>
+      <div class="modal-actions">
+        <button class="icon-btn primary" id="whDoneBtn">Done</button>
+      </div>
     </div>
   </div>
 </div>

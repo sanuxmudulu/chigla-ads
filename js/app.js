@@ -17,6 +17,8 @@ import {
   setConnectionNetwork,
   deleteTiktokCampaign,
   queueEngagementComments,
+  createWhWarmup,
+  cleanupWhWarmup,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -116,6 +118,7 @@ const state = {
 let lastUpdatedAt = null;
 let refreshInFlight = false; // guards refreshAll() against overlapping runs
 let metricsInFlight = false; // guards loadTiktokMetrics() against overlapping runs
+let whCleanupInFlight = false; // guards the WH Warmup cleanup poll
 let mainChartCanvas = null;
 let openRowMenuFor = null; // campaignId whose ⋮ menu is open, or null
 let rowMenuEl = null; // the floating menu element (appended to <body>)
@@ -204,6 +207,21 @@ async function loadTiktokMetrics() {
   }
 }
 
+// WH Warmup auto-cleanup — deletes warmup campaigns once they reach Active.
+// Piggybacks the existing ~60s refresh. Fire-and-forget, fully server-side,
+// guarded against overlap. Nothing it does touches the Detailed Metrics table.
+async function runWhWarmupCleanup() {
+  if (whCleanupInFlight) return;
+  whCleanupInFlight = true;
+  try {
+    await cleanupWhWarmup();
+  } catch (_) {
+    /* non-fatal — next cycle retries */
+  } finally {
+    whCleanupInFlight = false;
+  }
+}
+
 // Merge a metrics snapshot into state. For advertiser accounts that reported OK
 // this round we REPLACE their campaigns' metrics (so a campaign that genuinely
 // spent $0 today, or is gone, drops to 0 rather than keeping a stale value).
@@ -271,6 +289,7 @@ function wireEvents() {
     if (e.target.id === "accountsModal") closeAccountsModal();
   });
   wireTiktokEvents();
+  wireWhWarmupEvents();
 
   document.getElementById("toolsCalendarBtn").addEventListener("click", openCalendarModal);
   document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
@@ -401,7 +420,7 @@ async function refreshAll() {
       glitchyErr = g.reason;
     }
 
-    await Promise.allSettled([loadMabac(), loadTiktokMetrics()]);
+    await Promise.allSettled([loadMabac(), loadTiktokMetrics(), runWhWarmupCleanup()]);
 
     if (glitchyErr) {
       setStatus(`Couldn't reach Glitchy: ${glitchyErr.message} — showing last known data.`, true);
@@ -918,6 +937,214 @@ async function submitEngagementComments() {
   }
 }
 
+// ============================== WH WARMUP ==============================
+// Bulk temporary Traffic-CBO warmup campaigns that auto-delete once Active.
+// Reuses the TikTok connection/advertiser data already fetched for the TikTok
+// Ads modal (tiktokState). All creation + cleanup is server-side.
+
+const whState = {
+  connectionId: null,
+  selected: new Set(), // advertiser_ids chosen on step 1
+  step: 1,
+};
+
+function wireWhWarmupEvents() {
+  document.getElementById("toolsWhWarmupBtn").addEventListener("click", openWhWarmupModal);
+  document.getElementById("closeWhWarmupModal").addEventListener("click", closeWhWarmupModal);
+  document.getElementById("whWarmupModal").addEventListener("click", (e) => {
+    if (e.target.id === "whWarmupModal") closeWhWarmupModal();
+  });
+  document.getElementById("whCancelBtn1").addEventListener("click", closeWhWarmupModal);
+  document.getElementById("whCancelBtn2").addEventListener("click", closeWhWarmupModal);
+  document.getElementById("whDoneBtn").addEventListener("click", closeWhWarmupModal);
+  document.getElementById("whBackBtn").addEventListener("click", () => whGoToStep(1));
+  document.getElementById("whNextBtn").addEventListener("click", () => whGoToStep(2));
+  document.getElementById("whCreateBtn").addEventListener("click", submitWhWarmup);
+
+  document.getElementById("whBcSelect").addEventListener("change", (e) => {
+    whState.connectionId = e.target.value;
+    whState.selected.clear();
+    renderWhAdvertisers();
+  });
+  document.getElementById("whSelectAll").addEventListener("change", (e) => {
+    const approved = whAdvsForConnection().filter((a) => advIsApproved(a));
+    if (e.target.checked) approved.forEach((a) => whState.selected.add(String(a.advertiser_id)));
+    else approved.forEach((a) => whState.selected.delete(String(a.advertiser_id)));
+    renderWhAdvertisers();
+  });
+  document.getElementById("whAdvList").addEventListener("change", (e) => {
+    const cb = e.target.closest('input[type="checkbox"][data-wh-adv]');
+    if (!cb) return;
+    const id = String(cb.dataset.whAdv);
+    if (cb.checked) whState.selected.add(id);
+    else whState.selected.delete(id);
+    syncWhSelectAll();
+    updateWhNextButton();
+  });
+}
+
+function whAdvsForConnection() {
+  return tiktokState.advertisers
+    .filter((a) => a.connection_id === whState.connectionId)
+    .slice()
+    .sort(
+      (a, b) =>
+        advApprovedRank(a) - advApprovedRank(b) ||
+        String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
+    );
+}
+
+async function openWhWarmupModal() {
+  closeToolsDrawer();
+  whState.selected.clear();
+  whState.step = 1;
+  document.getElementById("whWarmupModal").classList.add("open");
+  whGoToStep(1);
+  document.getElementById("whAdvList").innerHTML = `<p class="tk-loading">Loading accounts…</p>`;
+  document.getElementById("whStep1Error").textContent = "";
+
+  try {
+    const data = await fetchTiktokConnections();
+    tiktokState.connections = data.connections || [];
+    tiktokState.advertisers = data.advertisers || [];
+  } catch (err) {
+    document.getElementById("whAdvList").innerHTML = `<p class="tk-error">Couldn't load connections: ${escapeHtml(err.message)}</p>`;
+    return;
+  }
+
+  const sel = document.getElementById("whBcSelect");
+  if (!tiktokState.connections.length) {
+    sel.innerHTML = "";
+    document.getElementById("whAdvList").innerHTML = `<p class="tk-empty">No TikTok Business Centers connected. Add one under Tools → TikTok Ads first.</p>`;
+    document.getElementById("whSummary").innerHTML = "";
+    return;
+  }
+  sel.innerHTML = tiktokState.connections
+    .map((c) => `<option value="${c.id}">${escapeHtml(connBcOptionLabel(c))}</option>`)
+    .join("");
+  whState.connectionId = tiktokState.connections[0].id;
+  sel.value = whState.connectionId;
+  renderWhAdvertisers();
+}
+
+function closeWhWarmupModal() {
+  document.getElementById("whWarmupModal").classList.remove("open");
+}
+
+function whGoToStep(n) {
+  whState.step = n;
+  document.getElementById("whStep1").hidden = n !== 1;
+  document.getElementById("whStep2").hidden = n !== 2;
+  document.getElementById("whStep3").hidden = n !== 3;
+  document.getElementById("whWarmupTitle").textContent =
+    n === 1 ? "WH Warmup — accounts" : n === 2 ? "WH Warmup — settings" : "WH Warmup — results";
+  if (n === 2) {
+    const count = whState.selected.size;
+    document.getElementById("whSelCount").innerHTML = `Creating for <strong>${count}</strong> Approved account${count === 1 ? "" : "s"}.`;
+    document.getElementById("whStep2Error").textContent = "";
+    document.getElementById("whCreateProgress").textContent = "";
+    document.getElementById("whCreateProgress").className = "eng-placeholder";
+    const btn = document.getElementById("whCreateBtn");
+    btn.disabled = false;
+    btn.textContent = "Create WH Warmup";
+  }
+}
+
+function renderWhAdvertisers() {
+  const advs = whAdvsForConnection();
+  const approved = advs.filter((a) => advIsApproved(a)).length;
+  document.getElementById("whSummary").innerHTML = `
+    <span class="tk-sum-item"><strong>${advs.length}</strong> account${advs.length === 1 ? "" : "s"}</span>
+    <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
+    <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
+
+  const wrap = document.getElementById("whAdvList");
+  wrap.innerHTML = advs.length
+    ? advs.map((a) => whAdvRow(a)).join("")
+    : `<p class="tk-empty">No advertiser accounts under this Business Center.</p>`;
+
+  syncWhSelectAll();
+  updateWhNextButton();
+}
+
+function whAdvRow(a) {
+  const ok = advIsApproved(a);
+  const id = String(a.advertiser_id);
+  const meta = [id, a.currency || null, a.display_timezone || a.timezone || null].filter(Boolean).join(" · ");
+  return `
+    <label class="tk-adv${ok ? "" : " disabled"}" title="${ok ? "" : "Suspended accounts can't be used — campaign creation would fail."}">
+      <input type="checkbox" data-wh-adv="${escapeHtml(id)}" ${whState.selected.has(id) ? "checked" : ""} ${ok ? "" : "disabled"} />
+      <span class="tk-adv-main">
+        <span class="tk-adv-name">${escapeHtml(a.advertiser_name || id)}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
+      </span>
+      <span class="tk-adv-status ${ok ? "ok" : "warn"}">${ok ? "Approved" : "Suspended"}</span>
+    </label>`;
+}
+
+function syncWhSelectAll() {
+  const approved = whAdvsForConnection().filter((a) => advIsApproved(a));
+  const all = approved.length > 0 && approved.every((a) => whState.selected.has(String(a.advertiser_id)));
+  const cb = document.getElementById("whSelectAll");
+  cb.checked = all;
+  cb.disabled = approved.length === 0;
+}
+
+function updateWhNextButton() {
+  document.getElementById("whNextBtn").disabled = whState.selected.size === 0;
+}
+
+async function submitWhWarmup() {
+  const country = document.getElementById("whCountryInput").value.trim();
+  const spark = document.getElementById("whSparkInput").value.trim();
+  const errEl = document.getElementById("whStep2Error");
+  const progressEl = document.getElementById("whCreateProgress");
+  const btn = document.getElementById("whCreateBtn");
+  errEl.textContent = "";
+
+  if (!country) return (errEl.textContent = "Enter a target country.");
+  if (!spark) return (errEl.textContent = "Enter a Spark code.");
+  const ids = [...whState.selected];
+  if (!ids.length) return whGoToStep(1);
+
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+  progressEl.className = "eng-placeholder busy";
+  progressEl.textContent = `Creating ${ids.length} warmup campaign${ids.length === 1 ? "" : "s"}… this can take a minute.`;
+
+  try {
+    const res = await createWhWarmup(whState.connectionId, ids, country, spark);
+    renderWhResults(res.results || [], res.warning);
+    whGoToStep(3);
+    // Kick a cleanup pass so newly-Active ones start deleting promptly.
+    runWhWarmupCleanup();
+  } catch (err) {
+    errEl.textContent = err.message;
+    btn.disabled = false;
+    btn.textContent = "Create WH Warmup";
+    progressEl.textContent = "";
+    progressEl.className = "eng-placeholder";
+  }
+}
+
+function renderWhResults(results, warning) {
+  const el = document.getElementById("whResults");
+  const tone = (s) => (s === "Created" ? "ok" : s === "Skipped" ? "warn" : "bad");
+  el.innerHTML =
+    (warning ? `<div class="wh-result-row bad"><span class="wh-r-detail">${escapeHtml(warning)}</span></div>` : "") +
+    (results.length
+      ? results
+          .map(
+            (r) => `
+      <div class="wh-result-row ${tone(r.status)}">
+        <span class="wh-r-name">${escapeHtml(r.advertiser_name || r.advertiser_id)}</span>
+        <span class="wh-r-status">${escapeHtml(r.status)}${r.error ? ` <span class="wh-r-detail">— ${escapeHtml(r.error)}</span>` : ""}</span>
+      </div>`
+          )
+          .join("")
+      : `<p class="tk-empty">No accounts processed.</p>`);
+}
+
 // ---- Business Center view filter (Detailed Metrics header) ----
 
 function trackedBcOptions() {
@@ -1363,6 +1590,16 @@ function wireTiktokEvents() {
 
   const wrap = document.getElementById("tiktokConnectionsWrap");
   wrap.addEventListener("change", (e) => {
+    const all = e.target.closest("input[data-tk-selectall-approved]");
+    if (all) {
+      const connId = all.dataset.tkConnId;
+      const conn = tiktokState.connections.find((x) => x.id === connId);
+      const advs = conn ? advsForConnection(conn.id).filter((a) => advIsApproved(a)) : [];
+      for (const a of advs) tiktokState.trackedDraft[`${connId}::${a.advertiser_id}`] = all.checked;
+      renderSelectedConnection();
+      updateSaveButton();
+      return;
+    }
     const cb = e.target.closest('input[type="checkbox"][data-tk-adv]');
     if (cb) {
       tiktokState.trackedDraft[`${cb.dataset.tkConnId}::${cb.dataset.tkAdvId}`] = cb.checked;
@@ -1494,6 +1731,13 @@ function renderSelectedConnection() {
     ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
     : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
 
+  const approvedAdvs = advs.filter((a) => advIsApproved(a));
+  const allApprovedTracked =
+    approvedAdvs.length > 0 && approvedAdvs.every((a) => isAdvTracked(c.id, a));
+  const selectAll = approvedAdvs.length
+    ? `<div class="tk-selectall"><label><input type="checkbox" data-tk-selectall-approved data-tk-conn-id="${c.id}" ${allApprovedTracked ? "checked" : ""} /> Select all Approved accounts</label></div>`
+    : "";
+
   const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
   const saving = tiktokState.savingNetwork === c.id;
 
@@ -1514,6 +1758,7 @@ function renderSelectedConnection() {
           </button>
         </div>
       </div>
+      ${selectAll}
       <div class="tk-adv-list">${rows}</div>
     </div>`;
 

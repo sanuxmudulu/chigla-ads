@@ -619,7 +619,45 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .modal textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .eng-placeholder { font-size: 12px; color: var(--text-1); line-height: 1.5; margin: 0 0 8px; min-height: 0; }
 .eng-placeholder.ok { color: var(--profit); }
+.eng-placeholder.busy { color: var(--text-1); }
 .eng-placeholder:empty { display: none; }
+
+/* ---- Select all Approved (TikTok Ads modal + WH Warmup) ---- */
+.tk-selectall, .wh-selectall { margin: 10px 0 6px; }
+.tk-selectall label, .wh-selectall label {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-1); cursor: pointer;
+}
+.tk-selectall input, .wh-selectall input { width: auto; margin: 0; }
+
+/* ---- WH Warmup modal ---- */
+.wh-modal { max-height: 88vh; overflow-y: auto; }
+.wh-adv-list { max-height: 40vh; overflow-y: auto; }
+.wh-adv-list .tk-adv.disabled { opacity: 0.5; cursor: not-allowed; }
+.wh-adv-list .tk-adv.disabled input { pointer-events: none; }
+.wh-selcount { font-size: 12px; color: var(--text-1); margin: 0 0 14px; }
+.wh-selcount strong { color: var(--text-0); }
+.wh-form-section {
+  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 12px;
+}
+.wh-form-title {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent);
+  font-weight: 700; margin-bottom: 8px;
+}
+.wh-kv { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 3px 0; }
+.wh-kv span { color: var(--text-2); }
+.wh-kv strong { color: var(--text-1); font-weight: 600; text-align: right; }
+.wh-kv strong em { color: var(--text-2); font-weight: 400; font-style: normal; }
+.wh-results { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; max-height: 46vh; overflow-y: auto; }
+.wh-result-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  font-size: 12px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.wh-result-row .wh-r-name { color: var(--text-0); font-weight: 600; }
+.wh-result-row .wh-r-status { font-weight: 700; white-space: nowrap; }
+.wh-result-row.ok .wh-r-status { color: var(--profit); }
+.wh-result-row.bad .wh-r-status { color: var(--loss); }
+.wh-result-row.warn .wh-r-status { color: #ffb020; }
+.wh-result-row .wh-r-detail { color: var(--text-2); font-size: 11px; }
 
 /* ---------------- Detailed Metrics: STATUS column ---------------- */
 .status-badge {

@@ -670,6 +670,16 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
   const scannedAdvIds = []; // advertisers whose campaign list we actually read
   const perAdvertiser = {};
 
+  // WH Warmup campaigns live in their own table and must NEVER enter
+  // tiktok_campaigns (Detailed Metrics / KPIs / daily_totals / sorting).
+  let whWarmupIds = new Set();
+  try {
+    const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id");
+    whWarmupIds = new Set((wh || []).map((r) => String(r.campaign_id)));
+  } catch (_) {
+    /* table not migrated yet — nothing to exclude */
+  }
+
   for (const adv of trackedAdvertisers) {
     const advId = String(adv.advertiser_id);
     try {
@@ -690,6 +700,7 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
 
       for (const campaign of campaigns) {
         const cid = String(campaign.campaign_id);
+        if (whWarmupIds.has(cid)) continue; // WH Warmup — never surfaced here
         const campAdGroups = byCampaign[cid] || [];
         const eff = deriveEffectiveStatus({
           advertiserStatus: adv.status,

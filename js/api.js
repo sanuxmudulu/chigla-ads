@@ -268,6 +268,45 @@ export async function setConnectionNetwork(connectionId, affiliateNetwork) {
   return readTiktokResponse(res, "Couldn't set network");
 }
 
+// ---------------- WH Warmup ----------------
+// Bulk temporary Traffic-CBO warmup campaigns that auto-delete once Active.
+// All TikTok writes are server-side; nothing sensitive is returned here.
+
+export async function createWhWarmup(connectionId, advertiserIds, targetCountry, sparkCode) {
+  const res = await fetch("/.netlify/functions/wh-warmup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "create",
+      connection_id: connectionId,
+      advertiser_ids: advertiserIds,
+      target_country: targetCountry,
+      spark_code: sparkCode,
+    }),
+  });
+  return readTiktokResponse(res, "WH Warmup creation failed"); // { results: [...] }
+}
+
+// Poll + auto-delete WH campaigns that have reached Active. Idempotent; called
+// on the existing ~60s refresh. Never throws for the caller's purposes.
+export async function cleanupWhWarmup() {
+  const res = await fetch("/.netlify/functions/wh-warmup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "cleanup" }),
+  });
+  return readTiktokResponse(res, "WH Warmup cleanup failed");
+}
+
+export async function listWhWarmup() {
+  const res = await fetch("/.netlify/functions/wh-warmup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "list" }),
+  });
+  return readTiktokResponse(res, "Couldn't load WH Warmup campaigns"); // { campaigns: [...] }
+}
+
 // ---------------- Theme persistence ----------------
 
 export function loadTheme(defaultTheme) {
