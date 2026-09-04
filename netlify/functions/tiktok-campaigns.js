@@ -35,6 +35,7 @@ const {
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
+  mcpCall,
   dashboardToday,
   discoverAndStoreAdvertisers,
   discoverAndStoreCampaigns,
@@ -300,10 +301,52 @@ exports.handler = async function (event) {
           deleteCampaign({ client, advertiserId: r.campaign.advertiser_id, campaignId })
         );
       } catch (err) {
-        // TikTok refused the delete. If the advertiser account is
-        // suspended/limited we can't ever complete this write — hide the
-        // campaign locally instead so it stops cluttering the dashboard and a
-        // re-sync won't resurrect it. Do NOT present this as a real deletion.
+        // The delete write failed — but that can also mean the campaign is
+        // ALREADY gone from TikTok (deleted directly in Ads Manager, outside
+        // Chigla Ads, so campaign_status_update has nothing left to act on).
+        // Never guess this from the error text — ask TikTok itself via
+        // campaign_get, the same check used to confirm this live. If it
+        // genuinely returns nothing, there's nothing left to protect: clean up
+        // every local row tied to this campaign_id, same as a real deletion.
+        let goneFromTiktok = false;
+        try {
+          const check = await withClient(supabase, r.connection, (client) =>
+            mcpCall(client, "campaign_get", {
+              advertiser_id: r.campaign.advertiser_id,
+              filtering: { campaign_ids: [campaignId] },
+              fields: ["campaign_id"],
+            })
+          );
+          goneFromTiktok = !((check && check.list) || []).length;
+        } catch (_) {
+          /* couldn't confirm either way — fall through to the normal handling below */
+        }
+
+        if (goneFromTiktok) {
+          await supabase.from("tiktok_campaigns").delete().eq("campaign_id", campaignId);
+          try {
+            await supabase.from("campaign_creator_campaigns").delete().eq("campaign_id", campaignId);
+          } catch (_) {
+            /* table optional */
+          }
+          try {
+            await supabase.from("engagement_orders").delete().eq("campaign_id", campaignId);
+          } catch (_) {
+            /* best-effort */
+          }
+          return json(200, {
+            ok: true,
+            campaign_id: campaignId,
+            outcome: "already_gone",
+            message: `Campaign “${campaignName}” was already deleted directly on TikTok — removed it from Chigla Ads too.`,
+          });
+        }
+
+        // TikTok refused the delete for some other reason. If the advertiser
+        // account is suspended/limited we can't ever complete this write —
+        // hide the campaign locally instead so it stops cluttering the
+        // dashboard and a re-sync won't resurrect it. Do NOT present this as a
+        // real deletion.
         if (!advHealthy) {
           const upd = await supabase
             .from("tiktok_campaigns")

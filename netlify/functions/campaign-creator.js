@@ -10,12 +10,30 @@
 //        -> for every registered campaign still WAITING_FOR_ACTIVE / DUPLICATING:
 //           if the initial ad group is genuinely Active, create up to
 //           DUPES_PER_CYCLE more copies of it (default target 20). Idempotent.
-//           Driven by the existing ~60s dashboard refresh.
+//           Driven by the existing ~60s dashboard refresh AND by a scheduler
+//           (see below) for when the dashboard is closed.
+//
+//   "retry"  { campaign_id }
+//        -> un-stick a row stuck in dupe_status FAILED (dupe_created < dupe_target)
+//           by resetting it back to DUPLICATING (if its initial ad group already
+//           went Active) or WAITING_FOR_ACTIVE (if not), clearing dupe_attempts/
+//           dupe_error so the NEXT process_duplication pass picks it back up.
+//           dupe_created (progress so far) is never touched — a retry always
+//           resumes, never restarts, so it can never exceed dupe_target.
 //
 //   "list"  -> registered campaigns + duplication state (monitoring)
 //
 // No admin password (same posture as the other tiktok-* write actions). All MCP
 // calls run here; no tokens are ever returned to the browser.
+//
+// SCHEDULER: a bare GET to this route (no body) also runs process_duplication —
+// this is what a Vercel Cron Job invokes (Vercel cron sends GET, never POST;
+// see vercel.json "crons"). Netlify's own scheduled function invocation still
+// arrives as a bodyless POST (see netlify.toml "schedule") and is handled
+// exactly as before. If CRON_SECRET is set in the environment, a GET must carry
+// `Authorization: Bearer <CRON_SECRET>` — Vercel adds that header automatically
+// for its own cron invocations once CRON_SECRET is set (same convention as
+// cleanup.js); a manual GET without it is rejected.
 
 const {
   getSupabase,
@@ -42,7 +60,18 @@ async function withClient(supabase, connection, fn) {
 exports.handler = async function (event) {
   try {
     const supabase = getSupabase();
-    if (event.httpMethod !== "POST") return json(405, { error: "Use POST" });
+
+    // Scheduler entry point (Vercel Cron -> GET; see header comment).
+    if (event.httpMethod === "GET") {
+      if (process.env.CRON_SECRET) {
+        const h = (event && event.headers) || {};
+        const auth = h.authorization || h.Authorization || "";
+        if (auth !== `Bearer ${process.env.CRON_SECRET}`) return json(401, { error: "unauthorized" });
+      }
+      return processDuplication(supabase);
+    }
+
+    if (event.httpMethod !== "POST") return json(405, { error: "Use GET (cron) or POST" });
     let body = {};
     try {
       body = JSON.parse(event.body || "{}");
@@ -51,6 +80,7 @@ exports.handler = async function (event) {
     }
 
     if (body.action === "register") return register(supabase, body);
+    if (body.action === "retry") return retryFailed(supabase, body);
     if (body.action === "list") return listRows(supabase);
     // "process_duplication" (dashboard 60s poll) OR a Netlify scheduled
     // invocation (no recognizable action, e.g. body {"next_run":"..."}) — both
@@ -69,6 +99,36 @@ async function register(supabase, body) {
   const r = await registerForDuplication(supabase, body);
   if (r.error) return json(r.code || 500, { error: r.error });
   return json(200, { ok: true, ...(r.already ? { already: true } : {}) });
+}
+
+async function retryFailed(supabase, body) {
+  const campaignId = String(body.campaign_id || "");
+  if (!campaignId) return json(400, { error: "campaign_id is required" });
+
+  const { data: row, error } = await supabase
+    .from("campaign_creator_campaigns")
+    .select("campaign_id, dupe_status, dupe_created, dupe_target, became_active_at")
+    .eq("campaign_id", campaignId)
+    .maybeSingle();
+  if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
+  if (!row) return json(404, { error: "Campaign not found in campaign_creator_campaigns." });
+  if (row.dupe_status !== "FAILED") {
+    return json(400, { error: `Only a FAILED row can be retried (this one is ${row.dupe_status}).` });
+  }
+  if ((Number(row.dupe_created) || 0) >= (Number(row.dupe_target) || 20)) {
+    return json(400, { error: "This row already reached its dupe_target — nothing to retry." });
+  }
+
+  const nextStatus = row.became_active_at ? "DUPLICATING" : "WAITING_FOR_ACTIVE";
+  const patch = {
+    dupe_status: nextStatus,
+    dupe_attempts: 0,
+    dupe_error: null,
+    updated_at: new Date().toISOString(),
+  };
+  const upd = await supabase.from("campaign_creator_campaigns").update(patch).eq("campaign_id", campaignId);
+  if (upd.error) return json(500, { error: "Retry failed", details: sbErr(upd.error) });
+  return json(200, { ok: true, campaign_id: campaignId, dupe_status: nextStatus, dupe_created: row.dupe_created });
 }
 
 // ---------------------------------------------------------------------------

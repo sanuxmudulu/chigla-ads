@@ -717,6 +717,16 @@ function buildAdgroupPayload({ advertiserId, campaignId, type, config, scheduleU
     p.promotion_type = "LEAD_GENERATION";
     p.promotion_target_type = "INSTANT_PAGE"; // TikTok Instant Form
     p.optimization_goal = "LEAD_GENERATION";
+    // TikTok auto-assigns this to "FORM" for a LEAD_GENERATION/INSTANT_PAGE ad
+    // group even though it's never required at create time (confirmed live via
+    // adgroup_get on a real ad group) — but every SUBSEQUENT ad group under the
+    // same CBO campaign must send it explicitly and it must match the first
+    // one, or adgroup_create is rejected: "Please follow the same
+    // 'optimization_event' of the first adgroup...". Setting it explicitly here
+    // means the original ad group's stored adgroup_payload always carries it,
+    // so the 20x duplication replay (which reuses this payload verbatim) never
+    // hits that mismatch.
+    p.optimization_event = "FORM";
   }
   return p;
 }

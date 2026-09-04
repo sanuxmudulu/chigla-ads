@@ -94,6 +94,30 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, prel
   const agBase = cleanPayload(row.adgroup_payload, ADGROUP_STRIP);
   const adBase = row.ad_payload ? cleanPayload(row.ad_payload, AD_STRIP) : null;
 
+  // TikTok requires every ad group under the same CBO campaign to send the
+  // EXACT optimization_event of the first ad group, even for objectives (like
+  // LEAD_GENERATION/INSTANT_PAGE) where it's never required at create time —
+  // TikTok just auto-assigns one internally (e.g. "FORM") and then enforces it
+  // on every later ad group: "Please follow the same 'optimization_event' of
+  // the first adgroup...". buildAdgroupPayload() now sets this explicitly for
+  // new campaigns, but a row registered before that fix has no such key in its
+  // stored adgroup_payload — self-heal by reading the LIVE value straight off
+  // the real initial ad group (the authority) once per cycle, never guessed.
+  if (!agBase.optimization_event) {
+    try {
+      const live = await mcpCall(client, "adgroup_get", {
+        advertiser_id: advId,
+        filtering: { adgroup_ids: [row.initial_adgroup_id] },
+        fields: ["optimization_event"],
+      });
+      const ev = live?.list?.[0]?.optimization_event;
+      if (ev) agBase.optimization_event = ev;
+    } catch (_) {
+      // best-effort — if this fails, adgroup_create's own rejection (if any)
+      // still drives the normal per-copy retry/give-up path below.
+    }
+  }
+
   let madeThisCycle = 0;
   while (created < target && madeThisCycle < DUPES_PER_CYCLE) {
     if (Date.now() > deadlineMs) break;
