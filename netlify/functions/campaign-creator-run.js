@@ -128,7 +128,7 @@ async function resources(supabase, body) {
     // form library and are only listable by sweeping page_get(library_id).
     if (type === "LEAD_GENERATION") {
       try {
-        const { forms, diag } = await listBcForms(client, { deadlineMs: deadline });
+        const { forms, diag } = await listBcForms(client, { deadlineMs: deadline - 8000, cacheKey: String(connectionId) });
         for (const f of forms) if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "bc" });
         out.form_debug = diag;
         if (diag && diag.errors && diag.errors.length) {
@@ -169,16 +169,22 @@ async function resources(supabase, body) {
       }
       approvedSeen += 1;
 
+      // Identity discovery is only for the optional dropdown ("Auto" is the
+      // default and always works), so only probe the first few accounts — this
+      // keeps the preflight well under TikTok's MCP rate limit.
       const bcId = adv.bc_id || conn.bc_id || null;
-      try {
-        const ids = await listBcIdentities(client, advId, bcId);
-        for (const x of ids) {
-          const cur = idMeta.get(x.identity_id) || { ...x, count: 0 };
-          cur.count += 1;
-          idMeta.set(x.identity_id, cur);
+      if (approvedSeen <= 3) {
+        try {
+          const ids = await listBcIdentities(client, advId, bcId);
+          for (const x of ids) {
+            const cur = idMeta.get(x.identity_id) || { ...x, count: 0 };
+            cur.count += 1;
+            idMeta.set(x.identity_id, cur);
+          }
+        } catch (err) {
+          row.notes.push(`identities unavailable (${err.message})`);
         }
-      } catch (err) {
-        row.notes.push(`identities unavailable (${err.message})`);
+        await new Promise((r) => setTimeout(r, 250));
       }
 
       if (type === "LEAD_GENERATION") {
@@ -219,9 +225,10 @@ async function resources(supabase, body) {
 
   // Identity: "Auto" (each Spark code's own identity) is always available and is
   // the default; connected BC identities are offered as additional choices.
+  // (BC identities are probed on only the first few accounts, so no coverage %.)
   out.identities = [
-    { ...AUTO_IDENTITY, count: approvedSeen, total: approvedSeen },
-    ...[...idMeta.values()].map((x) => ({ ...x, total: approvedSeen })),
+    { ...AUTO_IDENTITY },
+    ...[...idMeta.values()].map((x) => ({ identity_id: x.identity_id, identity_type: x.identity_type, name: x.name })),
   ];
 
   if (type === "LEAD_GENERATION") {
@@ -363,8 +370,10 @@ async function createBatch(supabase, body) {
   const identityArg = identityAuto ? { auto: true } : { identity_id: identityId, identity_type: identityType };
 
   await withClient(supabase, conn, async (client) => {
-    // One lookup of the BC form-library map for the whole Lead Gen batch.
-    const libMap = type === "LEAD_GENERATION" ? await formLibraryMap(client) : new Map();
+    // The BC form-library map is only needed when the form was picked by NAME
+    // (no page_id) — a rare fallback. An explicit form_id is used verbatim.
+    const needLibMap = type === "LEAD_GENERATION" && !formId && !!formName;
+    const libMap = needLibMap ? await formLibraryMap(client) : new Map();
 
     for (let i = 0; i < advertiserIds.length; i++) {
       const advId = advertiserIds[i];

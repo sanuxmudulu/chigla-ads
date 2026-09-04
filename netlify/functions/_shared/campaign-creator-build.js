@@ -331,20 +331,52 @@ function pagesFrom(resp) {
 // page_get(library_id). So the BC-wide form list = sweep page_get over every
 // library. page_get has no bc_id parameter and there is no dedicated BC-forms
 // endpoint — this sweep is the only way.
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const _isRateLimit = (msg) => /rate limit|too many request|429|qps|frequenc|please try again|请求过于频繁/i.test(String(msg || ""));
+
+// mcpCall + backoff retry on TikTok's rate limiter (the open MCP is aggressively
+// throttled). Only retries rate-limit errors; everything else throws immediately.
+async function mcpThrottled(client, name, args, { tries = 5, base = 1200, deadlineMs } = {}) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await mcpCall(client, name, args);
+    } catch (err) {
+      lastErr = err;
+      if (!_isRateLimit(err.message)) throw err;
+      const wait = Math.min(base * 2 ** i, 8000) + Math.floor(Math.random() * 400);
+      if (deadlineMs && Date.now() + wait > deadlineMs) break;
+      await _sleep(wait);
+    }
+  }
+  throw lastErr;
+}
+
+// In-process cache for the BC form list — the operator iterates the wizard, and
+// a warm Lambda/Vercel instance should not re-sweep every time. 90s TTL.
+let _bcFormCache = { key: null, at: 0, forms: null, diag: null };
+const BC_FORM_TTL_MS = 90 * 1000;
+
 async function listFormLibraries(client, diag) {
   const out = [];
   let page = 1;
   for (;;) {
     let d;
     try {
-      d = await mcpCall(client, "page_library_get", { page, page_size: 50 });
+      d = await mcpThrottled(client, "page_library_get", { page, page_size: 50 });
     } catch (err) {
       if (diag) diag.errors.push(`page_library_get p${page}: ${err.message}`);
       break;
     }
     for (const lib of d?.list || []) {
       const libId = String(lib.library_id || "");
-      if (libId) out.push({ library_id: libId, library_name: lib.library_name || null, advertiser_id: String(lib.advertiser_id || "") });
+      if (libId)
+        out.push({
+          library_id: libId,
+          library_name: lib.library_name || null,
+          advertiser_id: String(lib.advertiser_id || ""),
+          create_time: lib.create_time || lib.update_time || null,
+        });
     }
     const info = d?.page_info || {};
     if (!info.total_page || page >= info.total_page) break;
@@ -363,55 +395,67 @@ async function formLibraryMap(client) {
   return map;
 }
 
-// One page_get by library_id OR advertiser_id, trying with and without the
-// PUBLISHED filter. Throws on MCP error so the caller can record it.
-async function _formsFrom(client, key) {
-  const base = { business_type: "LEAD_GEN", page_size: 100, ...key };
-  const seen = new Map();
-  for (const extra of [{ status: "PUBLISHED" }, {}]) {
-    let d;
-    try {
-      d = await mcpCall(client, "page_get", { ...base, ...extra });
-    } catch (err) {
-      if (extra.status) continue; // retry once without the filter
-      throw err;
-    }
-    for (const p of pagesFrom(d)) {
-      const id = p.page_id;
-      if (id && !seen.has(id)) seen.set(id, { id, name: p.name, status: p.status || null });
-    }
-    if (seen.size) break; // got results — no need to widen
-  }
-  return [...seen.values()];
+// One page_get (by library_id OR advertiser_id) for published Lead Gen forms.
+// Throttled + retried. Throws on non-rate-limit MCP error.
+async function _formsFrom(client, key, opts) {
+  const d = await mcpThrottled(
+    client,
+    "page_get",
+    { business_type: "LEAD_GEN", status: "PUBLISHED", page_size: 100, ...key },
+    opts
+  );
+  return pagesFrom(d).map((p) => ({ id: p.page_id, name: p.name, status: p.status || null }));
 }
 
-// Every Lead Gen Instant Form visible to the BC. Sweeps every form library from
-// page_library_get. -> { forms: [{id,name}], diag }
-async function listBcForms(client, { deadlineMs } = {}) {
+// Every Lead Gen Instant Form visible to the BC. Sweeps form libraries SERIALLY
+// (TikTok's open MCP rate-limits hard) newest-first, with a per-call pause and
+// backoff. Caches the result for BC_FORM_TTL_MS. -> { forms: [{id,name}], diag }
+async function listBcForms(client, { deadlineMs, cacheKey } = {}) {
+  if (cacheKey && _bcFormCache.key === cacheKey && Date.now() - _bcFormCache.at < BC_FORM_TTL_MS && _bcFormCache.forms) {
+    return { forms: _bcFormCache.forms, diag: { ..._bcFormCache.diag, cached: true } };
+  }
+
   const diag = { libraries: 0, scanned: 0, withForms: 0, errors: [] };
   const libs = await listFormLibraries(client, diag);
+  // Newest library first — a freshly-made form's library tends to be recent, so
+  // we usually hit the forms within the first few calls.
+  libs.sort((a, b) => (Date.parse(b.create_time || 0) || 0) - (Date.parse(a.create_time || 0) || 0));
   diag.libraries = libs.length;
 
   const byId = new Map();
-  const BATCH = 6;
-  for (let i = 0; i < libs.length; i += BATCH) {
-    if (deadlineMs && Date.now() > deadlineMs) {
-      diag.errors.push(`deadline reached after ${diag.scanned}/${libs.length} libraries`);
+  const MAX_SCAN = 22; // hard cap regardless of deadline
+  const MAX_AFTER_HIT = 4; // libraries to keep checking once forms are found
+  let afterHit = -1;
+  for (const lib of libs) {
+    if (diag.scanned >= MAX_SCAN) {
+      diag.errors.push(`stopped at ${MAX_SCAN}-library cap`);
       break;
     }
-    const chunk = libs.slice(i, i + BATCH);
-    const results = await Promise.allSettled(chunk.map((l) => _formsFrom(client, { library_id: l.library_id })));
-    results.forEach((res, j) => {
-      diag.scanned += 1;
-      if (res.status === "rejected") {
-        diag.errors.push(`lib ${chunk[j].library_id}: ${res.reason?.message || res.reason}`);
-        return;
+    if (deadlineMs && Date.now() > deadlineMs) {
+      diag.errors.push(`deadline after ${diag.scanned}/${libs.length} libraries`);
+      break;
+    }
+    diag.scanned += 1;
+    try {
+      const rows = await _formsFrom(client, { library_id: lib.library_id }, { deadlineMs });
+      if (rows.length) {
+        diag.withForms += 1;
+        if (afterHit < 0) afterHit = 0;
       }
-      if (res.value.length) diag.withForms += 1;
-      for (const f of res.value) if (!byId.has(f.id)) byId.set(f.id, f);
-    });
+      for (const f of rows) if (f.id && !byId.has(f.id)) byId.set(f.id, f);
+    } catch (err) {
+      diag.errors.push(`lib ${lib.library_id}: ${err.message}`);
+    }
+    if (afterHit >= 0 && afterHit++ >= MAX_AFTER_HIT) {
+      diag.stoppedEarly = true;
+      break; // forms found + a few more libraries checked
+    }
+    await _sleep(220); // stay under the MCP's burst limit
   }
-  return { forms: [...byId.values()].map((f) => ({ id: f.id, name: f.name })), diag };
+
+  const forms = [...byId.values()].map((f) => ({ id: f.id, name: f.name }));
+  if (cacheKey && forms.length) _bcFormCache = { key: cacheKey, at: Date.now(), forms, diag };
+  return { forms, diag };
 }
 
 // Published Lead Gen forms visible to ONE ad account (its own route + its library).
@@ -484,10 +528,10 @@ async function listBcIdentities(client, advertiserId, bcId) {
   }
   let d;
   try {
-    d = await mcpCall(client, "identity_get", args);
+    d = await mcpThrottled(client, "identity_get", args, { tries: 3 });
   } catch (_) {
     // Retry without the BC filter (account may not have a BC-authorized identity).
-    d = await mcpCall(client, "identity_get", { advertiser_id: String(advertiserId), page_size: 100 });
+    d = await mcpThrottled(client, "identity_get", { advertiser_id: String(advertiserId), page_size: 100 }, { tries: 3 });
   }
   const list = d?.identity_list || d?.list || [];
   return list
