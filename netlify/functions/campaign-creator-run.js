@@ -35,12 +35,15 @@ const {
   fmtLocal,
   resolveCardImageUrl,
   listInstantForms,
+  formLibraryMap,
   listInstantPages,
   newestInstantPage,
   listBcIdentities,
   instantPageConversion,
   createOneCampaign,
 } = require("./_shared/campaign-creator-build");
+
+const AUTO_IDENTITY = { identity_id: "__AUTO__", identity_type: "AUTO", name: "Auto — use each Spark code's own identity" };
 
 const advApproved = (a) => String(a?.status || "").toUpperCase() === "STATUS_ENABLE";
 const uniq = (a) => [...new Set(a)];
@@ -114,11 +117,14 @@ async function resources(supabase, body) {
   };
 
   const deadline = Date.now() + 45000;
-  let identitySets = [];
-  let formSets = [];
+  let approvedSeen = 0;
+  const idMeta = new Map(); // identity_id -> { identity_id, identity_type, name, count }
+  const formMeta = new Map(); // lower(name) -> { name, id, count }
   let eventSets = [];
 
   await withClient(supabase, conn, async (client) => {
+    const libMap = type === "LEAD_GENERATION" ? await formLibraryMap(client) : new Map();
+
     for (const advId of advertiserIds) {
       if (Date.now() > deadline) {
         out.blockers.push("Preflight stopped early (too many accounts) — reduce the batch or try again.");
@@ -141,32 +147,38 @@ async function resources(supabase, body) {
         continue;
       }
       if (!advApproved(adv)) {
+        // Suspended accounts are shown for context but NEVER queried and NEVER
+        // affect the form / identity lists.
         row.notes.push("Suspended — will be skipped");
         out.advertisers.push(row);
         continue;
       }
+      approvedSeen += 1;
 
       const bcId = adv.bc_id || conn.bc_id || null;
       try {
         const ids = await listBcIdentities(client, advId, bcId);
-        identitySets.push(new Set(ids.map((x) => x.identity_id)));
-        if (!out.__idMeta) out.__idMeta = new Map();
-        for (const x of ids) out.__idMeta.set(x.identity_id, x);
+        for (const x of ids) {
+          const cur = idMeta.get(x.identity_id) || { ...x, count: 0 };
+          cur.count += 1;
+          idMeta.set(x.identity_id, cur);
+        }
       } catch (err) {
         row.notes.push(`identities unavailable (${err.message})`);
-        identitySets.push(new Set());
       }
 
       if (type === "LEAD_GENERATION") {
         try {
-          const forms = await listInstantForms(client, advId);
-          formSets.push(new Set(forms.map((f) => f.id)));
-          if (!out.__formMeta) out.__formMeta = new Map();
-          for (const f of forms) out.__formMeta.set(f.id, f);
-          if (!forms.length) row.notes.push("no published Instant Form");
+          const forms = await listInstantForms(client, advId, libMap.get(advId));
+          if (!forms.length) row.notes.push("no published Instant Form in this account");
+          for (const f of forms) {
+            const key = String(f.name || f.id).trim().toLowerCase();
+            const cur = formMeta.get(key) || { name: f.name || f.id, id: f.id, count: 0 };
+            cur.count += 1;
+            formMeta.set(key, cur);
+          }
         } catch (err) {
           row.notes.push(`Instant Forms unavailable (${err.message})`);
-          formSets.push(new Set());
         }
       } else {
         try {
@@ -192,31 +204,29 @@ async function resources(supabase, body) {
     out.blockers.push(`Preflight failed: ${err.message}`);
   });
 
-  // Identities usable across EVERY selected (approved) advertiser.
-  const approvedCount = out.advertisers.filter((r) => !r.notes.some((n) => /Suspended|not under/.test(n))).length;
-  if (identitySets.length) {
-    const inter = intersect(identitySets);
-    out.identities = [...inter].map((id) => out.__idMeta?.get(id)).filter(Boolean);
-    if (!out.identities.length) {
-      out.blockers.push("No single TikTok identity is available across all selected advertiser accounts.");
-    }
-  }
+  // Identity: "Auto" (each Spark code's own identity) is always available and is
+  // the default; connected BC identities are offered as additional choices.
+  out.identities = [
+    { ...AUTO_IDENTITY, count: approvedSeen, total: approvedSeen },
+    ...[...idMeta.values()].map((x) => ({ ...x, total: approvedSeen })),
+  ];
+
   if (type === "LEAD_GENERATION") {
-    const inter = intersect(formSets);
-    out.forms = [...inter].map((id) => out.__formMeta?.get(id)).filter(Boolean);
-    if (!out.forms.length && approvedCount) {
-      out.blockers.push("No single published Instant Form is shared by all selected advertiser accounts.");
+    // Every published Lead Gen form found in ANY selected Approved account, one
+    // entry per name. NOT an intersection. Each campaign uses its own account's
+    // form with the chosen name.
+    out.forms = [...formMeta.values()].map((f) => ({ name: f.name, id: f.id, count: f.count, total: approvedSeen }));
+    out.forms.sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name)));
+    if (approvedSeen && !out.forms.length) {
+      out.blockers.push("None of the selected Approved accounts has a published Instant Form. Create one in TikTok first.");
     }
   } else {
-    const inter = intersect(eventSets);
-    out.sales_events = [...inter];
-    if (!out.sales_events.length && approvedCount) {
+    out.sales_events = [...intersect(eventSets)];
+    if (!out.sales_events.length && approvedSeen) {
       out.blockers.push("No single Instant Page conversion event is available across all selected advertiser accounts.");
     }
   }
 
-  delete out.__idMeta;
-  delete out.__formMeta;
   return json(200, out);
 }
 
@@ -248,9 +258,11 @@ async function createBatch(supabase, body) {
   const minute = Number(body.schedule?.minute);
   const sparkCodes = Array.isArray(body.spark_codes) ? body.spark_codes.map((s) => String(s)) : splitLines(body.spark_codes);
   const postLinks = Array.isArray(body.post_links) ? body.post_links.map((s) => String(s).trim()) : splitLines(body.post_links);
-  const identityId = String(body.identity_id || "");
-  const identityType = String(body.identity_type || "BC_AUTH_TT");
-  const formId = body.form_id ? String(body.form_id) : null;
+  const identityId = String(body.identity_id || "__AUTO__");
+  const identityType = String(body.identity_type || "AUTO");
+  const identityAuto = identityId === "__AUTO__" || identityType === "AUTO";
+  const formName = body.form_name ? String(body.form_name).trim() : "";
+  const formId = body.form_id ? String(body.form_id) : null; // optional exact-id hint
   const salesEvent = body.sales_event ? String(body.sales_event) : null;
 
   // ---- static validation ----
@@ -260,7 +272,7 @@ async function createBatch(supabase, body) {
   if (!base) return json(400, { error: "Enter a campaign name base." });
   if (!(Number.isInteger(hour) && hour >= 0 && hour <= 23)) return json(400, { error: "Pick a valid schedule hour (0–23)." });
   if (!(Number.isInteger(minute) && minute >= 0 && minute <= 59)) return json(400, { error: "Pick a valid schedule minute (0–59)." });
-  if (!identityId) return json(400, { error: "Select a TikTok identity." });
+  if (!identityAuto && !identityId) return json(400, { error: "Select a TikTok identity, or choose Auto." });
   if (sparkCodes.length !== advertiserIds.length) {
     return json(400, { error: `Spark codes (${sparkCodes.length}) must match selected accounts (${advertiserIds.length}).` });
   }
@@ -278,7 +290,7 @@ async function createBatch(supabase, body) {
       return json(400, { error: `Post links must be https tiktok.com URLs: "${l.slice(0, 60)}"` });
     }
   }
-  if (type === "LEAD_GENERATION" && !formId) return json(400, { error: "Select an Instant Form." });
+  if (type === "LEAD_GENERATION" && !formName) return json(400, { error: "Select an Instant Form." });
 
   // ---- template config ----
   let config, campaignType;
@@ -325,8 +337,12 @@ async function createBatch(supabase, body) {
 
   const results = [];
   const deadline = Date.now() + 52000;
+  const identityArg = identityAuto ? { auto: true } : { identity_id: identityId, identity_type: identityType };
 
   await withClient(supabase, conn, async (client) => {
+    // One lookup of the BC form-library map for the whole Lead Gen batch.
+    const libMap = type === "LEAD_GENERATION" ? await formLibraryMap(client) : new Map();
+
     for (let i = 0; i < advertiserIds.length; i++) {
       const advId = advertiserIds[i];
       const adv = byId.get(advId);
@@ -361,8 +377,9 @@ async function createBatch(supabase, body) {
           scheduleMinute: minute,
           sparkCode: sparkCodes[i],
           postUrl: postLinks[i],
-          identity: { identity_id: identityId, identity_type: identityType },
-          formId,
+          identity: identityArg,
+          form: type === "LEAD_GENERATION" ? { name: formName, id: formId } : null,
+          libraryId: libMap.get(advId) || null,
           salesEvent,
           cardImageUrl,
         });
@@ -410,6 +427,8 @@ async function createBatch(supabase, body) {
           status: "Created",
           campaign_id: created.campaign_id,
           instant_page_name: created.instant_page_name || null,
+          instant_form_id: created.instant_form_id || null,
+          identity_used: created.identity_used || null,
           schedule_local: created.schedule_local,
           schedule_tz: created.schedule_tz,
           warnings: warnings.length ? warnings : undefined,

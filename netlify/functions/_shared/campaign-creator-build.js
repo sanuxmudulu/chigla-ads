@@ -322,14 +322,82 @@ function pagesFrom(resp) {
     .filter(Boolean);
 }
 
-async function listInstantForms(client, advertiserId) {
-  const d = await mcpCall(client, "page_get", {
-    advertiser_id: String(advertiserId),
-    business_type: "LEAD_GEN",
-    status: "PUBLISHED",
-    page_size: 100,
-  });
-  return pagesFrom(d).map((p) => ({ id: p.page_id, name: p.name }));
+// Business Center form libraries, keyed by the ad account they belong to.
+// A library is the BC-side container for an ad account's Lead Gen forms + leads.
+// -> Map<advertiser_id, library_id>
+async function formLibraryMap(client) {
+  const map = new Map();
+  try {
+    let page = 1;
+    for (;;) {
+      const d = await mcpCall(client, "page_library_get", { page, page_size: 50 });
+      for (const lib of d?.list || []) {
+        const advId = String(lib.advertiser_id || "");
+        const libId = String(lib.library_id || "");
+        if (advId && libId && !map.has(advId)) map.set(advId, libId);
+      }
+      const info = d?.page_info || {};
+      if (!info.total_page || page >= info.total_page) break;
+      page += 1;
+      if (page > 40) break;
+    }
+  } catch (_) {
+    /* BC form libraries unavailable — the advertiser route below still works */
+  }
+  return map;
+}
+
+// Published Lead Gen Instant Forms usable by ONE ad account. Queries both the
+// ad-account route (forms created in the account) and, when known, the account's
+// BC form-library route (forms migrated to the Business Center) and merges by id.
+// Instant Forms are ad-account scoped for /ad/create/ (page_id must belong to the
+// advertiser) — there is no BC-wide "one shared form for every account".
+async function listInstantForms(client, advertiserId, libraryId) {
+  const byId = new Map();
+  const add = (rows) => {
+    for (const p of rows) if (!byId.has(p.page_id)) byId.set(p.page_id, { id: p.page_id, name: p.name });
+  };
+  try {
+    const d = await mcpCall(client, "page_get", {
+      advertiser_id: String(advertiserId),
+      business_type: "LEAD_GEN",
+      status: "PUBLISHED",
+      page_size: 100,
+    });
+    add(pagesFrom(d));
+  } catch (_) {
+    /* try the library route */
+  }
+  if (libraryId) {
+    try {
+      const d = await mcpCall(client, "page_get", {
+        library_id: String(libraryId),
+        business_type: "LEAD_GEN",
+        status: "PUBLISHED",
+        page_size: 100,
+      });
+      add(pagesFrom(d));
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return [...byId.values()];
+}
+
+// Resolve the Instant Form to use for ONE advertiser from the operator's pick.
+// The pick is by NAME (the same form is normally recreated per account with the
+// same name); an exact page_id match wins when present. -> page_id | throws.
+async function resolveAdvertiserForm(client, advertiserId, libraryId, pick) {
+  const forms = await listInstantForms(client, advertiserId, libraryId);
+  if (!forms.length) throw new Error("this account has no published Instant Form");
+  if (pick.id) {
+    const byId = forms.find((f) => String(f.id) === String(pick.id));
+    if (byId) return byId.id;
+  }
+  const want = String(pick.name || "").trim().toLowerCase();
+  const byName = forms.find((f) => String(f.name || "").trim().toLowerCase() === want);
+  if (byName) return byName.id;
+  throw new Error(`no published Instant Form named "${pick.name}" in this account`);
 }
 
 async function listInstantPages(client, advertiserId) {
@@ -532,8 +600,9 @@ async function createOneCampaign({
   scheduleMinute,
   sparkCode,
   postUrl,
-  identity, // { identity_id, identity_type }
-  formId, // Lead Gen: chosen Instant Form id
+  identity, // { identity_id, identity_type } | { auto: true }
+  form, // Lead Gen: { name, id? } — resolved to this advertiser's own form
+  libraryId, // Lead Gen: this advertiser's BC form-library id (optional)
   salesEvent, // Sales: chosen Instant Page conversion event
   cardImageUrl, // resolved public URL when interactive card enabled, else null
 }) {
@@ -562,14 +631,23 @@ async function createOneCampaign({
     const event = salesEvent && conv.events.includes(salesEvent) ? salesEvent : conv.events[0];
     sales = { goal: conv.goal, event };
   } else {
-    // Lead Gen — the caller validated the form exists for this advertiser.
-    pageId = String(formId);
-    pageName = null;
+    // Lead Gen — resolve THIS advertiser's own Instant Form by the operator's pick.
+    pageId = await resolveAdvertiserForm(client, advId, libraryId, form || {});
+    pageName = form?.name || null;
   }
 
+  // Identity: an explicit BC identity, or "auto" = the Spark code's own identity.
+  const resolvedIdentity =
+    identity && identity.auto
+      ? { identity_id: spark.identity_id, identity_type: "AUTH_CODE" }
+      : { identity_id: identity.identity_id, identity_type: identity.identity_type };
+  if (!resolvedIdentity.identity_id) {
+    throw new Error("could not resolve an ad identity (Spark code returned none and no identity was selected)");
+  }
   const identityWithBc = {
-    ...identity,
-    identity_authorized_bc_id: identity.identity_type === "BC_AUTH_TT" ? String(bcId || advertiser.bc_id || "") : undefined,
+    ...resolvedIdentity,
+    identity_authorized_bc_id:
+      resolvedIdentity.identity_type === "BC_AUTH_TT" ? String(bcId || advertiser.bc_id || "") : undefined,
   };
 
   // ---- interactive card (best-effort — never blocks the campaign) ----
@@ -700,7 +778,8 @@ async function createOneCampaign({
       ad_payload: adPayloadStored,
       post_url: postUrl,
       instant_page_name: pageName,
-      instant_form_id: type === "LEAD_GENERATION" ? String(formId) : null,
+      instant_form_id: type === "LEAD_GENERATION" ? String(pageId) : null,
+      identity_used: identityWithBc.identity_type,
       schedule_local: scheduleLocal.localLabel,
       schedule_tz: tz,
       warnings,
@@ -736,6 +815,8 @@ module.exports = {
   driveDirectUrl,
   imageDimensions,
   listInstantForms,
+  formLibraryMap,
+  resolveAdvertiserForm,
   listInstantPages,
   newestInstantPage,
   listBcIdentities,

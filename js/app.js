@@ -1615,26 +1615,30 @@ const ccState = {
     links: "",
     resources: null,
     resLoading: false,
-    identityId: "",
-    identityType: "BC_AUTH_TT",
-    formId: "",
+    identityId: "__AUTO__",
+    identityType: "AUTO",
+    formName: "",
     salesEvent: "",
   },
+  minimized: false, // true = modal hidden but the draft is kept for resume
 };
 
 function wireCampaignCreatorEvents() {
   document.getElementById("toolsCampaignCreatorBtn").addEventListener("click", openCampaignCreatorModal);
-  document.getElementById("closeCampaignCreatorModal").addEventListener("click", closeCampaignCreatorModal);
+  // X and backdrop MINIMIZE (keep the draft) — Cancel is the explicit discard.
+  document.getElementById("closeCampaignCreatorModal").addEventListener("click", minimizeCampaignCreator);
+  const minBtn = document.getElementById("ccMinimizeModal");
+  if (minBtn) minBtn.addEventListener("click", minimizeCampaignCreator);
   document.getElementById("campaignCreatorModal").addEventListener("click", (e) => {
-    if (e.target.id === "campaignCreatorModal") closeCampaignCreatorModal();
+    if (e.target.id === "campaignCreatorModal") minimizeCampaignCreator();
   });
 
   // Home
   document.getElementById("ccNewTemplateBtn").addEventListener("click", () => openTplWizard(null));
   document.getElementById("ccTemplateList").addEventListener("click", onCcTemplateListClick);
 
-  // Template wizard nav
-  const closeToHome = () => ccShowView("home");
+  // Template wizard nav — Cancel discards the template draft.
+  const closeToHome = () => { ccResetTplDraft(); ccShowView("home"); };
   document.getElementById("ccTplCancel1").addEventListener("click", closeToHome);
   document.getElementById("ccTplCancel2").addEventListener("click", closeToHome);
   document.getElementById("ccTplCancel3").addEventListener("click", closeToHome);
@@ -1686,8 +1690,8 @@ function wireCampaignCreatorEvents() {
     renderTplLocChips();
   });
 
-  // Runtime wizard nav
-  const runCancel = () => ccShowView("home");
+  // Runtime wizard nav — Cancel discards the run draft.
+  const runCancel = () => { ccResetRunDraft(); ccShowView("home"); };
   for (const n of [1, 2, 3, 4, 5, 6]) {
     const c = document.getElementById(`ccRunCancel${n}`);
     if (c) c.addEventListener("click", runCancel);
@@ -1700,7 +1704,7 @@ function wireCampaignCreatorEvents() {
   document.getElementById("ccRunNext4").addEventListener("click", () => runGoStep(5));
   document.getElementById("ccRunNext5").addEventListener("click", () => runGoStep(6));
   document.getElementById("ccRunCreate").addEventListener("click", submitCampaignCreator);
-  document.getElementById("ccRunDone").addEventListener("click", closeCampaignCreatorModal);
+  document.getElementById("ccRunDone").addEventListener("click", () => { ccResetRunDraft(); closeCampaignCreatorModal(); });
 
   document.getElementById("ccRunBcSelect").addEventListener("change", (e) => {
     ccState.run.connectionId = e.target.value;
@@ -1730,8 +1734,12 @@ function wireCampaignCreatorEvents() {
   document.getElementById("ccRunMinute").addEventListener("change", (e) => { ccState.run.minute = +e.target.value; renderCcTzList(); });
   document.getElementById("ccRunSpark").addEventListener("input", (e) => { ccState.run.spark = e.target.value; renderCcSparkCounts(); });
   document.getElementById("ccRunLinks").addEventListener("input", (e) => { ccState.run.links = e.target.value; renderCcSparkCounts(); });
-  document.getElementById("ccRunIdentity").addEventListener("change", (e) => { ccState.run.identityId = e.target.value; syncCcRunNext5(); });
-  document.getElementById("ccRunForm").addEventListener("change", (e) => { ccState.run.formId = e.target.value; syncCcRunNext5(); });
+  document.getElementById("ccRunIdentity").addEventListener("change", (e) => {
+    ccState.run.identityId = e.target.value;
+    ccState.run.identityType = e.target.selectedOptions[0]?.dataset.type || "AUTO";
+    syncCcRunNext5();
+  });
+  document.getElementById("ccRunForm").addEventListener("change", (e) => { ccState.run.formName = e.target.value; syncCcRunNext5(); });
   document.getElementById("ccRunEvent").addEventListener("change", (e) => { ccState.run.salesEvent = e.target.value; syncCcRunNext5(); });
 
   // hour / minute options
@@ -1748,9 +1756,17 @@ function wireCampaignCreatorEvents() {
 
 // ---- modal / view plumbing ----
 
+// Reopen: if the user minimized mid-flow, resume exactly where they were.
 async function openCampaignCreatorModal() {
   closeToolsDrawer();
   document.getElementById("campaignCreatorModal").classList.add("open");
+
+  if (ccState.minimized) {
+    ccState.minimized = false;
+    ccRestoreDom();
+    return;
+  }
+
   ccShowView("home");
   document.getElementById("ccTemplateList").innerHTML = `<p class="cc-empty">Loading templates…</p>`;
   try {
@@ -1771,6 +1787,107 @@ async function openCampaignCreatorModal() {
 
 function closeCampaignCreatorModal() {
   document.getElementById("campaignCreatorModal").classList.remove("open");
+}
+
+// Minimize — hide the modal but keep the full draft (step, template, accounts,
+// name, schedule, spark codes, post links, identity, form, template inputs).
+// Session only; reopening from Tools resumes it.
+function minimizeCampaignCreator() {
+  if (ccState.view !== "home") {
+    ccSnapshotDom();
+    ccState.minimized = true;
+  }
+  document.getElementById("campaignCreatorModal").classList.remove("open");
+}
+
+function ccResetRunDraft() {
+  ccState.minimized = false;
+  ccState.run = {
+    template: null, connectionId: null, selected: new Set(), step: 1, base: "",
+    hour: 8, minute: 0, spark: "", links: "", resources: null, resLoading: false,
+    identityId: "__AUTO__", identityType: "AUTO", formName: "", salesEvent: "",
+  };
+}
+function ccResetTplDraft() {
+  ccState.minimized = false;
+  ccState.tpl.id = null;
+}
+
+// Read every live input into ccState so the draft survives a minimize.
+function ccSnapshotDom() {
+  const g = (id) => document.getElementById(id);
+  if (ccState.view === "tpl") {
+    const d = ccState.tpl;
+    d.name = g("ccTplName").value.trim();
+    d.cbo = g("ccTplCbo").checked;
+    d.budget = g("ccTplBudget").value;
+    d.gender = g("ccTplGender").value;
+    d.cta = g("ccTplCta").value;
+    d.text = g("ccTplText").value;
+    d.cardEnabled = g("ccTplCard").checked;
+    d.cardUrl = g("ccTplCardUrl").value.trim();
+    d.step = ccState.tpl.step;
+  } else if (ccState.view === "run") {
+    const r = ccState.run;
+    r.base = g("ccRunBase").value;
+    r.hour = +g("ccRunHour").value;
+    r.minute = +g("ccRunMinute").value;
+    r.spark = g("ccRunSpark").value;
+    r.links = g("ccRunLinks").value;
+    if (!g("ccRunIdentity").disabled && g("ccRunIdentity").value) {
+      r.identityId = g("ccRunIdentity").value;
+      r.identityType = g("ccRunIdentity").selectedOptions[0]?.dataset.type || "AUTO";
+    }
+    if (!g("ccRunForm").disabled && g("ccRunForm").value) r.formName = g("ccRunForm").value;
+  }
+}
+
+// Rebuild the DOM from ccState after a resume.
+function ccRestoreDom() {
+  if (ccState.view === "tpl") {
+    const d = ccState.tpl;
+    const g = (id) => document.getElementById(id);
+    g("ccTplName").value = d.name;
+    g("ccTplCbo").checked = d.cbo;
+    g("ccTplBudget").value = d.budget;
+    g("ccTplGender").value = d.gender;
+    g("ccTplCta").value = d.cta;
+    g("ccTplText").value = d.text;
+    g("ccTplCard").checked = d.cardEnabled;
+    g("ccTplCardWrap").hidden = !d.cardEnabled;
+    g("ccTplCardUrl").value = d.cardUrl;
+    syncTplTypeToggle();
+    renderTplAgeChips();
+    renderTplLocChips();
+    ccShowView("tpl");
+    tplGoBack(d.step || 1);
+  } else if (ccState.view === "run") {
+    const r = ccState.run;
+    ccShowView("run");
+    if (r.template) {
+      document.getElementById("ccRunTplLabel").innerHTML =
+        `Template: <strong>${escapeHtml(r.template.name)}</strong> · ${r.template.campaign_type === "SALES" ? "Sales" : "Lead Generation"}`;
+    }
+    const sel = document.getElementById("ccRunBcSelect");
+    sel.innerHTML = tiktokState.connections.map((c) => `<option value="${c.id}">${escapeHtml(connBcOptionLabel(c))}</option>`).join("");
+    if (r.connectionId) sel.value = r.connectionId;
+    renderCcRunAdvertisers();
+    document.getElementById("ccRunBase").value = r.base;
+    document.getElementById("ccRunHour").value = String(r.hour);
+    document.getElementById("ccRunMinute").value = String(r.minute);
+    document.getElementById("ccRunSpark").value = r.spark;
+    document.getElementById("ccRunLinks").value = r.links;
+    const step = r.step || 1;
+    if (step >= 5 && r.resources) renderCcResourcesFromState();
+    runGoStepShow(step);
+    if (step === 2) renderCcNamePreview();
+    if (step === 3) renderCcTzList();
+    if (step === 4) renderCcSparkCounts();
+    if (step === 6) renderCcReview();
+  } else {
+    ccShowView("home");
+    renderCcTemplateList();
+  }
 }
 
 function ccShowView(v) {
@@ -2010,17 +2127,9 @@ function ccSelectedAdvs() {
 
 function openRunWizard(tpl) {
   if (!tpl) return;
+  ccResetRunDraft();
   const r = ccState.run;
   r.template = tpl;
-  r.selected.clear();
-  r.step = 1;
-  r.base = "";
-  r.spark = "";
-  r.links = "";
-  r.resources = null;
-  r.identityId = "";
-  r.formId = "";
-  r.salesEvent = "";
   ccShowView("run");
   document.getElementById("ccRunTplLabel").innerHTML =
     `Template: <strong>${escapeHtml(tpl.name)}</strong> · ${tpl.campaign_type === "SALES" ? "Sales" : "Lead Generation"} · $${Number((tpl.config || {}).daily_budget || 0)}/day`;
@@ -2158,44 +2267,66 @@ async function loadCcResources() {
   document.getElementById("ccRunResBody").hidden = true;
   document.getElementById("ccRunNext5").disabled = true;
   try {
-    const res = await campaignCreatorResources(r.connectionId, type, ccSelectedAdvs().map((a) => String(a.advertiser_id)));
-    r.resources = res;
+    r.resources = await campaignCreatorResources(r.connectionId, type, ccSelectedAdvs().map((a) => String(a.advertiser_id)));
   } catch (err) {
     document.getElementById("ccRunResLoading").hidden = true;
     document.getElementById("ccRunErr5").textContent = err.message;
     return;
   }
+  // A fresh preflight resets the identity/form picks so stale values can't carry.
+  r.identityId = "__AUTO__";
+  r.identityType = "AUTO";
+  r.formName = "";
+  renderCcResourcesFromState();
+}
+
+// Render step-5 controls purely from ccState.run.resources (also used on resume).
+function renderCcResourcesFromState() {
+  const r = ccState.run;
+  const res = r.resources || {};
+  const type = r.template.campaign_type;
+  const isLead = type === "LEAD_GENERATION";
+
   document.getElementById("ccRunResLoading").hidden = true;
   document.getElementById("ccRunResBody").hidden = false;
 
-  const res = r.resources;
   const idSel = document.getElementById("ccRunIdentity");
-  idSel.innerHTML = (res.identities || []).length
-    ? res.identities.map((x) => `<option value="${escapeHtml(x.identity_id)}" data-type="${escapeHtml(x.identity_type || "BC_AUTH_TT")}">${escapeHtml(x.name || x.identity_id)}</option>`).join("")
-    : `<option value="">— none available across all accounts —</option>`;
-  r.identityId = idSel.value || "";
-  r.identityType = idSel.selectedOptions[0]?.dataset.type || "BC_AUTH_TT";
-  idSel.onchange = () => {
-    r.identityId = idSel.value;
-    r.identityType = idSel.selectedOptions[0]?.dataset.type || "BC_AUTH_TT";
-    syncCcRunNext5();
-  };
+  idSel.innerHTML = (res.identities || [])
+    .map((x) => {
+      const cov = x.total && x.count < x.total ? ` (in ${x.count}/${x.total})` : "";
+      return `<option value="${escapeHtml(x.identity_id)}" data-type="${escapeHtml(x.identity_type || "AUTO")}">${escapeHtml(x.name || x.identity_id)}${escapeHtml(cov)}</option>`;
+    })
+    .join("");
+  if (![...idSel.options].some((o) => o.value === r.identityId)) r.identityId = idSel.value || "__AUTO__";
+  idSel.value = r.identityId;
+  r.identityType = idSel.selectedOptions[0]?.dataset.type || "AUTO";
 
-  const isLead = type === "LEAD_GENERATION";
   document.getElementById("ccRunFormWrap").hidden = !isLead;
   document.getElementById("ccRunEventWrap").hidden = isLead;
+
   if (isLead) {
     const fs = document.getElementById("ccRunForm");
-    fs.innerHTML = (res.forms || []).length
-      ? res.forms.map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}</option>`).join("")
-      : `<option value="">— no form shared by all accounts —</option>`;
-    r.formId = fs.value || "";
+    const forms = res.forms || [];
+    fs.innerHTML = forms.length
+      ? [`<option value="">— select a form —</option>`]
+          .concat(
+            forms.map((f) => {
+              const cov = f.total && f.count < f.total ? ` — in ${f.count}/${f.total} accounts` : "";
+              return `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)}${escapeHtml(cov)}</option>`;
+            })
+          )
+          .join("")
+      : `<option value="">— no published Instant Form found —</option>`;
+    if (![...fs.options].some((o) => o.value === r.formName)) r.formName = "";
+    fs.value = r.formName;
   } else {
     const es = document.getElementById("ccRunEvent");
-    es.innerHTML = (res.sales_events || []).length
-      ? res.sales_events.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join("")
+    const events = res.sales_events || [];
+    es.innerHTML = events.length
+      ? events.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join("")
       : `<option value="">— no conversion event available —</option>`;
-    r.salesEvent = es.value || "";
+    if (![...es.options].some((o) => o.value === r.salesEvent)) r.salesEvent = es.value || "";
+    es.value = r.salesEvent;
   }
 
   const notes = [];
@@ -2212,7 +2343,8 @@ function syncCcRunNext5() {
   const res = r.resources || {};
   const isLead = r.template.campaign_type === "LEAD_GENERATION";
   const hardBlock = (res.blockers || []).length > 0;
-  const ok = !hardBlock && !!r.identityId && (isLead ? !!r.formId : !!r.salesEvent);
+  // Identity is never a blocker (Auto always works). Lead Gen needs a form name.
+  const ok = !hardBlock && (isLead ? !!r.formName : !!r.salesEvent);
   document.getElementById("ccRunNext5").disabled = !ok;
 }
 
@@ -2232,7 +2364,7 @@ function renderCcReview() {
     `<div class="row"><span>Identity</span><strong>${escapeHtml(idName)}</strong></div>` +
     `<div class="row"><span>Start time</span><strong>${hh}:${mm} in each account's timezone</strong></div>` +
     (isLead
-      ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(document.getElementById("ccRunForm").selectedOptions[0]?.textContent || "—")}</strong></div>`
+      ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(r.formName || "—")} <em>(each account uses its own form with this name)</em></strong></div>`
       : `<div class="row"><span>Conversion event</span><strong>${escapeHtml(r.salesEvent || "—")}</strong></div>`) +
     advs
       .map((a, i) => {
@@ -2270,12 +2402,13 @@ async function submitCampaignCreator() {
       post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       identity_id: r.identityId,
       identity_type: r.identityType,
-      form_id: r.formId || undefined,
+      form_name: r.formName || undefined,
       sales_event: r.salesEvent || undefined,
     });
     renderCcResults(res.results || []);
     runGoStepShow(7);
     ccSteps("ccRunSteps", 6);
+    ccState.run.step = 7;
     loadTiktokCampaigns();
     runCampaignCreatorDuplication();
   } catch (e2) {

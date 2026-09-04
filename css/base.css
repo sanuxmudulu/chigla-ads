@@ -833,3 +833,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .cc-time { display: flex; align-items: center; gap: 8px; }
 .cc-time select { width: auto; min-width: 74px; }
 .cc-review .rev-acct { font-weight: 600; color: var(--text-1); font-size: 12px; margin-top: 6px; }
+.cc-header-btns { display: flex; align-items: center; gap: 4px; }
+.cc-header-btns button { background: none; border: none; color: var(--text-2); font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
+.cc-header-btns button:hover { color: var(--text-1); background: var(--bg-2); }
+.cc-review .row strong em { color: var(--text-2); font-style: normal; font-weight: 400; }
