@@ -32,6 +32,14 @@ const AGE_LABELS = {
 const GENDERS = ["GENDER_UNLIMITED", "GENDER_MALE", "GENDER_FEMALE"];
 const GENDER_LABELS = { GENDER_UNLIMITED: "All", GENDER_MALE: "Male", GENDER_FEMALE: "Female" };
 
+// Device Operating System targeting. TikTok's real `adgroup_create`/`adgroup_update`
+// field is `operating_systems: ["ANDROID"|"IOS"]` (array, but "only one value is
+// allowed" per the schema) — there is no "ALL" enum. "ALL" here is our own
+// template-config sentinel meaning "omit operating_systems entirely", which is
+// TikTok's normal unrestricted/broad device behavior.
+const DEVICE_OS_VALUES = ["ALL", "ANDROID", "IOS"];
+const DEVICE_OS_LABELS = { ALL: "All", ANDROID: "Android", IOS: "iOS" };
+
 // Curated single-select CTA values (TikTok's exact enum tokens). `creative_cta_recommend_get`
 // can return more, but these are the safe, always-valid ones for website / lead ads.
 const CTA_VALUES = [
@@ -87,6 +95,7 @@ function normalizeTemplateConfig(raw) {
   ages.sort((a, b) => AGE_GROUPS.indexOf(a) - AGE_GROUPS.indexOf(b));
 
   const gender = GENDERS.includes(c.gender) ? c.gender : "GENDER_UNLIMITED";
+  const deviceOs = DEVICE_OS_VALUES.includes(c.device_os) ? c.device_os : "ALL";
   const cta = CTA_VALUES.includes(c.cta) ? c.cta : DEFAULT_CTA;
   const adText = typeof c.ad_text === "string" ? c.ad_text.trim().slice(0, 100) : "";
 
@@ -108,6 +117,7 @@ function normalizeTemplateConfig(raw) {
       location_labels: locationLabels.slice(0, locationIds.length),
       age_groups: ages,
       gender,
+      device_os: deviceOs,
       cta,
       ad_text: adText,
       interactive_card: card,
@@ -691,6 +701,12 @@ function buildAdgroupPayload({ advertiserId, campaignId, type, config, scheduleU
     comment_disabled: false,
     request_id: reqId(),
   };
+  // Device OS targeting: omit `operating_systems` entirely for "All" (TikTok's
+  // normal unrestricted/broad device behavior — there is no "ALL" enum value).
+  // Applies identically to LEAD_GENERATION and SALES.
+  if (config.device_os === "ANDROID" || config.device_os === "IOS") {
+    p.operating_systems = [config.device_os];
+  }
 
   if (type === "SALES") {
     p.promotion_type = "WEBSITE";
@@ -958,6 +974,8 @@ module.exports = {
   AGE_LABELS,
   GENDERS,
   GENDER_LABELS,
+  DEVICE_OS_VALUES,
+  DEVICE_OS_LABELS,
   CTA_VALUES,
   DEFAULT_CTA,
   CARD_IMAGE_W,

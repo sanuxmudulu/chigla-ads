@@ -1599,6 +1599,7 @@ const ccState = {
     locations: [], // [{ id, name }]
     ages: new Set(CC_AGE_OPTS.map((o) => o.v)),
     gender: "GENDER_UNLIMITED",
+    deviceOs: "ALL",
     cta: "LEARN_MORE",
     text: "",
     cardEnabled: false,
@@ -1852,6 +1853,7 @@ function ccSnapshotDom() {
     d.cbo = g("ccTplCbo").checked;
     d.budget = g("ccTplBudget").value;
     d.gender = g("ccTplGender").value;
+    d.deviceOs = g("ccTplDeviceOs").value;
     d.cta = g("ccTplCta").value;
     d.text = g("ccTplText").value;
     d.cardEnabled = g("ccTplCard").checked;
@@ -1891,6 +1893,7 @@ function ccRestoreDom() {
     g("ccTplCbo").checked = d.cbo;
     g("ccTplBudget").value = d.budget;
     g("ccTplGender").value = d.gender;
+    g("ccTplDeviceOs").value = d.deviceOs;
     g("ccTplCta").value = d.cta;
     g("ccTplText").value = d.text;
     g("ccTplCard").checked = d.cardEnabled;
@@ -2011,6 +2014,7 @@ function openTplWizard(tpl) {
   d.locations = (c.location_ids || []).map((id, i) => ({ id: String(id), name: (c.location_labels || [])[i] || String(id) }));
   d.ages = new Set((c.age_groups && c.age_groups.length ? c.age_groups : CC_AGE_OPTS.map((o) => o.v)));
   d.gender = c.gender || "GENDER_UNLIMITED";
+  d.deviceOs = c.device_os || "ALL";
   d.cta = c.cta || "LEARN_MORE";
   d.text = c.ad_text || "";
   d.cardEnabled = !!(c.interactive_card && c.interactive_card.enabled);
@@ -2023,6 +2027,7 @@ function openTplWizard(tpl) {
   document.getElementById("ccTplCbo").checked = d.cbo;
   document.getElementById("ccTplBudget").value = d.budget;
   document.getElementById("ccTplGender").value = d.gender;
+  document.getElementById("ccTplDeviceOs").value = d.deviceOs;
   document.getElementById("ccTplCta").value = d.cta;
   document.getElementById("ccTplText").value = d.text;
   document.getElementById("ccTplCard").checked = d.cardEnabled;
@@ -2108,6 +2113,7 @@ function tplGoStep(n) {
   }
   if (n === 3) {
     ccState.tpl.gender = document.getElementById("ccTplGender").value;
+    ccState.tpl.deviceOs = document.getElementById("ccTplDeviceOs").value;
     if (!ccState.tpl.locations.length) return (tplGoBack(2), (document.getElementById("ccTplErr2").textContent = "Add at least one location."));
     if (!ccState.tpl.ages.size) return (tplGoBack(2), (document.getElementById("ccTplErr2").textContent = "Select at least one age range."));
   }
@@ -2137,6 +2143,7 @@ async function saveTplWizard() {
     location_labels: d.locations.map((l) => l.name),
     age_groups: CC_AGE_OPTS.map((o) => o.v).filter((v) => d.ages.has(v)),
     gender: d.gender,
+    device_os: d.deviceOs,
     cta: d.cta,
     ad_text: d.text,
     interactive_card: { enabled: d.cardEnabled, image_url: d.cardUrl },
@@ -2266,9 +2273,29 @@ function ccTzGroups() {
   return groups;
 }
 
+// Default schedule for a timezone: that advertiser's current local time minus
+// 3 hours. Computed by shifting the actual UTC instant (never by subtracting on
+// the wall-clock string), then re-reading date/hour/minute AS SEEN in `tz` — so
+// a local time within 3h of midnight correctly rolls the date back a day too
+// (e.g. 02:30 Sep 5 local -> 23:30 Sep 4 local), with no separate rollover logic
+// needed. Still well inside TikTok's accepted "up to ~12h in the past" window.
+function ccMinus3hDefault(tz) {
+  const shifted = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  try {
+    const date = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(shifted);
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(shifted);
+    const hour = parseInt(parts.find((p) => p.type === "hour")?.value || "8", 10) % 24;
+    const minute = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
+    return { date, hour, minute };
+  } catch (_) {
+    return { date: ccLocalDate(tz), hour: 8, minute: 0 };
+  }
+}
+
 // One schedule block per advertiser timezone. Each block: tz name, current local
-// time, account count, and a DATE + HOUR + MINUTE picker. The date defaults to
-// today in that timezone. Existing picks in ccState.run.schedules are preserved.
+// time, account count, and a DATE + HOUR + MINUTE picker. The date/time default
+// to that timezone's current local time minus 3 hours (see ccMinus3hDefault).
+// Existing picks in ccState.run.schedules are preserved.
 function renderCcTzBlocks() {
   const groups = ccTzGroups();
   const sched = ccState.run.schedules;
@@ -2282,15 +2309,18 @@ function renderCcTzBlocks() {
 
   const html = [...groups.entries()]
     .map(([tz, advs]) => {
-      if (!sched[tz]) sched[tz] = { date: ccLocalDate(tz), hour: 8, minute: 0 };
+      if (!sched[tz]) sched[tz] = ccMinus3hDefault(tz);
       const s = sched[tz];
       if (!s.date) s.date = ccLocalDate(tz);
       const today = ccLocalDate(tz);
+      // min stays "today" normally; relaxed to the (earlier) default date so the
+      // minus-3h default is never marked invalid by its own min attribute.
+      const minDate = s.date < today ? s.date : today;
       return `<div class="cc-tzblock" data-tz="${escapeHtml(tz)}">
         <div class="cc-tzblock-head"><strong>${escapeHtml(tz)}</strong>
           <span>${advs.length} account${advs.length === 1 ? "" : "s"} · now ${escapeHtml(ccLocalTime(tz))}</span></div>
         <div class="cc-tzblock-fields">
-          <label>Date <input type="date" data-sched="date" value="${escapeHtml(s.date)}" min="${escapeHtml(today)}" /></label>
+          <label>Date <input type="date" data-sched="date" value="${escapeHtml(s.date)}" min="${escapeHtml(minDate)}" /></label>
           <label>Time <select data-sched="hour">${hourOpts(s.hour)}</select> : <select data-sched="minute">${minOpts(s.minute)}</select></label>
         </div>
       </div>`;
