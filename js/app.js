@@ -1836,8 +1836,19 @@ function ccResetRunDraft() {
   ccState.run = {
     template: null, connectionId: null, selected: new Set(), step: 1, base: "",
     hour: 8, minute: 0, spark: "", links: "", resources: null, resLoading: false,
-    schedules: {}, formId: "", formLabel: "", formValidated: false,
+    schedules: {}, formId: "", formLabel: "", formValidated: false, submitting: false,
   };
+}
+
+// Clear the Review step's "Creating…" progress text/error so a leftover
+// message from an earlier run in this session can never resurface (it only
+// ever gets set by submitCampaignCreator — nothing else writes to it, so
+// nothing else needs to clear it, but every place a review can appear does).
+function ccResetCcRunProgress() {
+  const prog = document.getElementById("ccRunProgress");
+  const err = document.getElementById("ccRunErr6");
+  if (prog) { prog.textContent = ""; prog.className = "eng-placeholder"; }
+  if (err) err.textContent = "";
 }
 function ccResetTplDraft() {
   ccState.minimized = false;
@@ -2193,6 +2204,10 @@ function openRunWizard(tpl) {
   document.getElementById("ccRunFormId").value = "";
   document.getElementById("ccRunFormIdStatus").textContent = "";
   document.getElementById("ccRunTzBlocks").innerHTML = "";
+  // A prior run in this same session can leave the "Creating…" progress text
+  // and error behind (submitCampaignCreator never cleared it on success) — a
+  // fresh run must never inherit it, or Review looks like it auto-submitted.
+  ccResetCcRunProgress();
 
   const sel = document.getElementById("ccRunBcSelect");
   if (!tiktokState.connections.length) {
@@ -2520,6 +2535,11 @@ function syncCcRunNext5() {
 }
 
 function renderCcReview() {
+  // Rendering Review is display-only — it never calls the create API. Always
+  // clear any leftover "Creating…" state from an earlier run first, so a
+  // re-render (Back/Next, resume, revisiting this step) can never look like
+  // it auto-submitted.
+  ccResetCcRunProgress();
   const r = ccState.run;
   const advs = ccSelectedAdvs();
   const base = r.base.trim();
@@ -2553,9 +2573,17 @@ function renderCcReview() {
       .join("");
 }
 
+// The ONLY place that calls the create API — wired solely to the Review
+// step's explicit "Create Campaigns" button click (see wireCampaignCreatorEvents).
+// Guarded against double-clicks/re-entry two ways: the button is disabled
+// synchronously before any await (so a real double-click can't queue a second
+// call), and r.submitting is checked/set for defense in depth against any
+// programmatic re-invocation.
 async function submitCampaignCreator() {
   const r = ccState.run;
   const btn = document.getElementById("ccRunCreate");
+  if (r.submitting || btn.disabled) return;
+  r.submitting = true;
   const prog = document.getElementById("ccRunProgress");
   const err = document.getElementById("ccRunErr6");
   err.textContent = "";
@@ -2577,6 +2605,7 @@ async function submitCampaignCreator() {
       form_id: r.formId || undefined,
     });
     renderCcResults(res.results || []);
+    ccResetCcRunProgress(); // done with the Review step — never leave "Creating…" behind
     runGoStepShow(7);
     ccSteps("ccRunSteps", 6);
     ccState.run.step = 7;
@@ -2588,6 +2617,8 @@ async function submitCampaignCreator() {
     btn.textContent = "Create Campaigns";
     prog.textContent = "";
     prog.className = "eng-placeholder";
+  } finally {
+    r.submitting = false;
   }
 }
 
@@ -3026,15 +3057,19 @@ function closeToolsDrawer() {
 }
 
 // ============================== TIKTOK ACCOUNTS MODAL ==============================
-// Authentication + connection storage + advertiser discovery/selection only.
-// All token handling lives in the tiktok-* Netlify functions.
+// Informational / connection-management only: BC selector, advertiser list
+// (Approved/Suspended), affiliate network, Refresh Data, Disconnect, Connect
+// New BC. All token handling lives in the tiktok-* Netlify functions.
+//
+// There is no per-account "tracked" selection here anymore — Detailed Metrics
+// scopes itself automatically off Campaign Creator campaigns (see
+// tiktok-campaigns.js scopedAdvertisers). The `tracked` column/backend action
+// still exist for compatibility but nothing in this modal writes to them.
 
 // connections: [{id,label,tiktok_email,tiktok_display_name,bc_id,bc_name,bc_count,...}]
 // advertisers: [{connection_id,advertiser_id,...,tracked}]
 // selectedConnectionId: which connection the management view shows (multi-BC only)
-// trackedDraft: { "<connId>::<advId>": bool } — unsaved checkbox changes, survives
-//               switching the BC dropdown until Save.
-const tiktokState = { connections: [], advertisers: [], selectedConnectionId: null, trackedDraft: {}, savingNetwork: null };
+const tiktokState = { connections: [], advertisers: [], selectedConnectionId: null, savingNetwork: null };
 let tiktokPwHandler = null;
 
 function openAccountsModal() {
@@ -3046,31 +3081,16 @@ function closeAccountsModal() {
 
 function wireTiktokEvents() {
   document.getElementById("tiktokConnectBtn").addEventListener("click", connectTiktok);
-  document.getElementById("tiktokSaveTrackedBtn").addEventListener("click", saveTiktokTracked);
   document.getElementById("tiktokRefreshBtn").addEventListener("click", () => refreshTiktokData());
   document.getElementById("tiktokBcSelect").addEventListener("change", (e) => {
     tiktokState.selectedConnectionId = e.target.value;
     renderSelectedConnection();
   });
 
+  // Connection-management only: network toggle + disconnect. Account tracking
+  // selection was removed (Detailed Metrics now scopes itself off Campaign
+  // Creator campaigns — see tiktok-campaigns.js scopedAdvertisers).
   const wrap = document.getElementById("tiktokConnectionsWrap");
-  wrap.addEventListener("change", (e) => {
-    const all = e.target.closest("input[data-tk-selectall-approved]");
-    if (all) {
-      const connId = all.dataset.tkConnId;
-      const conn = tiktokState.connections.find((x) => x.id === connId);
-      const advs = conn ? advsForConnection(conn.id).filter((a) => advIsApproved(a)) : [];
-      for (const a of advs) tiktokState.trackedDraft[`${connId}::${a.advertiser_id}`] = all.checked;
-      renderSelectedConnection();
-      updateSaveButton();
-      return;
-    }
-    const cb = e.target.closest('input[type="checkbox"][data-tk-adv]');
-    if (cb) {
-      tiktokState.trackedDraft[`${cb.dataset.tkConnId}::${cb.dataset.tkAdvId}`] = cb.checked;
-      updateSaveButton();
-    }
-  });
   wrap.addEventListener("click", (e) => {
     const netBtn = e.target.closest("[data-tk-net]");
     if (netBtn && !netBtn.classList.contains("active")) {
@@ -3089,13 +3109,6 @@ function wireTiktokEvents() {
   document.getElementById("tiktokPwModal").addEventListener("click", (e) => {
     if (e.target.id === "tiktokPwModal") closeTiktokPwModal();
   });
-}
-
-function updateSaveButton() {
-  const n = Object.keys(tiktokState.trackedDraft).length;
-  const btn = document.getElementById("tiktokSaveTrackedBtn");
-  btn.disabled = n === 0;
-  btn.textContent = n ? `Save tracked accounts (${n})` : "Save tracked accounts";
 }
 
 // TikTok advertiser `status` is kept raw in storage; only the label shown to
@@ -3129,11 +3142,6 @@ function advsForConnection(connId) {
         advApprovedRank(a) - advApprovedRank(b) ||
         String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
     );
-}
-
-function isAdvTracked(connId, adv) {
-  const draft = tiktokState.trackedDraft[`${connId}::${adv.advertiser_id}`];
-  return draft === undefined ? !!adv.tracked : draft;
 }
 
 async function renderTiktokAccounts() {
@@ -3178,7 +3186,6 @@ function renderSelectedConnection() {
   if (!tiktokState.connections.length) {
     summaryEl.innerHTML = "";
     wrap.innerHTML = `<p class="tk-empty">No TikTok accounts connected yet. Click “Connect TikTok Ads” and authorize in this browser profile.</p>`;
-    updateSaveButton();
     return;
   }
 
@@ -3193,15 +3200,8 @@ function renderSelectedConnection() {
     <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
 
   const rows = advs.length
-    ? advs.map((a) => tiktokAdvRow(c.id, a)).join("")
+    ? advs.map((a) => tiktokAdvRow(a)).join("")
     : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
-
-  const approvedAdvs = advs.filter((a) => advIsApproved(a));
-  const allApprovedTracked =
-    approvedAdvs.length > 0 && approvedAdvs.every((a) => isAdvTracked(c.id, a));
-  const selectAll = approvedAdvs.length
-    ? `<div class="tk-selectall"><label><input type="checkbox" data-tk-selectall-approved data-tk-conn-id="${c.id}" ${allApprovedTracked ? "checked" : ""} /> Select all Approved accounts</label></div>`
-    : "";
 
   const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
   const saving = tiktokState.savingNetwork === c.id;
@@ -3223,27 +3223,26 @@ function renderSelectedConnection() {
           </button>
         </div>
       </div>
-      ${selectAll}
       <div class="tk-adv-list">${rows}</div>
     </div>`;
-
-  updateSaveButton();
 }
 
-function tiktokAdvRow(connectionId, a) {
+// Informational row only — no selection control. Detailed Metrics scopes
+// itself automatically (tracked OR has a Campaign Creator campaign; see
+// scopedAdvertisers in tiktok-campaigns.js), so there's nothing to pick here.
+function tiktokAdvRow(a) {
   const meta = [a.advertiser_id, a.currency || null, a.display_timezone || a.timezone || null]
     .filter(Boolean)
     .join(" · ");
   const approved = advIsApproved(a);
   return `
-    <label class="tk-adv">
-      <input type="checkbox" data-tk-adv data-tk-adv-id="${escapeHtml(a.advertiser_id)}" data-tk-conn-id="${connectionId}" ${isAdvTracked(connectionId, a) ? "checked" : ""} />
+    <div class="tk-adv">
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
         <span class="tk-adv-meta">${escapeHtml(meta)}</span>
       </span>
       <span class="tk-adv-status ${approved ? "ok" : "warn"}">${advStatusLabel(a)}</span>
-    </label>`;
+    </div>`;
 }
 
 // ---- admin password (only for connect + disconnect) ----
@@ -3300,45 +3299,11 @@ async function connectTiktok() {
   }
 }
 
-// Persists the unsaved checkbox draft (across ALL connections) then auto-syncs
-// campaigns. No password.
-async function saveTiktokTracked() {
-  const selections = Object.entries(tiktokState.trackedDraft).map(([key, tracked]) => {
-    const [connection_id, advertiser_id] = key.split("::");
-    return { connection_id, advertiser_id, tracked };
-  });
-  if (!selections.length) return;
-
-  const btn = document.getElementById("tiktokSaveTrackedBtn");
-  btn.disabled = true;
-  btn.textContent = "Saving…";
-  try {
-    await postTiktokAction({ action: "track", selections });
-    tiktokState.trackedDraft = {};
-    // Reflect the saved values locally so a re-render shows them ticked.
-    for (const s of selections) {
-      const a = tiktokState.advertisers.find(
-        (x) => x.connection_id === s.connection_id && String(x.advertiser_id) === String(s.advertiser_id)
-      );
-      if (a) a.tracked = s.tracked;
-    }
-    const trackedCount = tiktokState.advertisers.filter((a) => a.tracked).length;
-    setStatus(`Saved — tracking ${trackedCount} advertiser account(s). Syncing campaigns…`);
-    renderSelectedConnection();
-    // Full sync so campaigns from every affected BC are consistent.
-    await refreshTiktokData({ silent: true, allBcs: true });
-  } catch (err) {
-    setStatus(`Couldn't save selection: ${err.message}`, true);
-  } finally {
-    btn.textContent = "Save tracked accounts";
-    updateSaveButton();
-  }
-}
-
 // "Refresh Data" — re-scan advertiser accounts (Approved/Suspended, new
-// accounts), re-discover tracked campaigns + ad/adgroup statuses, refresh
-// budgets/balances. Scoped to the currently selected BC unless allBcs. Does not
-// change which accounts are tracked. No password.
+// accounts), re-discover campaigns + ad/adgroup statuses, refresh budgets/
+// balances, for every scoped advertiser (tracked, or has a Campaign Creator
+// campaign — see tiktok-campaigns.js scopedAdvertisers). Scoped to the
+// currently selected BC unless allBcs. No password.
 async function refreshTiktokData({ silent, allBcs } = {}) {
   const btn = document.getElementById("tiktokRefreshBtn");
   btn.disabled = true;
@@ -3393,15 +3358,12 @@ async function disconnectConnection(connectionId) {
   const conn = tiktokState.connections.find((c) => c.id === connectionId);
   const password = await askTiktokPassword({
     title: "Disconnect TikTok connection",
-    hint: `Enter the dashboard password to remove “${conn ? connBcName(conn) : "this connection"}” and its tracked accounts.`,
+    hint: `Enter the dashboard password to remove “${conn ? connBcName(conn) : "this connection"}” and its advertiser accounts.`,
   });
   if (!password) return;
   try {
     await postTiktokAction({ password, action: "disconnect", connection_id: connectionId });
     if (tiktokState.selectedConnectionId === connectionId) tiktokState.selectedConnectionId = null;
-    for (const k of Object.keys(tiktokState.trackedDraft)) {
-      if (k.startsWith(`${connectionId}::`)) delete tiktokState.trackedDraft[k];
-    }
     setStatus("TikTok connection removed.");
     await renderTiktokAccounts();
     await loadTiktokCampaigns();

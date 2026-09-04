@@ -1,13 +1,13 @@
 // GET  /.netlify/functions/tiktok-campaigns
-//        -> { campaigns: [...] }   (campaigns inside tracked advertiser accounts)
+//        -> { campaigns: [...] }   (every row currently stored in tiktok_campaigns)
 //
 // POST /.netlify/functions/tiktok-campaigns   { action, ... }
 //        "sync"                : { connection_id? } — re-scan advertisers + re-discover
 //                                campaigns. Scoped to one Business Center when
 //                                connection_id is given ("Refresh Data"), else all.
-//        "budgets"            : advertiser-account caps + BC balances (all tracked)
+//        "budgets"            : advertiser-account caps + BC balances (all scoped accounts)
 //        "metrics"            : today's live TikTok campaign spend/CPM/CPA for every
-//                                tracked advertiser (NY date; one report per advertiser).
+//                                scoped advertiser (NY date; one report per advertiser).
 //                                Also snapshots cumulative spend per NY hour and
 //                                returns `spendToday` for the Live Performance graph.
 //        "set_advertiser_budget": { advertiser_id, budget_mode, budget } — write
@@ -21,9 +21,13 @@
 //                                batch (against the campaign's tiktok_post_url) as an
 //                                engagement_orders row. NEVER contacts an SMM service.
 //
-// None of these need the admin password. Every action is restricted server-side
-// to campaigns/ad groups whose advertiser account is currently `tracked`. All
-// MCP calls run here; no tokens are ever returned to the browser.
+// None of these need the admin password. Discovery/sync/metrics/budgets and
+// every per-campaign write are restricted server-side to "scoped" advertiser
+// accounts (see scopedAdvertisers): the legacy manually-`tracked` set, UNION
+// any advertiser with a Campaign Creator campaign registered
+// (campaign_creator_campaigns) — so Campaign Creator campaigns need no manual
+// tracking step at all. All MCP calls run here; no tokens are ever returned to
+// the browser.
 
 const {
   getSupabase,
@@ -143,7 +147,27 @@ async function readCampaigns(supabase) {
   return res;
 }
 
-// Loads a stored campaign row and confirms its advertiser account is tracked.
+// A campaign created through Campaign Creator never needs the old manual
+// "tracked" step — campaign_creator_campaigns is itself the authoritative
+// record that this campaign is ours to manage. Optional table (no-op false
+// until supabase/campaign_creator.sql is run).
+async function isCampaignCreatorCampaign(supabase, campaignId) {
+  try {
+    const { data } = await supabase
+      .from("campaign_creator_campaigns")
+      .select("campaign_id")
+      .eq("campaign_id", String(campaignId))
+      .maybeSingle();
+    return !!data;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Loads a stored campaign row and confirms it's ours to manage: either its
+// advertiser account is explicitly `tracked` (the legacy manual selection,
+// kept working for back-compat), or the campaign itself was created by
+// Campaign Creator — which needs no manual tracking at all.
 async function resolveTrackedCampaign(supabase, campaignId) {
   const { data: campaign } = await supabase
     .from("tiktok_campaigns")
@@ -158,7 +182,10 @@ async function resolveTrackedCampaign(supabase, campaignId) {
     .eq("connection_id", campaign.connection_id)
     .eq("advertiser_id", campaign.advertiser_id)
     .maybeSingle();
-  if (!adv || !adv.tracked) {
+  if (!adv) {
+    return { error: json(403, { error: "That advertiser account is not tracked." }) };
+  }
+  if (!adv.tracked && !(await isCampaignCreatorCampaign(supabase, campaign.campaign_id))) {
     return { error: json(403, { error: "That advertiser account is not tracked." }) };
   }
 
@@ -206,10 +233,10 @@ exports.handler = async function (event) {
     const action = body.action;
 
     // ---- read-only: advertiser account budgets + BC balance ----
-    if (action === "budgets") return budgetsForTracked(supabase);
+    if (action === "budgets") return budgetsForScopedAdvertisers(supabase);
 
     // ---- read-only: today's live TikTok campaign metrics (spend/CPM/CPA) ----
-    if (action === "metrics") return campaignMetricsForTracked(supabase);
+    if (action === "metrics") return campaignMetricsForScopedAdvertisers(supabase);
 
     // ---- read-only: engagement orders for one campaign (likes / saves / comments) ----
     if (action === "engagement_orders") {
@@ -255,9 +282,9 @@ exports.handler = async function (event) {
 
     // Writes below are NOT password-gated (per product decision): the dashboard
     // is already behind whatever protects the site, and every write is still
-    // restricted server-side to campaigns/ad groups under a TRACKED advertiser
-    // account (resolveTrackedCampaign). Only connecting / disconnecting a TikTok
-    // account still asks for the admin password.
+    // restricted server-side to a SCOPED advertiser account — tracked, or a
+    // Campaign Creator campaign (resolveTrackedCampaign). Only connecting /
+    // disconnecting a TikTok account still asks for the admin password.
 
     if (action === "delete_campaign") {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
@@ -566,14 +593,28 @@ exports.handler = async function (event) {
   }
 };
 
-// Confirms an advertiser account is tracked and returns its connection + bc_id.
+// Confirms an advertiser account is ours to manage (tracked, OR it has at
+// least one Campaign Creator campaign registered) and returns its connection
+// + bc_id.
 async function resolveTrackedAdvertiser(supabase, advertiserId) {
   const { data: advs } = await supabase
     .from("tiktok_advertisers")
     .select("connection_id, advertiser_id, tracked, bc_id, bc_name")
-    .eq("advertiser_id", String(advertiserId))
-    .eq("tracked", true);
-  const adv = (advs || [])[0];
+    .eq("advertiser_id", String(advertiserId));
+  let adv = (advs || []).find((a) => a.tracked);
+  if (!adv) {
+    try {
+      const { data: cc } = await supabase
+        .from("campaign_creator_campaigns")
+        .select("connection_id")
+        .eq("advertiser_id", String(advertiserId))
+        .limit(1);
+      const ccConnId = (cc || [])[0]?.connection_id;
+      if (ccConnId) adv = (advs || []).find((a) => String(a.connection_id) === String(ccConnId));
+    } catch (_) {
+      /* campaign_creator_campaigns not migrated — nothing to fall back to */
+    }
+  }
   if (!adv) return { error: json(403, { error: "That advertiser account is not tracked." }) };
 
   const { data: conn } = await supabase
@@ -586,18 +627,57 @@ async function resolveTrackedAdvertiser(supabase, advertiserId) {
   return { advertiser: adv, connection: conn, bcId: adv.bc_id || conn.bc_id || null };
 }
 
-// Per-advertiser budget/cap + per-BC shared balance for every tracked account.
-async function budgetsForTracked(supabase) {
-  const { data: tracked, error } = await supabase
+// Advertisers whose campaigns are discovered/synced/metered for Detailed
+// Metrics: the legacy explicitly-`tracked` set (kept working for back-compat)
+// UNION any advertiser that has at least one Campaign Creator campaign
+// registered (campaign_creator_campaigns) — so campaigns created through
+// Campaign Creator show up automatically with no manual "tracked" step, without
+// pulling in every advertiser under every connected Business Center. Optional
+// `onlyConnectionId` scopes to one connection (mirrors the old tracked-only
+// queries' `onlyConnectionId` filtering in syncAll).
+async function scopedAdvertisers(supabase, onlyConnectionId) {
+  let advQ = supabase
     .from("tiktok_advertisers")
-    .select("connection_id, advertiser_id, bc_id")
-    .eq("tracked", true);
-  if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
-  if (!tracked || !tracked.length) return json(200, { advertisers: {}, bc: {} });
+    .select("connection_id, advertiser_id, advertiser_name, status, timezone, display_timezone, bc_id, bc_name, tracked");
+  if (onlyConnectionId) advQ = advQ.eq("connection_id", onlyConnectionId);
+  const { data: allAdvs, error: advErr } = await advQ;
+  if (advErr) throw new Error(advErr.message);
+
+  const advByKey = new Map((allAdvs || []).map((a) => [`${a.connection_id}::${a.advertiser_id}`, a]));
+  const byKey = new Map();
+  for (const a of allAdvs || []) if (a.tracked) byKey.set(`${a.connection_id}::${a.advertiser_id}`, a);
+
+  try {
+    let ccQ = supabase.from("campaign_creator_campaigns").select("connection_id, advertiser_id");
+    if (onlyConnectionId) ccQ = ccQ.eq("connection_id", onlyConnectionId);
+    const { data: ccRows } = await ccQ;
+    for (const r of ccRows || []) {
+      const key = `${r.connection_id}::${r.advertiser_id}`;
+      if (!byKey.has(key)) {
+        const a = advByKey.get(key);
+        if (a) byKey.set(key, a); // only if the advertiser has actually been discovered
+      }
+    }
+  } catch (_) {
+    /* campaign_creator_campaigns not migrated yet — tracked-only is still safe */
+  }
+
+  return [...byKey.values()];
+}
+
+// Per-advertiser budget/cap + per-BC shared balance for every scoped account.
+async function budgetsForScopedAdvertisers(supabase) {
+  let scoped;
+  try {
+    scoped = await scopedAdvertisers(supabase, null);
+  } catch (err) {
+    return json(500, { error: "Supabase read failed", details: err.message });
+  }
+  if (!scoped.length) return json(200, { advertisers: {}, bc: {} });
 
   // Group by connection so we authenticate once per connection.
   const byConnection = {};
-  for (const t of tracked) (byConnection[t.connection_id] = byConnection[t.connection_id] || []).push(t);
+  for (const t of scoped) (byConnection[t.connection_id] = byConnection[t.connection_id] || []).push(t);
 
   const { serverUrl, redirectUrl } = resolveConfig();
   const advertisers = {};
@@ -631,9 +711,10 @@ async function budgetsForTracked(supabase) {
   return json(200, { advertisers, bc });
 }
 
-// Today's live TikTok campaign performance for every TRACKED advertiser account,
-// across every connection / Business Center. One report request per advertiser
-// (all its campaigns at once), one MCP client per connection.
+// Today's live TikTok campaign performance for every SCOPED advertiser account
+// (see scopedAdvertisers), across every connection / Business Center. One
+// report request per advertiser (all its campaigns at once), one MCP client
+// per connection.
 //
 // Reporting boundary: the America/New_York calendar date (dashboardToday()) —
 // the same clock as Glitchy / Mabac / daily_totals / the calendar. NOTE:
@@ -650,7 +731,7 @@ async function budgetsForTracked(supabase) {
 //   cpa, impressions, clicks, conversions } }, okAdvertiserIds: [...], errors,
 //   spendToday: { date, currentHour, cumulative, byHour: { <hour>: cumulative } } }
 //   — spendToday is for the Live Performance graph only.
-async function campaignMetricsForTracked(supabase) {
+async function campaignMetricsForScopedAdvertisers(supabase) {
   const date = dashboardToday();
 
   // NY-day rollover: any campaign whose today_* still belongs to a past date is
@@ -679,12 +760,13 @@ async function campaignMetricsForTracked(supabase) {
     /* best-effort */
   }
 
-  const { data: tracked, error } = await supabase
-    .from("tiktok_advertisers")
-    .select("connection_id, advertiser_id, timezone, display_timezone")
-    .eq("tracked", true);
-  if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
-  if (!tracked || !tracked.length) {
+  let tracked;
+  try {
+    tracked = await scopedAdvertisers(supabase, null);
+  } catch (err) {
+    return json(500, { error: "Supabase read failed", details: err.message });
+  }
+  if (!tracked.length) {
     return json(200, { ok: true, date, metrics: {}, okAdvertiserIds: [], errors: {} });
   }
 
@@ -867,40 +949,41 @@ async function persistCampaignStatus(supabase, campaignId, detail) {
     .eq("campaign_id", String(campaignId));
 }
 
-// Re-discovery for tracked advertisers. `onlyConnectionId` scopes the whole
-// operation to a single Business Center/connection ("Refresh Data" button);
-// omit it for a full sync across every connection (used after "Save tracked
-// accounts").
+// Re-discovery for scoped advertisers (see scopedAdvertisers — tracked, or has
+// a Campaign Creator campaign). `onlyConnectionId` scopes the whole operation
+// to a single Business Center/connection ("Refresh Data" button); omit it for
+// a full sync across every connection.
 async function syncAll(supabase, onlyConnectionId) {
-  const { data: allTracked, error: trackedErr } = await supabase
-    .from("tiktok_advertisers")
-    .select("connection_id, advertiser_id, advertiser_name, status, tracked, bc_id, bc_name")
-    .eq("tracked", true);
-  if (trackedErr) return json(500, { error: "Supabase read failed", details: sbErr(trackedErr) });
+  let allScoped;
+  try {
+    allScoped = await scopedAdvertisers(supabase, null); // global, for the prune decision below
+  } catch (err) {
+    return json(500, { error: "Supabase read failed", details: err.message });
+  }
 
-  const globalTrackedAdvIds = (allTracked || []).map((t) => String(t.advertiser_id));
+  const globalScopedAdvIds = allScoped.map((t) => String(t.advertiser_id));
 
-  // Prune campaigns whose advertiser is no longer tracked anywhere (only on a
+  // Prune campaigns whose advertiser is no longer scoped anywhere (only on a
   // full sync — a scoped refresh must not touch other BCs).
   if (!onlyConnectionId) {
-    if (globalTrackedAdvIds.length) {
-      await supabase.from("tiktok_campaigns").delete().not("advertiser_id", "in", `(${globalTrackedAdvIds.join(",")})`);
+    if (globalScopedAdvIds.length) {
+      await supabase.from("tiktok_campaigns").delete().not("advertiser_id", "in", `(${globalScopedAdvIds.join(",")})`);
     } else {
       await supabase.from("tiktok_campaigns").delete().neq("campaign_id", "");
-      return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked." });
+      return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked or have Campaign Creator campaigns." });
     }
   }
 
   const tracked = onlyConnectionId
-    ? (allTracked || []).filter((t) => String(t.connection_id) === String(onlyConnectionId))
-    : allTracked || [];
+    ? allScoped.filter((t) => String(t.connection_id) === String(onlyConnectionId))
+    : allScoped;
 
   if (!tracked.length) {
-    // Scoped refresh for a BC with nothing tracked -> drop its campaign rows.
+    // Scoped refresh for a BC with nothing scoped -> drop its campaign rows.
     if (onlyConnectionId) {
       await supabase.from("tiktok_campaigns").delete().eq("connection_id", onlyConnectionId);
     }
-    return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked for this Business Center." });
+    return json(200, { ok: true, campaignCount: 0, connections: 0, note: "No advertiser accounts are tracked or have Campaign Creator campaigns for this Business Center." });
   }
 
   const byConnection = {};

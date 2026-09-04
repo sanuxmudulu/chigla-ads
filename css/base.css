@@ -772,6 +772,10 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 }
 .tk-adv:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .tk-adv input { width: auto; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
+/* TikTok Ad Accounts modal rows are informational only (no selection) — unlike
+   WH Warmup's .wh-adv-list .tk-adv, which is still a clickable checkbox row. */
+#tiktokConnectionsWrap .tk-adv { cursor: default; }
+#tiktokConnectionsWrap .tk-adv:hover { border-color: var(--border); }
 .tk-adv-main { flex: 1; min-width: 0; }
 .tk-adv-name { display: block; font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tk-adv-meta { display: block; font-size: 10.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
