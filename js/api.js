@@ -334,13 +334,52 @@ export async function deleteCampaignTemplate(id) {
 
 // Per-advertiser preflight: identities/forms/instant-page events valid across ALL
 // selected accounts, plus each account's timezone + newest Instant Page.
-export async function campaignCreatorResources(connectionId, campaignType, advertiserIds) {
+// `formIds` = Instant Form IDs the operator has used before (remembered locally),
+// re-validated server-side so they appear in the dropdown with real names.
+export async function campaignCreatorResources(connectionId, campaignType, advertiserIds, formIds) {
   const res = await fetch("/.netlify/functions/campaign-creator-run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "resources", connection_id: connectionId, campaign_type: campaignType, advertiser_ids: advertiserIds }),
+    body: JSON.stringify({
+      action: "resources",
+      connection_id: connectionId,
+      campaign_type: campaignType,
+      advertiser_ids: advertiserIds,
+      form_ids: formIds || [],
+    }),
   });
   return readTiktokResponse(res, "Couldn't load campaign resources");
+}
+
+// Confirm an Instant Form ID is usable by the selected Approved accounts (uses
+// page_field_get, which resolves a form assigned to the accounts even when the
+// API won't list it). -> { ok, page_id, name, checks: [...] }
+export async function validateCampaignForm(connectionId, advertiserIds, pageId) {
+  const res = await fetch("/.netlify/functions/campaign-creator-run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "validate_form", connection_id: connectionId, advertiser_ids: advertiserIds, page_id: pageId }),
+  });
+  return readTiktokResponse(res, "Couldn't validate the Form ID");
+}
+
+// Instant Form IDs the operator has used, remembered in this browser only.
+const CC_FORMS_KEY = "chigla_cc_forms_v1";
+export function loadRememberedForms() {
+  try {
+    const raw = localStorage.getItem(CC_FORMS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((f) => f && /^\d{6,25}$/.test(String(f.id))) : [];
+  } catch (_) {
+    return [];
+  }
+}
+export function rememberForm(id, name) {
+  try {
+    const list = loadRememberedForms().filter((f) => String(f.id) !== String(id));
+    list.unshift({ id: String(id), name: name || String(id) });
+    localStorage.setItem(CC_FORMS_KEY, JSON.stringify(list.slice(0, 20)));
+  } catch (_) {}
 }
 
 // Create one campaign per selected advertiser. Partial failures come back 200

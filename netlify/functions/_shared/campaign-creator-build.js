@@ -479,6 +479,38 @@ async function listInstantForms(client, advertiserId, libraryId) {
   return [...byId.values()];
 }
 
+// A BC form assigned to ad accounts often CANNOT be listed by page_get for the
+// dashboard's token (different TikTok user than the form's owner), but it CAN be
+// resolved by id per-account via page_field_get. This is the reliable way to
+// confirm a pasted / remembered Form ID is usable, and to get its real name.
+// -> { page_id, ok, name, checks: [{advertiser_id, advertiser_name, ok, error}] }
+async function validateFormForAdvertisers(client, pageId, advertisers, { max = 3 } = {}) {
+  const id = String(pageId || "").trim();
+  const checks = [];
+  let name = null;
+  for (const adv of (advertisers || []).slice(0, Math.max(1, max))) {
+    try {
+      const d = await mcpThrottled(
+        client,
+        "page_field_get",
+        { advertiser_id: String(adv.advertiser_id), page_id: id },
+        { tries: 3 }
+      );
+      const n = d?.meta_data?.page_name || d?.page_name || d?.meta_data?.page_id || null;
+      if (n && !name) name = n;
+      checks.push({ advertiser_id: String(adv.advertiser_id), advertiser_name: adv.advertiser_name || null, ok: true });
+    } catch (err) {
+      checks.push({
+        advertiser_id: String(adv.advertiser_id),
+        advertiser_name: adv.advertiser_name || null,
+        ok: false,
+        error: err.message,
+      });
+    }
+  }
+  return { page_id: id, ok: checks.some((c) => c.ok), name, checks };
+}
+
 // Resolve the Instant Form page_id to use for ONE advertiser from the operator's
 // pick. A BC-level form is referenced by its page_id verbatim (page_get can't
 // list it per-account, but ad_create accepts it when the form is linked to the
@@ -911,6 +943,7 @@ module.exports = {
   listBcForms,
   listFormLibraries,
   formLibraryMap,
+  validateFormForAdvertisers,
   resolveAdvertiserForm,
   listInstantPages,
   newestInstantPage,

@@ -36,6 +36,7 @@ const {
   resolveCardImageUrl,
   listBcForms,
   formLibraryMap,
+  validateFormForAdvertisers,
   listInstantPages,
   newestInstantPage,
   listBcIdentities,
@@ -70,6 +71,7 @@ exports.handler = async function (event) {
       body = {};
     }
     if (body.action === "resources") return resources(supabase, body);
+    if (body.action === "validate_form") return validateFormAction(supabase, body);
     if (body.action === "create") return createBatch(supabase, body);
     return json(400, { error: `Unknown action: ${body.action}` });
   } catch (err) {
@@ -92,6 +94,34 @@ async function loadConnAndAdvertisers(supabase, connectionId, advertiserIds) {
 }
 
 // ---------------------------------------------------------------------------
+// validate_form — confirm a pasted / remembered Instant Form ID is usable by the
+// selected Approved accounts (page_field_get works cross-account for a form that
+// is assigned to the ad accounts, even when page_get can't list it).
+// ---------------------------------------------------------------------------
+
+async function validateFormAction(supabase, body) {
+  const connectionId = body.connection_id;
+  const pageId = String(body.page_id || "").trim();
+  const advertiserIds = uniq((body.advertiser_ids || []).map(String).filter(Boolean));
+  if (!connectionId || !pageId) return json(400, { error: "connection_id and page_id are required" });
+  if (!/^\d{6,25}$/.test(pageId)) return json(400, { error: "A Form ID is a long number (from the form's URL)." });
+  if (!advertiserIds.length) return json(400, { error: "Select at least one account first." });
+
+  const loaded = await loadConnAndAdvertisers(supabase, connectionId, advertiserIds);
+  if (loaded.error) return loaded.error;
+  const { conn, byId } = loaded;
+  const approved = advertiserIds.map((id) => byId.get(id)).filter((a) => a && advApproved(a));
+  if (!approved.length) return json(400, { error: "None of the selected accounts is Approved." });
+
+  try {
+    const r = await withClient(supabase, conn, (client) => validateFormForAdvertisers(client, pageId, approved));
+    return json(200, r);
+  } catch (err) {
+    return json(200, { page_id: pageId, ok: false, name: null, checks: [], error: err.message });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // resources — preflight
 // ---------------------------------------------------------------------------
 
@@ -99,6 +129,9 @@ async function resources(supabase, body) {
   const connectionId = body.connection_id;
   const type = String(body.campaign_type || "").toUpperCase();
   const advertiserIds = uniq((body.advertiser_ids || []).map(String).filter(Boolean));
+  // Form IDs the operator has used before (remembered client-side) — validated
+  // live so they show real names and only if still usable.
+  const knownFormIds = uniq((body.form_ids || []).map((s) => String(s).trim()).filter((s) => /^\d{6,25}$/.test(s))).slice(0, 12);
   if (!connectionId) return json(400, { error: "connection_id is required" });
   if (!TEMPLATE_TYPES.includes(type)) return json(400, { error: `campaign_type must be one of ${TEMPLATE_TYPES.join(", ")}` });
   if (!advertiserIds.length) return json(400, { error: "Select at least one advertiser account." });
@@ -127,6 +160,28 @@ async function resources(supabase, body) {
     // ad accounts are NOT visible via page_get(advertiser_id); they live in a
     // form library and are only listable by sweeping page_get(library_id).
     if (type === "LEAD_GENERATION") {
+      // 1. Validate remembered Form IDs first — this is the reliable path
+      //    (page_field_get resolves a form assigned to the accounts even when
+      //    page_get can't list it).
+      if (knownFormIds.length) {
+        const approvedAdvs = advertiserIds
+          .map((id) => byId.get(id))
+          .filter((a) => a && String(a.status || "").toUpperCase() === "STATUS_ENABLE");
+        for (const fid of knownFormIds) {
+          if (Date.now() > deadline - 12000) break;
+          try {
+            const v = await validateFormForAdvertisers(client, fid, approvedAdvs, { max: 1 });
+            if (v.ok && !formById.has(fid)) {
+              formById.set(fid, { id: fid, name: v.name || fid, source: "saved" });
+            }
+          } catch (_) {
+            /* skip a bad remembered id */
+          }
+        }
+      }
+
+      // 2. Best-effort BC-wide library sweep (works for connections whose token
+      //    owns the forms; often empty otherwise — non-fatal).
       try {
         const { forms, diag } = await listBcForms(client, { deadlineMs: deadline - 8000, cacheKey: String(connectionId) });
         for (const f of forms) if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "bc" });
@@ -188,17 +243,8 @@ async function resources(supabase, body) {
       }
 
       if (type === "LEAD_GENERATION") {
-        // Fallback: if the BC library sweep found nothing, also check this
-        // selected account's own page_get(advertiser_id) route.
-        if (!formById.size) {
-          try {
-            for (const f of await listInstantForms(client, advId, null)) {
-              if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "account" });
-            }
-          } catch (_) {
-            /* optional */
-          }
-        }
+        // Nothing per-account: forms come from the validated Form IDs + the
+        // best-effort BC library sweep, both done once above.
       } else {
         try {
           const pages = await listInstantPages(client, advId);
@@ -241,14 +287,11 @@ async function resources(supabase, body) {
     out.forms.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     out.form_notes = [];
     if (approvedSeen && !out.forms.length) {
-      const d = out.form_debug || {};
       out.form_notes.push(
-        `No Instant Form returned by the API (scanned ${d.libraries || 0} form libraries, ${d.withForms || 0} had forms` +
-          (d.errors && d.errors.length ? `, errors: ${d.errors.slice(0, 3).join(" | ")}` : "") +
-          `). Paste the Form ID from BC → Assets → Forms.`
+        `TikTok's API won't list this BC's forms for the dashboard connection (its token isn't the forms' owner). ` +
+          `Paste a Form ID once — open the form in BC → Assets → Forms and copy the number from its URL. ` +
+          `It's validated against your accounts and remembered for next time.`
       );
-    } else if (out.form_debug_note) {
-      out.form_notes.push(out.form_debug_note);
     }
   } else {
     out.sales_events = [...intersect(eventSets)];

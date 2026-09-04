@@ -31,6 +31,9 @@ import {
   saveCampaignTemplate,
   deleteCampaignTemplate,
   campaignCreatorResources,
+  validateCampaignForm,
+  loadRememberedForms,
+  rememberForm,
   runCampaignCreator,
 } from "./api.js";
 import { initTheme } from "./theme.js";
@@ -1580,6 +1583,7 @@ const CC_CTA_OPTS = [
   "ORDER_NOW", "CONTACT_US", "BOOK_NOW", "APPLY_NOW", "GET_QUOTE", "READ_MORE", "VIEW_NOW", "SUBSCRIBE",
 ];
 const ccCtaLabel = (v) => v.split("_").map((w) => w[0] + w.slice(1).toLowerCase()).join(" ");
+let ccFormIdTimer = null;
 
 const ccState = {
   view: "home", // home | tpl | run
@@ -1619,6 +1623,7 @@ const ccState = {
     identityType: "AUTO",
     formId: "", // Instant Form page_id (dropdown or manual)
     formLabel: "", // display name for review
+    formValidated: false, // page_field_get confirmed it works for the accounts
     salesEvent: "",
   },
   minimized: false, // true = modal hidden but the draft is kept for resume
@@ -1743,20 +1748,37 @@ function wireCampaignCreatorEvents() {
   document.getElementById("ccRunForm").addEventListener("change", (e) => {
     if (document.getElementById("ccRunFormId").value.trim()) return; // manual id wins
     ccState.run.formId = e.target.value;
-    ccState.run.formLabel = e.target.selectedOptions[0]?.textContent || e.target.value;
+    ccState.run.formLabel = (e.target.selectedOptions[0]?.textContent || e.target.value).replace(/ \((saved|account)\)$/, "");
+    ccState.run.formValidated = !!e.target.value; // dropdown items are already validated
     syncCcRunNext5();
   });
   document.getElementById("ccRunFormId").addEventListener("input", (e) => {
     const v = e.target.value.trim();
-    if (v) {
-      ccState.run.formId = v;
-      ccState.run.formLabel = `Form ID ${v}`;
-    } else {
+    const st = document.getElementById("ccRunFormIdStatus");
+    clearTimeout(ccFormIdTimer);
+    if (!v) {
+      st.textContent = "";
+      st.className = "cc-formid-status";
       const fs = document.getElementById("ccRunForm");
       ccState.run.formId = fs.value || "";
       ccState.run.formLabel = fs.selectedOptions[0]?.textContent || fs.value || "";
+      ccState.run.formValidated = false;
+      syncCcRunNext5();
+      return;
     }
+    // provisionally accept; confirm in the background
+    ccState.run.formId = v;
+    ccState.run.formLabel = `Form ID ${v}`;
+    ccState.run.formValidated = false;
     syncCcRunNext5();
+    if (!/^\d{6,25}$/.test(v)) {
+      st.textContent = "A Form ID is a long number.";
+      st.className = "cc-formid-status bad";
+      return;
+    }
+    st.textContent = "Checking…";
+    st.className = "cc-formid-status busy";
+    ccFormIdTimer = setTimeout(() => validateCcFormId(v), 600);
   });
   document.getElementById("ccRunEvent").addEventListener("change", (e) => { ccState.run.salesEvent = e.target.value; syncCcRunNext5(); });
 
@@ -1857,8 +1879,14 @@ function ccSnapshotDom() {
       r.identityType = g("ccRunIdentity").selectedOptions[0]?.dataset.type || "AUTO";
     }
     const manualId = g("ccRunFormId").value.trim();
-    if (manualId) { r.formId = manualId; r.formLabel = `Form ID ${manualId}`; }
-    else if (g("ccRunForm").value) { r.formId = g("ccRunForm").value; r.formLabel = g("ccRunForm").selectedOptions[0]?.textContent || r.formId; }
+    if (manualId) {
+      // keep the validated name if it's for this same id
+      if (r.formId !== manualId) r.formLabel = `Form ID ${manualId}`;
+      r.formId = manualId;
+    } else if (g("ccRunForm").value) {
+      r.formId = g("ccRunForm").value;
+      r.formLabel = (g("ccRunForm").selectedOptions[0]?.textContent || r.formId).replace(/ \((saved|account)\)$/, "");
+    }
   }
 }
 
@@ -1897,8 +1925,15 @@ function ccRestoreDom() {
     document.getElementById("ccRunMinute").value = String(r.minute);
     document.getElementById("ccRunSpark").value = r.spark;
     document.getElementById("ccRunLinks").value = r.links;
-    // Restore a manually-typed Form ID before the resources step re-renders.
-    document.getElementById("ccRunFormId").value = /^Form ID /.test(r.formLabel || "") ? r.formId : "";
+    // Restore the picked Form ID before the resources step re-renders. If it's
+    // not one of the dropdown options, put it back in the manual field.
+    const inList = (r.resources?.forms || []).some((f) => String(f.id) === String(r.formId));
+    document.getElementById("ccRunFormId").value = r.formId && !inList ? r.formId : "";
+    const st = document.getElementById("ccRunFormIdStatus");
+    if (st) {
+      st.textContent = r.formId && !inList && r.formValidated ? `✓ ${r.formLabel || r.formId}` : "";
+      st.className = "cc-formid-status" + (r.formId && !inList && r.formValidated ? " ok" : "");
+    }
     const step = r.step || 1;
     if (step >= 5 && r.resources) renderCcResourcesFromState();
     runGoStepShow(step);
@@ -2289,8 +2324,14 @@ async function loadCcResources() {
   document.getElementById("ccRunResLoading").hidden = false;
   document.getElementById("ccRunResBody").hidden = true;
   document.getElementById("ccRunNext5").disabled = true;
+  const rememberedIds = type === "LEAD_GENERATION" ? loadRememberedForms().map((f) => f.id) : [];
   try {
-    r.resources = await campaignCreatorResources(r.connectionId, type, ccSelectedAdvs().map((a) => String(a.advertiser_id)));
+    r.resources = await campaignCreatorResources(
+      r.connectionId,
+      type,
+      ccSelectedAdvs().map((a) => String(a.advertiser_id)),
+      rememberedIds
+    );
   } catch (err) {
     document.getElementById("ccRunResLoading").hidden = true;
     document.getElementById("ccRunErr5").textContent = err.message;
@@ -2301,7 +2342,50 @@ async function loadCcResources() {
   r.identityType = "AUTO";
   r.formId = "";
   r.formLabel = "";
+  r.formValidated = false;
+  document.getElementById("ccRunFormId").value = "";
+  document.getElementById("ccRunFormIdStatus").textContent = "";
   renderCcResourcesFromState();
+}
+
+// Confirm a manually-typed Form ID works for the selected accounts.
+async function validateCcFormId(pageId) {
+  const r = ccState.run;
+  const st = document.getElementById("ccRunFormIdStatus");
+  if (document.getElementById("ccRunFormId").value.trim() !== pageId) return; // stale
+  let res;
+  try {
+    res = await validateCampaignForm(r.connectionId, ccSelectedAdvs().map((a) => String(a.advertiser_id)), pageId);
+  } catch (err) {
+    st.textContent = `✗ ${err.message}`;
+    st.className = "cc-formid-status bad";
+    return;
+  }
+  if (document.getElementById("ccRunFormId").value.trim() !== pageId) return;
+  if (res.ok) {
+    const nm = res.name || `Form ${pageId}`;
+    r.formId = pageId;
+    r.formLabel = nm;
+    r.formValidated = true;
+    rememberForm(pageId, nm);
+    const bad = (res.checks || []).filter((c) => !c.ok).length;
+    st.textContent = `✓ ${nm}${bad ? ` — not linked to ${bad} of ${res.checks.length} checked account(s)` : ""}`;
+    st.className = bad ? "cc-formid-status busy" : "cc-formid-status ok";
+    // add/refresh the dropdown option so Review + resume show the name
+    const fs = document.getElementById("ccRunForm");
+    if (![...fs.options].some((o) => o.value === pageId)) {
+      const opt = document.createElement("option");
+      opt.value = pageId;
+      opt.textContent = `${nm} (saved)`;
+      fs.appendChild(opt);
+    }
+  } else {
+    const err = (res.checks || []).find((c) => !c.ok)?.error || res.error || "not usable by the selected accounts";
+    st.textContent = `✗ ${err}`;
+    st.className = "cc-formid-status bad";
+    r.formValidated = false;
+  }
+  syncCcRunNext5();
 }
 
 // Render step-5 controls purely from ccState.run.resources (also used on resume).
@@ -2335,22 +2419,27 @@ function renderCcResourcesFromState() {
       ? [`<option value="">— select a form —</option>`]
           .concat(
             forms.map((f) => {
-              const tag = f.source === "account" ? " (account)" : "";
+              const tag = f.source === "saved" ? " (saved)" : f.source === "account" ? " (account)" : "";
               return `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}${escapeHtml(tag)}</option>`;
             })
           )
           .join("")
-      : `<option value="">— none found via API — paste a Form ID below —</option>`;
+      : `<option value="">— paste your Form ID below —</option>`;
     const manual = document.getElementById("ccRunFormId");
-    // Keep an existing pick if it still matches a dropdown option or a manual id.
     if (manual.value.trim()) {
       r.formId = manual.value.trim();
-      r.formLabel = `Form ID ${r.formId}`;
-    } else if ([...fs.options].some((o) => o.value === r.formId) && r.formId) {
+    } else if (r.formId && [...fs.options].some((o) => o.value === r.formId)) {
       fs.value = r.formId;
+      r.formValidated = true;
+    } else if (forms.length === 1) {
+      fs.value = forms[0].id;
+      r.formId = forms[0].id;
+      r.formLabel = forms[0].name || forms[0].id;
+      r.formValidated = true;
     } else {
       r.formId = "";
       r.formLabel = "";
+      r.formValidated = false;
       fs.value = "";
     }
   } else {

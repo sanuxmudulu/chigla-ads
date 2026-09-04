@@ -837,3 +837,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .cc-header-btns button { background: none; border: none; color: var(--text-2); font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
 .cc-header-btns button:hover { color: var(--text-1); background: var(--bg-2); }
 .cc-review .row strong em { color: var(--text-2); font-style: normal; font-weight: 400; }
+.cc-formid-status { font-size: 11px; margin-top: 4px; min-height: 14px; }
+.cc-formid-status.ok { color: var(--profit); }
+.cc-formid-status.bad { color: var(--loss); }
+.cc-formid-status.busy { color: var(--text-2); }
