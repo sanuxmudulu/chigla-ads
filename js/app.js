@@ -1840,15 +1840,31 @@ function ccResetRunDraft() {
   };
 }
 
-// Clear the Review step's "Creating…" progress text/error so a leftover
-// message from an earlier run in this session can never resurface (it only
-// ever gets set by submitCampaignCreator — nothing else writes to it, so
-// nothing else needs to clear it, but every place a review can appear does).
-function ccResetCcRunProgress() {
+// Syncs the Review step's Create button + progress line to the ONE source of
+// truth for "is a create request actually in flight": ccState.run.submitting.
+// This replaced an earlier fix that just cleared the progress *text* — that
+// missed the button's own disabled/textContent, which is static DOM (the
+// button element is never recreated, only its parent step is hidden/shown),
+// so a completed run's "Creating…" / disabled=true silently carried into the
+// NEXT run and made its Review step look permanently stuck (and made
+// submitCampaignCreator's `if (btn.disabled) return` guard block the real
+// click). Call this any time Review is about to be shown — it never assumes
+// "idle", it reflects r.submitting exactly, so a genuinely in-flight request
+// (e.g. surviving a minimize/resume) still shows correctly as busy.
+function ccSyncCreateUi() {
+  const r = ccState.run;
+  const btn = document.getElementById("ccRunCreate");
   const prog = document.getElementById("ccRunProgress");
   const err = document.getElementById("ccRunErr6");
-  if (prog) { prog.textContent = ""; prog.className = "eng-placeholder"; }
-  if (err) err.textContent = "";
+  const busy = !!r.submitting;
+  if (btn) {
+    btn.disabled = busy;
+    btn.textContent = busy ? "Creating…" : "Create Campaigns";
+  }
+  if (!busy) {
+    if (prog) { prog.textContent = ""; prog.className = "eng-placeholder"; }
+    if (err) err.textContent = "";
+  }
 }
 function ccResetTplDraft() {
   ccState.minimized = false;
@@ -2204,10 +2220,10 @@ function openRunWizard(tpl) {
   document.getElementById("ccRunFormId").value = "";
   document.getElementById("ccRunFormIdStatus").textContent = "";
   document.getElementById("ccRunTzBlocks").innerHTML = "";
-  // A prior run in this same session can leave the "Creating…" progress text
-  // and error behind (submitCampaignCreator never cleared it on success) — a
-  // fresh run must never inherit it, or Review looks like it auto-submitted.
-  ccResetCcRunProgress();
+  // r.submitting is false here (ccResetRunDraft(), called just above, resets
+  // it) — sync the Create button/progress line to that now, so a fresh run
+  // never inherits a completed prior run's "Creating…"/disabled button.
+  ccSyncCreateUi();
 
   const sel = document.getElementById("ccRunBcSelect");
   if (!tiktokState.connections.length) {
@@ -2395,7 +2411,10 @@ async function runGoStep(n) {
     }
     await loadCcResources();
   }
-  if (n === 6) renderCcReview();
+  if (n === 6) {
+    console.log("[cc] resources next -> review");
+    renderCcReview();
+  }
 }
 function runGoStepShow(n) {
   ccState.run.step = n;
@@ -2535,11 +2554,12 @@ function syncCcRunNext5() {
 }
 
 function renderCcReview() {
-  // Rendering Review is display-only — it never calls the create API. Always
-  // clear any leftover "Creating…" state from an earlier run first, so a
-  // re-render (Back/Next, resume, revisiting this step) can never look like
-  // it auto-submitted.
-  ccResetCcRunProgress();
+  console.log("[cc] render review");
+  // Rendering Review is display-only — it NEVER sets/changes creating state.
+  // It only syncs the button/progress to whatever ccState.run.submitting
+  // already is, so a re-render (Back/Next, resume, revisiting this step)
+  // always shows the true state instead of a stale one.
+  ccSyncCreateUi();
   const r = ccState.run;
   const advs = ccSelectedAdvs();
   const base = r.base.trim();
@@ -2573,26 +2593,28 @@ function renderCcReview() {
       .join("");
 }
 
-// The ONLY place that calls the create API — wired solely to the Review
-// step's explicit "Create Campaigns" button click (see wireCampaignCreatorEvents).
-// Guarded against double-clicks/re-entry two ways: the button is disabled
-// synchronously before any await (so a real double-click can't queue a second
-// call), and r.submitting is checked/set for defense in depth against any
-// programmatic re-invocation.
+// The ONLY place that calls the create API — wired ONCE (wireCampaignCreatorEvents
+// runs a single time at init) solely to the Review step's explicit "Create
+// Campaigns" button click. The re-entry guard trusts ONLY ccState.run.submitting
+// — an in-memory flag that ccResetRunDraft() reliably resets to false at the
+// start of every run — never the button's own `disabled` DOM property, which is
+// static/persistent state that previously went stale across runs and caused
+// this exact handler to silently no-op on a real click (see ccSyncCreateUi).
 async function submitCampaignCreator() {
   const r = ccState.run;
-  const btn = document.getElementById("ccRunCreate");
-  if (r.submitting || btn.disabled) return;
+  console.log("[cc] create clicked", { submitting: r.submitting });
+  if (r.submitting) {
+    console.log("[cc] create clicked while already submitting — ignored");
+    return;
+  }
   r.submitting = true;
+  ccSyncCreateUi(); // -> button disabled + "Creating…"
   const prog = document.getElementById("ccRunProgress");
-  const err = document.getElementById("ccRunErr6");
-  err.textContent = "";
   const advs = ccSelectedAdvs();
-  btn.disabled = true;
-  btn.textContent = "Creating…";
   prog.className = "eng-placeholder busy";
   prog.textContent = `Creating ${advs.length} campaign${advs.length === 1 ? "" : "s"}… this can take a minute.`;
   try {
+    console.log("[cc] create request started");
     const res = await runCampaignCreator({
       template_id: r.template.id,
       campaign_type: r.template.campaign_type,
@@ -2604,21 +2626,23 @@ async function submitCampaignCreator() {
       post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       form_id: r.formId || undefined,
     });
+    console.log("[cc] create request finished");
     renderCcResults(res.results || []);
-    ccResetCcRunProgress(); // done with the Review step — never leave "Creating…" behind
     runGoStepShow(7);
     ccSteps("ccRunSteps", 6);
     ccState.run.step = 7;
     loadTiktokCampaigns();
     runCampaignCreatorDuplication();
   } catch (e2) {
-    err.textContent = e2.message;
-    btn.disabled = false;
-    btn.textContent = "Create Campaigns";
-    prog.textContent = "";
-    prog.className = "eng-placeholder";
+    console.log("[cc] create request failed:", e2.message);
+    document.getElementById("ccRunErr6").textContent = e2.message;
   } finally {
+    // Single point that flips submitting back off AND re-syncs the DOM to it —
+    // covers both success (button just goes idle behind the now-hidden Review
+    // step) and failure (button/progress become usable again, error already
+    // shown above) so the UI can never stay stuck on "Creating…".
     r.submitting = false;
+    ccSyncCreateUi();
   }
 }
 
