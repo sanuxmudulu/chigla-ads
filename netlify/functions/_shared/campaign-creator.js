@@ -35,7 +35,10 @@ function cleanPayload(obj, strip) {
 
 // Process ONE campaign_creator_campaigns row. Returns { status, patch } — patch
 // is the fields to write back. Bounded: creates at most DUPES_PER_CYCLE copies.
-async function duplicateForRow({ client, row, advertiserStatus, deadlineMs }) {
+// `preloadedDetail` (optional): a loadCampaignDetail result the caller already
+// fetched this cycle (the auto-appeal check does) — reused for the Active gate
+// so we don't pull the same campaign detail twice per tick.
+async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, preloadedDetail = null }) {
   const advId = String(row.advertiser_id);
   const campaignId = String(row.campaign_id);
   const target = Number(row.dupe_target) || 20;
@@ -49,17 +52,19 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs }) {
 
   // --- gate: initial ad group must be genuinely Active ---
   if (row.dupe_status === "WAITING_FOR_ACTIVE") {
-    let detail;
-    try {
-      detail = await loadCampaignDetail({
-        client,
-        advertiserId: advId,
-        advertiserStatus,
-        campaignId,
-        timezone: null,
-      });
-    } catch (err) {
-      return { status: "WAITING_FOR_ACTIVE", patch: { dupe_error: err.message, updated_at: now() } };
+    let detail = preloadedDetail;
+    if (!detail) {
+      try {
+        detail = await loadCampaignDetail({
+          client,
+          advertiserId: advId,
+          advertiserStatus,
+          campaignId,
+          timezone: null,
+        });
+      } catch (err) {
+        return { status: "WAITING_FOR_ACTIVE", patch: { dupe_error: err.message, updated_at: now() } };
+      }
     }
     const ag = (detail.adGroups || []).find((g) => String(g.adgroup_id) === String(row.initial_adgroup_id));
     const label = String(ag?.status_label || detail.effective_status || "").toLowerCase();
@@ -156,4 +161,71 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs }) {
   return { status: "DUPLICATING", patch };
 }
 
-module.exports = { duplicateForRow, DUPES_PER_CYCLE, DUPE_ATTEMPT_CAP };
+// ---------------------------------------------------------------------------
+// Registration — the ONE place a campaign is enrolled into the duplication +
+// auto-appeal lifecycle. Used by campaign-creator.js "register" AND by the
+// Campaign Creator tool (campaign-creator-run.js) right after it creates each
+// campaign. Idempotent on campaign_id; refuses WH Warmup campaigns.
+//
+//   payload: { campaign_id, advertiser_id, connection_id, bc_id?, campaign_name?,
+//              initial_adgroup_id, initial_ad_id?, adgroup_payload, ad_payload?,
+//              dupe_target?:20 }
+//   -> { ok:true } | { ok:true, already:true } | { error, code }
+// ---------------------------------------------------------------------------
+async function registerForDuplication(supabase, payload) {
+  const campaignId = String(payload.campaign_id || "");
+  const advertiserId = String(payload.advertiser_id || "");
+  const connectionId = payload.connection_id;
+  const initialAdgroupId = String(payload.initial_adgroup_id || "");
+  if (!campaignId || !advertiserId || !connectionId || !initialAdgroupId) {
+    return { error: "campaign_id, advertiser_id, connection_id and initial_adgroup_id are required", code: 400 };
+  }
+  if (!payload.adgroup_payload || typeof payload.adgroup_payload !== "object") {
+    return { error: "adgroup_payload (the exact adgroup_create args) is required", code: 400 };
+  }
+
+  try {
+    const { data: wh } = await supabase
+      .from("wh_warmup_campaigns")
+      .select("campaign_id")
+      .eq("campaign_id", campaignId)
+      .maybeSingle();
+    if (wh) return { error: "That campaign is a WH Warmup campaign and cannot be duplicated.", code: 400 };
+  } catch (_) {
+    /* table missing — fine */
+  }
+
+  const { data: existing } = await supabase
+    .from("campaign_creator_campaigns")
+    .select("campaign_id")
+    .eq("campaign_id", campaignId)
+    .maybeSingle();
+  if (existing) return { ok: true, already: true };
+
+  const target =
+    Number.isFinite(Number(payload.dupe_target)) && Number(payload.dupe_target) > 0 ? Number(payload.dupe_target) : 20;
+
+  const { error } = await supabase.from("campaign_creator_campaigns").insert({
+    campaign_id: campaignId,
+    advertiser_id: advertiserId,
+    connection_id: connectionId,
+    bc_id: payload.bc_id || null,
+    campaign_name: payload.campaign_name || null,
+    initial_adgroup_id: initialAdgroupId,
+    initial_ad_id: payload.initial_ad_id ? String(payload.initial_ad_id) : null,
+    adgroup_payload: payload.adgroup_payload,
+    ad_payload: payload.ad_payload || null,
+    dupe_target: target,
+    dupe_status: "WAITING_FOR_ACTIVE",
+    updated_at: new Date().toISOString(),
+  });
+  if (error) {
+    if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
+      return { error: "campaign_creator_campaigns isn't migrated yet. Run supabase/campaign_creator.sql.", code: 500 };
+    }
+    return { error: `Could not register the campaign: ${error.message}`, code: 500 };
+  }
+  return { ok: true };
+}
+
+module.exports = { duplicateForRow, registerForDuplication, DUPES_PER_CYCLE, DUPE_ATTEMPT_CAP };

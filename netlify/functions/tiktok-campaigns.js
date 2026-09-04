@@ -102,6 +102,44 @@ async function readCampaigns(supabase) {
       res.data = (res.data || []).map((c) => ({ ...c, is_wh_warmup: false }));
     }
   }
+
+  // AUTO REJECTION APPEAL — read-time status overlay. Campaign Creator campaigns
+  // with a live automatic appeal show a clearer label/tone. Never masks a
+  // campaign that is genuinely Active/serving right now (current state wins over
+  // historical rejection). Fully optional — no-op until
+  // supabase/campaign_creator_appeals.sql is run.
+  if (!res.error) {
+    try {
+      const { data: ap } = await supabase
+        .from("campaign_creator_campaigns")
+        .select("campaign_id, appeal_state")
+        .neq("appeal_state", "NONE");
+      const stByCampaign = new Map((ap || []).map((r) => [String(r.campaign_id), r.appeal_state]));
+      res.data = (res.data || []).map((c) => {
+        const st = stByCampaign.get(String(c.campaign_id));
+        if (!st || c.effective_status === "Active") return c;
+        if (st === "APPEAL_UNDER_REVIEW" || st === "APPEAL_SUBMITTING") {
+          return {
+            ...c,
+            effective_status: "Appeal Under Review",
+            effective_tone: "warn",
+            status_detail: "Automatic appeal submitted — awaiting TikTok's decision",
+          };
+        }
+        if (st === "APPEAL_REJECTED") {
+          return {
+            ...c,
+            effective_status: "Appeal Rejected",
+            effective_tone: "bad",
+            status_detail: "TikTok rejected the automatic appeal",
+          };
+        }
+        return c; // REJECTED / UNSUPPORTED keep the normal "Rejected" label
+      });
+    } catch (_) {
+      /* appeal columns not migrated — leave statuses untouched */
+    }
+  }
   return res;
 }
 

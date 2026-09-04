@@ -305,6 +305,55 @@ export async function registerCampaignCreatorCampaign(payload) {
   return readTiktokResponse(res, "Couldn't register the campaign");
 }
 
+// ---------------- Campaign Creator (templates + batch create) ----------------
+// Templates hold reusable settings only. The runner creates one campaign per
+// selected advertiser and registers each with the existing duplication +
+// auto-appeal monitoring. All TikTok writes are server-side.
+
+export async function listCampaignTemplates() {
+  const res = await fetch("/.netlify/functions/campaign-creator-templates");
+  return readTiktokResponse(res, "Couldn't load templates"); // { templates: [...] }
+}
+export async function saveCampaignTemplate(payload) {
+  // payload: { action:'create'|'update', id?, name, campaign_type, config }
+  const res = await fetch("/.netlify/functions/campaign-creator-templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return readTiktokResponse(res, "Couldn't save the template"); // { template }
+}
+export async function deleteCampaignTemplate(id) {
+  const res = await fetch("/.netlify/functions/campaign-creator-templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete", id }),
+  });
+  return readTiktokResponse(res, "Couldn't delete the template");
+}
+
+// Per-advertiser preflight: identities/forms/instant-page events valid across ALL
+// selected accounts, plus each account's timezone + newest Instant Page.
+export async function campaignCreatorResources(connectionId, campaignType, advertiserIds) {
+  const res = await fetch("/.netlify/functions/campaign-creator-run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "resources", connection_id: connectionId, campaign_type: campaignType, advertiser_ids: advertiserIds }),
+  });
+  return readTiktokResponse(res, "Couldn't load campaign resources");
+}
+
+// Create one campaign per selected advertiser. Partial failures come back 200
+// with a populated results[] (status Created | Failed | Skipped).
+export async function runCampaignCreator(payload) {
+  const res = await fetch("/.netlify/functions/campaign-creator-run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "create", ...payload }),
+  });
+  return readTiktokResponse(res, "Campaign creation failed"); // { results: [...] }
+}
+
 // ---------------- Comment templates (global, reusable) ----------------
 
 export async function listCommentTemplates() {

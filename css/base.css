@@ -796,3 +796,40 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
   .calendar-summary-strip { grid-template-columns: repeat(2, 1fr); }
   .calendar-grid-detailed { grid-template-columns: repeat(7, 1fr); gap: 4px; }
 }
+
+/* ============ CAMPAIGN CREATOR ============ */
+.cc-modal { max-height: 88vh; overflow-y: auto; }
+.cc-steps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); margin: 2px 0 14px; }
+.cc-steps span { font-weight: 600; }
+.cc-steps span.active { color: var(--accent); }
+.cc-steps span.done { color: var(--profit); }
+.cc-steps i { font-style: normal; opacity: 0.5; }
+.cc-home-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.cc-home-head .wh-selcount { margin: 0; }
+.cc-tpl-list { display: flex; flex-direction: column; gap: 8px; }
+.cc-tpl-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.cc-tpl-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.cc-tpl-card .cc-tpl-name { font-size: 13px; font-weight: 600; }
+.cc-tpl-card .cc-tpl-sub { font-size: 10.5px; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.04em; }
+.cc-tpl-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.cc-tpl-actions button { font-size: 11px; padding: 4px 9px; }
+.cc-empty { font-size: 12px; color: var(--text-2); padding: 14px 0; }
+.cc-type-toggle { display: flex; gap: 8px; margin-bottom: 6px; }
+.cc-type-toggle button { flex: 1; padding: 9px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text-1); font-size: 12px; font-weight: 600; cursor: pointer; }
+.cc-type-toggle button.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cc-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 12px 0 4px; cursor: pointer; }
+.cc-inline input { width: auto; margin: 0; accent-color: var(--accent); }
+.cc-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+.cc-chips .cc-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; user-select: none; }
+.cc-chips .cc-chip.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cc-chips .cc-chip .x { opacity: 0.6; font-weight: 700; }
+.cc-chips .cc-chip .x:hover { opacity: 1; }
+.cc-namemap, .cc-tzlist, .cc-notes, .cc-review { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; max-height: 44vh; overflow-y: auto; }
+.cc-namemap .row, .cc-tzlist .row, .cc-review .row { display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+.cc-namemap .row span, .cc-tzlist .row span, .cc-review .row span { color: var(--text-2); }
+.cc-namemap .row strong, .cc-tzlist .row strong, .cc-review .row strong { color: var(--text-1); text-align: right; word-break: break-all; }
+.cc-notes .note { font-size: 11px; color: #ffb020; }
+.cc-notes .note.bad { color: var(--loss); }
+.cc-time { display: flex; align-items: center; gap: 8px; }
+.cc-time select { width: auto; min-width: 74px; }
+.cc-review .rev-acct { font-weight: 600; color: var(--text-1); font-size: 12px; margin-top: 6px; }

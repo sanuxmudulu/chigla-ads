@@ -158,6 +158,13 @@
       <span>WH Warmup</span>
     </button>
 
+    <button class="tools-item" id="toolsCampaignCreatorBtn">
+      <span class="tools-item-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
+      </span>
+      <span>Campaign Creator</span>
+    </button>
+
     <div class="tools-expandable" id="toolsThemesGroup">
       <button class="tools-item tools-expand-toggle" id="toolsThemesToggle">
         <span class="tools-item-icon">
@@ -369,6 +376,229 @@
       <div class="modal-actions">
         <button class="icon-btn" id="ecTplCancelBtn">Cancel</button>
         <button class="icon-btn primary" id="ecTplSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CAMPAIGN CREATOR MODAL ============ -->
+<div class="modal-backdrop" id="campaignCreatorModal">
+  <div class="modal modal-lg wh-modal cc-modal">
+    <div class="modal-header">
+      <h3 id="ccTitle">Campaign Creator</h3>
+      <button id="closeCampaignCreatorModal">✕</button>
+    </div>
+
+    <!-- ===== HOME: template list ===== -->
+    <div class="cc-view" id="ccHome">
+      <div class="cc-home-head">
+        <p class="wh-selcount">Template-based campaign launches. Each template stores reusable settings; you supply the per-launch details when you run it.</p>
+        <button class="icon-btn primary" id="ccNewTemplateBtn">+ Create New Template</button>
+      </div>
+      <div id="ccTemplateList" class="cc-tpl-list"></div>
+    </div>
+
+    <!-- ===== TEMPLATE WIZARD (create / edit) ===== -->
+    <div class="cc-view" id="ccTplWizard" hidden>
+      <div class="cc-steps" id="ccTplSteps">
+        <span data-step="1">Campaign</span><i>→</i><span data-step="2">Ad Group</span><i>→</i><span data-step="3">Ad</span>
+      </div>
+
+      <!-- Step 1 — Campaign -->
+      <div class="cc-step" id="ccTplStep1">
+        <label class="budget-field-label" for="ccTplName">Template name</label>
+        <input type="text" id="ccTplName" placeholder="e.g. US Lead Gen — $50" autocomplete="off" />
+
+        <label class="budget-field-label">Campaign type</label>
+        <div class="cc-type-toggle" id="ccTplType">
+          <button type="button" data-type="LEAD_GENERATION">Lead Generation</button>
+          <button type="button" data-type="SALES">Sales</button>
+        </div>
+
+        <label class="cc-inline"><input type="checkbox" id="ccTplCbo" checked /> Campaign Budget Optimization (CBO)</label>
+
+        <label class="budget-field-label" for="ccTplBudget">Daily campaign budget ($)</label>
+        <input type="number" id="ccTplBudget" min="1" step="1" placeholder="50" />
+
+        <div class="modal-error" id="ccTplErr1"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccTplCancel1">Cancel</button>
+          <button class="icon-btn primary" id="ccTplNext1">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 2 — Ad Group -->
+      <div class="cc-step" id="ccTplStep2" hidden>
+        <label class="budget-field-label" for="ccTplLocInput">Target locations <span class="eng-hint">(type & pick — add as many as you need)</span></label>
+        <div class="wh-country-wrap">
+          <input type="text" id="ccTplLocInput" placeholder="Type a country / region…" autocomplete="off" />
+          <div class="wh-country-suggest" id="ccTplLocSuggest" hidden></div>
+        </div>
+        <div class="cc-chips" id="ccTplLocChips"></div>
+        <p class="eng-hint" id="ccTplLocHint">Pick an advertiser account under Accounts first so we can load TikTok's location list.</p>
+
+        <label class="budget-field-label">Age</label>
+        <div class="cc-chips cc-age" id="ccTplAge"></div>
+
+        <label class="budget-field-label" for="ccTplGender">Gender</label>
+        <select id="ccTplGender">
+          <option value="GENDER_UNLIMITED">All</option>
+          <option value="GENDER_MALE">Male</option>
+          <option value="GENDER_FEMALE">Female</option>
+        </select>
+
+        <div class="wh-kv"><span>Placement</span><strong>TikTok only</strong></div>
+        <div class="wh-kv"><span>Interests / behaviours</span><strong>None (broad)</strong></div>
+        <div class="wh-kv"><span>Video sharing &amp; downloading</span><strong>Disabled</strong></div>
+
+        <div class="modal-error" id="ccTplErr2"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccTplBack2">Back</button>
+          <button class="icon-btn" id="ccTplCancel2">Cancel</button>
+          <button class="icon-btn primary" id="ccTplNext2">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 3 — Ad -->
+      <div class="cc-step" id="ccTplStep3" hidden>
+        <label class="budget-field-label" for="ccTplCta">Call to action</label>
+        <select id="ccTplCta"></select>
+
+        <label class="budget-field-label" for="ccTplText">Ad text <span class="eng-hint">(optional — max 100 chars)</span></label>
+        <textarea id="ccTplText" rows="2" maxlength="100" placeholder="Ad caption / text"></textarea>
+
+        <label class="cc-inline"><input type="checkbox" id="ccTplCard" /> Interactive Card</label>
+        <div id="ccTplCardWrap" hidden>
+          <label class="budget-field-label" for="ccTplCardUrl">Card image link <span class="eng-hint">(Google Drive share link or any public image URL — must be 750×421 px)</span></label>
+          <input type="text" id="ccTplCardUrl" placeholder="https://drive.google.com/file/d/…/view" autocomplete="off" />
+        </div>
+
+        <div class="wh-kv"><span>Ad type</span><strong>Spark Ad (code supplied at launch)</strong></div>
+
+        <div class="modal-error" id="ccTplErr3"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccTplBack3">Back</button>
+          <button class="icon-btn" id="ccTplCancel3">Cancel</button>
+          <button class="icon-btn primary" id="ccTplSave">Save Template</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== RUNTIME WIZARD (use a template) ===== -->
+    <div class="cc-view" id="ccRun" hidden>
+      <div class="cc-steps" id="ccRunSteps">
+        <span data-step="1">Accounts</span><i>→</i><span data-step="2">Name</span><i>→</i><span data-step="3">Schedule</span><i>→</i><span data-step="4">Spark</span><i>→</i><span data-step="5">Resources</span><i>→</i><span data-step="6">Review</span>
+      </div>
+      <p class="wh-selcount" id="ccRunTplLabel"></p>
+
+      <!-- Step 1 — Accounts -->
+      <div class="cc-step" id="ccRunStep1">
+        <div class="tk-bc-select">
+          <label for="ccRunBcSelect">Business Center</label>
+          <select id="ccRunBcSelect"></select>
+        </div>
+        <div id="ccRunSummary" class="tk-summary"></div>
+        <div class="wh-selectall"><label><input type="checkbox" id="ccRunSelectAll" /> Select all Approved accounts</label></div>
+        <div id="ccRunAdvList" class="tk-wrap wh-adv-list"></div>
+        <div class="modal-error" id="ccRunErr1"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccRunCancel1">Cancel</button>
+          <button class="icon-btn primary" id="ccRunNext1" disabled>Next</button>
+        </div>
+      </div>
+
+      <!-- Step 2 — Campaign name -->
+      <div class="cc-step" id="ccRunStep2" hidden>
+        <label class="budget-field-label" for="ccRunBase">Campaign name base</label>
+        <input type="text" id="ccRunBase" placeholder="e.g. ad" autocomplete="off" />
+        <p class="eng-hint">Each account gets <strong>base + number</strong>, in the order below.</p>
+        <div id="ccRunNamePreview" class="cc-namemap"></div>
+        <div class="modal-error" id="ccRunErr2"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccRunBack2">Back</button>
+          <button class="icon-btn" id="ccRunCancel2">Cancel</button>
+          <button class="icon-btn primary" id="ccRunNext2">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 3 — Schedule -->
+      <div class="cc-step" id="ccRunStep3" hidden>
+        <label class="budget-field-label">Start time <span class="eng-hint">(interpreted in EACH advertiser's own timezone)</span></label>
+        <div class="cc-time">
+          <select id="ccRunHour"></select><span>:</span><select id="ccRunMinute"></select>
+        </div>
+        <div id="ccRunTzList" class="cc-tzlist"></div>
+        <div class="modal-error" id="ccRunErr3"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccRunBack3">Back</button>
+          <button class="icon-btn" id="ccRunCancel3">Cancel</button>
+          <button class="icon-btn primary" id="ccRunNext3">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 4 — Spark codes + post links -->
+      <div class="cc-step" id="ccRunStep4" hidden>
+        <label class="budget-field-label" for="ccRunSpark">Spark codes <span class="eng-hint">(one per line — order matches the accounts)</span></label>
+        <textarea id="ccRunSpark" rows="5" placeholder="code for account 1&#10;code for account 2&#10;…"></textarea>
+        <p class="eng-hint" id="ccRunSparkCount"></p>
+        <label class="budget-field-label" for="ccRunLinks">TikTok post links <span class="eng-hint">(one per line — same order)</span></label>
+        <textarea id="ccRunLinks" rows="5" placeholder="https://www.tiktok.com/@handle/video/…"></textarea>
+        <p class="eng-hint" id="ccRunLinksCount"></p>
+        <div class="modal-error" id="ccRunErr4"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccRunBack4">Back</button>
+          <button class="icon-btn" id="ccRunCancel4">Cancel</button>
+          <button class="icon-btn primary" id="ccRunNext4">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 5 — Resources (identity / form / instant-page event) -->
+      <div class="cc-step" id="ccRunStep5" hidden>
+        <div id="ccRunResLoading" class="eng-placeholder busy">Loading account resources…</div>
+        <div id="ccRunResBody" hidden>
+          <label class="budget-field-label" for="ccRunIdentity">TikTok identity</label>
+          <select id="ccRunIdentity"></select>
+
+          <div id="ccRunFormWrap" hidden>
+            <label class="budget-field-label" for="ccRunForm">Instant Form</label>
+            <select id="ccRunForm"></select>
+          </div>
+
+          <div id="ccRunEventWrap" hidden>
+            <label class="budget-field-label" for="ccRunEvent">Instant Page conversion event</label>
+            <select id="ccRunEvent"></select>
+            <p class="eng-hint">The newest published Instant Page is auto-selected per account (shown in Review).</p>
+          </div>
+
+          <div id="ccRunResNotes" class="cc-notes"></div>
+        </div>
+        <div class="modal-error" id="ccRunErr5"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccRunBack5">Back</button>
+          <button class="icon-btn" id="ccRunCancel5">Cancel</button>
+          <button class="icon-btn primary" id="ccRunNext5" disabled>Next</button>
+        </div>
+      </div>
+
+      <!-- Step 6 — Review -->
+      <div class="cc-step" id="ccRunStep6" hidden>
+        <div id="ccRunReview" class="cc-review"></div>
+        <div class="eng-placeholder" id="ccRunProgress"></div>
+        <div class="modal-error" id="ccRunErr6"></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="ccRunBack6">Back</button>
+          <button class="icon-btn" id="ccRunCancel6">Cancel</button>
+          <button class="icon-btn primary" id="ccRunCreate">Create Campaigns</button>
+        </div>
+      </div>
+
+      <!-- Step 7 — Results -->
+      <div class="cc-step" id="ccRunStep7" hidden>
+        <p class="wh-selcount">Results — created campaigns are now monitored for review, auto-appeal and duplication.</p>
+        <div id="ccRunResults" class="wh-results"></div>
+        <div class="modal-actions">
+          <button class="icon-btn primary" id="ccRunDone">Done</button>
+        </div>
       </div>
     </div>
   </div>

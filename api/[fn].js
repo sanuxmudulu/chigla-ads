@@ -24,6 +24,8 @@ const HANDLERS = {
   "cleanup": () => require("../netlify/functions/cleanup.js"),
   "comment-templates": () => require("../netlify/functions/comment-templates.js"),
   "campaign-creator": () => require("../netlify/functions/campaign-creator.js"),
+  "campaign-creator-templates": () => require("../netlify/functions/campaign-creator-templates.js"),
+  "campaign-creator-run": () => require("../netlify/functions/campaign-creator-run.js"),
 };
 
 module.exports = async (req, res) => {

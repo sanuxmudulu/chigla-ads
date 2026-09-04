@@ -27,6 +27,11 @@ import {
   cleanupWhWarmup,
   fetchWhCountries,
   processCampaignCreatorDuplication,
+  listCampaignTemplates,
+  saveCampaignTemplate,
+  deleteCampaignTemplate,
+  campaignCreatorResources,
+  runCampaignCreator,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -158,8 +163,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // Loads stored TikTok campaign rows (fast, from Supabase) and merges them into
 // the Detailed Metrics table. Does not hit the TikTok API — that only happens
-// on an explicit "Refresh TikTok Data".
+// on an explicit "Refresh TikTok Data". Runs on load and on the 60s cycle so
+// status changes (Active / Rejected / Appeal Under Review / Appeal Rejected)
+// that the server derives in the background surface without a manual reload.
+let campaignsInFlight = false;
 async function loadTiktokCampaigns() {
+  if (campaignsInFlight) return;
+  campaignsInFlight = true;
   try {
     const data = await fetchTiktokCampaigns();
     state.tiktokCampaigns = data.campaigns || [];
@@ -167,6 +177,8 @@ async function loadTiktokCampaigns() {
     rebuildSources();
   } catch (_) {
     /* non-fatal — table still renders from Glitchy data */
+  } finally {
+    campaignsInFlight = false;
   }
 }
 
@@ -320,6 +332,7 @@ function wireEvents() {
   });
   wireTiktokEvents();
   wireWhWarmupEvents();
+  wireCampaignCreatorEvents();
 
   document.getElementById("toolsCalendarBtn").addEventListener("click", openCalendarModal);
   document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
@@ -451,7 +464,13 @@ async function refreshAll() {
       glitchyErr = g.reason;
     }
 
-    await Promise.allSettled([loadMabac(), loadTiktokMetrics(), runWhWarmupCleanup(), runCampaignCreatorDuplication()]);
+    await Promise.allSettled([
+      loadMabac(),
+      loadTiktokMetrics(),
+      loadTiktokCampaigns(),
+      runWhWarmupCleanup(),
+      runCampaignCreatorDuplication(),
+    ]);
 
     if (glitchyErr) {
       setStatus(`Couldn't reach Glitchy: ${glitchyErr.message} — showing last known data.`, true);
@@ -1541,6 +1560,750 @@ function renderWhResults(results, warning) {
           )
           .join("")
       : `<p class="tk-empty">No accounts processed.</p>`);
+}
+
+// ============================== CAMPAIGN CREATOR ==============================
+// Template-based launches. Templates hold reusable settings only; per-launch
+// values are collected in the runtime wizard. Creation + registration is 100%
+// server-side (campaign-creator-run.js). Reuses the WH account selector, the
+// country autocomplete, and the existing duplication/appeal monitoring.
+
+const CC_AGE_OPTS = [
+  { v: "AGE_18_24", l: "18–24" },
+  { v: "AGE_25_34", l: "25–34" },
+  { v: "AGE_35_44", l: "35–44" },
+  { v: "AGE_45_54", l: "45–54" },
+  { v: "AGE_55_100", l: "55+" },
+];
+const CC_CTA_OPTS = [
+  "LEARN_MORE", "SHOP_NOW", "SIGN_UP", "DOWNLOAD_NOW", "INSTALL_NOW", "PLAY_GAME",
+  "ORDER_NOW", "CONTACT_US", "BOOK_NOW", "APPLY_NOW", "GET_QUOTE", "READ_MORE", "VIEW_NOW", "SUBSCRIBE",
+];
+const ccCtaLabel = (v) => v.split("_").map((w) => w[0] + w.slice(1).toLowerCase()).join(" ");
+
+const ccState = {
+  view: "home", // home | tpl | run
+  templates: [],
+  loaded: false,
+  tpl: {
+    id: null,
+    step: 1,
+    name: "",
+    type: "LEAD_GENERATION",
+    cbo: true,
+    budget: "",
+    locations: [], // [{ id, name }]
+    ages: new Set(CC_AGE_OPTS.map((o) => o.v)),
+    gender: "GENDER_UNLIMITED",
+    cta: "LEARN_MORE",
+    text: "",
+    cardEnabled: false,
+    cardUrl: "",
+    countries: [],
+    countriesLoading: false,
+    suggestActive: -1,
+  },
+  run: {
+    template: null,
+    connectionId: null,
+    selected: new Set(),
+    step: 1,
+    base: "",
+    hour: 8,
+    minute: 0,
+    spark: "",
+    links: "",
+    resources: null,
+    resLoading: false,
+    identityId: "",
+    identityType: "BC_AUTH_TT",
+    formId: "",
+    salesEvent: "",
+  },
+};
+
+function wireCampaignCreatorEvents() {
+  document.getElementById("toolsCampaignCreatorBtn").addEventListener("click", openCampaignCreatorModal);
+  document.getElementById("closeCampaignCreatorModal").addEventListener("click", closeCampaignCreatorModal);
+  document.getElementById("campaignCreatorModal").addEventListener("click", (e) => {
+    if (e.target.id === "campaignCreatorModal") closeCampaignCreatorModal();
+  });
+
+  // Home
+  document.getElementById("ccNewTemplateBtn").addEventListener("click", () => openTplWizard(null));
+  document.getElementById("ccTemplateList").addEventListener("click", onCcTemplateListClick);
+
+  // Template wizard nav
+  const closeToHome = () => ccShowView("home");
+  document.getElementById("ccTplCancel1").addEventListener("click", closeToHome);
+  document.getElementById("ccTplCancel2").addEventListener("click", closeToHome);
+  document.getElementById("ccTplCancel3").addEventListener("click", closeToHome);
+  document.getElementById("ccTplNext1").addEventListener("click", () => tplGoStep(2));
+  document.getElementById("ccTplNext2").addEventListener("click", () => tplGoStep(3));
+  document.getElementById("ccTplBack2").addEventListener("click", () => tplGoStep(1));
+  document.getElementById("ccTplBack3").addEventListener("click", () => tplGoStep(2));
+  document.getElementById("ccTplSave").addEventListener("click", saveTplWizard);
+
+  document.getElementById("ccTplType").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-type]");
+    if (!b) return;
+    ccState.tpl.type = b.dataset.type;
+    syncTplTypeToggle();
+  });
+  document.getElementById("ccTplCard").addEventListener("change", (e) => {
+    ccState.tpl.cardEnabled = e.target.checked;
+    document.getElementById("ccTplCardWrap").hidden = !e.target.checked;
+  });
+  document.getElementById("ccTplAge").addEventListener("click", (e) => {
+    const chip = e.target.closest(".cc-chip[data-age]");
+    if (!chip) return;
+    const v = chip.dataset.age;
+    if (ccState.tpl.ages.has(v)) ccState.tpl.ages.delete(v);
+    else ccState.tpl.ages.add(v);
+    renderTplAgeChips();
+  });
+  document.getElementById("ccTplLocChips").addEventListener("click", (e) => {
+    const x = e.target.closest("[data-loc-remove]");
+    if (!x) return;
+    ccState.tpl.locations = ccState.tpl.locations.filter((l) => l.id !== x.dataset.locRemove);
+    renderTplLocChips();
+  });
+
+  // Template location autocomplete (reuses the WH country list endpoint)
+  const li = document.getElementById("ccTplLocInput");
+  li.addEventListener("input", () => renderTplLocSuggest(li.value));
+  li.addEventListener("focus", () => renderTplLocSuggest(li.value));
+  li.addEventListener("blur", () => setTimeout(() => (document.getElementById("ccTplLocSuggest").hidden = true), 150));
+  document.getElementById("ccTplLocSuggest").addEventListener("mousedown", (e) => {
+    const b = e.target.closest("button[data-loc-id]");
+    if (!b) return;
+    e.preventDefault();
+    if (!ccState.tpl.locations.some((l) => l.id === b.dataset.locId)) {
+      ccState.tpl.locations.push({ id: b.dataset.locId, name: b.dataset.name });
+    }
+    li.value = "";
+    document.getElementById("ccTplLocSuggest").hidden = true;
+    renderTplLocChips();
+  });
+
+  // Runtime wizard nav
+  const runCancel = () => ccShowView("home");
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const c = document.getElementById(`ccRunCancel${n}`);
+    if (c) c.addEventListener("click", runCancel);
+    const b = document.getElementById(`ccRunBack${n}`);
+    if (b) b.addEventListener("click", () => runGoStep(n - 1));
+  }
+  document.getElementById("ccRunNext1").addEventListener("click", () => runGoStep(2));
+  document.getElementById("ccRunNext2").addEventListener("click", () => runGoStep(3));
+  document.getElementById("ccRunNext3").addEventListener("click", () => runGoStep(4));
+  document.getElementById("ccRunNext4").addEventListener("click", () => runGoStep(5));
+  document.getElementById("ccRunNext5").addEventListener("click", () => runGoStep(6));
+  document.getElementById("ccRunCreate").addEventListener("click", submitCampaignCreator);
+  document.getElementById("ccRunDone").addEventListener("click", closeCampaignCreatorModal);
+
+  document.getElementById("ccRunBcSelect").addEventListener("change", (e) => {
+    ccState.run.connectionId = e.target.value;
+    ccState.run.selected.clear();
+    renderCcRunAdvertisers();
+  });
+  document.getElementById("ccRunSelectAll").addEventListener("change", (e) => {
+    const approved = ccRunAdvs().filter((a) => advIsApproved(a));
+    if (e.target.checked) approved.forEach((a) => ccState.run.selected.add(String(a.advertiser_id)));
+    else approved.forEach((a) => ccState.run.selected.delete(String(a.advertiser_id)));
+    renderCcRunAdvertisers();
+  });
+  document.getElementById("ccRunAdvList").addEventListener("change", (e) => {
+    const cb = e.target.closest('input[type="checkbox"][data-cc-adv]');
+    if (!cb) return;
+    const id = String(cb.dataset.ccAdv);
+    if (cb.checked) ccState.run.selected.add(id);
+    else ccState.run.selected.delete(id);
+    document.getElementById("ccRunNext1").disabled = ccState.run.selected.size === 0;
+    syncCcRunSelectAll();
+  });
+  document.getElementById("ccRunBase").addEventListener("input", (e) => {
+    ccState.run.base = e.target.value;
+    renderCcNamePreview();
+  });
+  document.getElementById("ccRunHour").addEventListener("change", (e) => { ccState.run.hour = +e.target.value; renderCcTzList(); });
+  document.getElementById("ccRunMinute").addEventListener("change", (e) => { ccState.run.minute = +e.target.value; renderCcTzList(); });
+  document.getElementById("ccRunSpark").addEventListener("input", (e) => { ccState.run.spark = e.target.value; renderCcSparkCounts(); });
+  document.getElementById("ccRunLinks").addEventListener("input", (e) => { ccState.run.links = e.target.value; renderCcSparkCounts(); });
+  document.getElementById("ccRunIdentity").addEventListener("change", (e) => { ccState.run.identityId = e.target.value; syncCcRunNext5(); });
+  document.getElementById("ccRunForm").addEventListener("change", (e) => { ccState.run.formId = e.target.value; syncCcRunNext5(); });
+  document.getElementById("ccRunEvent").addEventListener("change", (e) => { ccState.run.salesEvent = e.target.value; syncCcRunNext5(); });
+
+  // hour / minute options
+  const hs = document.getElementById("ccRunHour");
+  const ms = document.getElementById("ccRunMinute");
+  hs.innerHTML = Array.from({ length: 24 }, (_, i) => `<option value="${i}">${String(i).padStart(2, "0")}</option>`).join("");
+  ms.innerHTML = Array.from({ length: 60 }, (_, i) => `<option value="${i}">${String(i).padStart(2, "0")}</option>`).join("");
+  hs.value = "8";
+  ms.value = "0";
+
+  // CTA options
+  document.getElementById("ccTplCta").innerHTML = CC_CTA_OPTS.map((v) => `<option value="${v}">${ccCtaLabel(v)}</option>`).join("");
+}
+
+// ---- modal / view plumbing ----
+
+async function openCampaignCreatorModal() {
+  closeToolsDrawer();
+  document.getElementById("campaignCreatorModal").classList.add("open");
+  ccShowView("home");
+  document.getElementById("ccTemplateList").innerHTML = `<p class="cc-empty">Loading templates…</p>`;
+  try {
+    const [tpls, conns] = await Promise.all([
+      listCampaignTemplates(),
+      fetchTiktokConnections(),
+    ]);
+    ccState.templates = tpls.templates || [];
+    tiktokState.connections = conns.connections || [];
+    tiktokState.advertisers = conns.advertisers || [];
+    ccState.loaded = true;
+  } catch (err) {
+    document.getElementById("ccTemplateList").innerHTML = `<p class="tk-error">${escapeHtml(err.message)}</p>`;
+    return;
+  }
+  renderCcTemplateList();
+}
+
+function closeCampaignCreatorModal() {
+  document.getElementById("campaignCreatorModal").classList.remove("open");
+}
+
+function ccShowView(v) {
+  ccState.view = v;
+  document.getElementById("ccHome").hidden = v !== "home";
+  document.getElementById("ccTplWizard").hidden = v !== "tpl";
+  document.getElementById("ccRun").hidden = v !== "run";
+  document.getElementById("ccTitle").textContent =
+    v === "tpl" ? (ccState.tpl.id ? "Edit Template" : "New Template") : v === "run" ? "Run Template" : "Campaign Creator";
+}
+
+function ccSteps(containerId, current, total) {
+  const spans = document.querySelectorAll(`#${containerId} span[data-step]`);
+  spans.forEach((s) => {
+    const n = +s.dataset.step;
+    s.classList.toggle("active", n === current);
+    s.classList.toggle("done", n < current);
+  });
+  void total;
+}
+
+// ---- home: template list ----
+
+function renderCcTemplateList() {
+  const el = document.getElementById("ccTemplateList");
+  if (!ccState.templates.length) {
+    el.innerHTML = `<p class="cc-empty">No templates yet. Create one to get started.</p>`;
+    return;
+  }
+  el.innerHTML = ccState.templates
+    .map((t) => {
+      const c = t.config || {};
+      const sub = `${t.campaign_type === "SALES" ? "Sales" : "Lead Gen"} · $${Number(c.daily_budget || 0)}/day · ${(c.location_labels || []).join(", ") || (c.location_ids || []).length + " location(s)"}`;
+      return `<div class="cc-tpl-card" data-tpl-id="${t.id}">
+        <div><div class="cc-tpl-name">${escapeHtml(t.name)}</div><div class="cc-tpl-sub">${escapeHtml(sub)}</div></div>
+        <div class="cc-tpl-actions">
+          <button class="icon-btn primary" data-tpl-use="${t.id}">Use</button>
+          <button class="icon-btn" data-tpl-edit="${t.id}">Edit</button>
+          <button class="icon-btn danger" data-tpl-del="${t.id}">Delete</button>
+        </div></div>`;
+    })
+    .join("");
+}
+
+async function onCcTemplateListClick(e) {
+  const use = e.target.closest("[data-tpl-use]");
+  const edit = e.target.closest("[data-tpl-edit]");
+  const del = e.target.closest("[data-tpl-del]");
+  if (use) return openRunWizard(ccState.templates.find((t) => t.id === use.dataset.tplUse));
+  if (edit) return openTplWizard(ccState.templates.find((t) => t.id === edit.dataset.tplEdit));
+  if (del) {
+    const t = ccState.templates.find((x) => x.id === del.dataset.tplDel);
+    if (!t || !confirm(`Delete template “${t.name}”? Campaigns already created from it are unaffected.`)) return;
+    try {
+      await deleteCampaignTemplate(t.id);
+      ccState.templates = ccState.templates.filter((x) => x.id !== t.id);
+      renderCcTemplateList();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+}
+
+// ---- template wizard ----
+
+function openTplWizard(tpl) {
+  const d = ccState.tpl;
+  d.id = tpl ? tpl.id : null;
+  const c = (tpl && tpl.config) || {};
+  d.name = tpl ? tpl.name : "";
+  d.type = tpl ? tpl.campaign_type : "LEAD_GENERATION";
+  d.cbo = c.cbo === undefined ? true : !!c.cbo;
+  d.budget = c.daily_budget != null ? String(c.daily_budget) : "";
+  d.locations = (c.location_ids || []).map((id, i) => ({ id: String(id), name: (c.location_labels || [])[i] || String(id) }));
+  d.ages = new Set((c.age_groups && c.age_groups.length ? c.age_groups : CC_AGE_OPTS.map((o) => o.v)));
+  d.gender = c.gender || "GENDER_UNLIMITED";
+  d.cta = c.cta || "LEARN_MORE";
+  d.text = c.ad_text || "";
+  d.cardEnabled = !!(c.interactive_card && c.interactive_card.enabled);
+  d.cardUrl = (c.interactive_card && c.interactive_card.image_url) || "";
+  d.countries = [];
+  d.step = 1;
+
+  ccShowView("tpl");
+  document.getElementById("ccTplName").value = d.name;
+  document.getElementById("ccTplCbo").checked = d.cbo;
+  document.getElementById("ccTplBudget").value = d.budget;
+  document.getElementById("ccTplGender").value = d.gender;
+  document.getElementById("ccTplCta").value = d.cta;
+  document.getElementById("ccTplText").value = d.text;
+  document.getElementById("ccTplCard").checked = d.cardEnabled;
+  document.getElementById("ccTplCardWrap").hidden = !d.cardEnabled;
+  document.getElementById("ccTplCardUrl").value = d.cardUrl;
+  document.getElementById("ccTplLocInput").value = "";
+  syncTplTypeToggle();
+  renderTplAgeChips();
+  renderTplLocChips();
+  tplGoStep(1);
+  loadTplCountries();
+}
+
+function syncTplTypeToggle() {
+  document.querySelectorAll("#ccTplType button").forEach((b) => b.classList.toggle("active", b.dataset.type === ccState.tpl.type));
+}
+function renderTplAgeChips() {
+  document.getElementById("ccTplAge").innerHTML = CC_AGE_OPTS.map(
+    (o) => `<span class="cc-chip${ccState.tpl.ages.has(o.v) ? " on" : ""}" data-age="${o.v}">${o.l}</span>`
+  ).join("");
+}
+function renderTplLocChips() {
+  const el = document.getElementById("ccTplLocChips");
+  el.innerHTML = ccState.tpl.locations
+    .map((l) => `<span class="cc-chip on">${escapeHtml(l.name)} <span class="x" data-loc-remove="${escapeHtml(l.id)}">✕</span></span>`)
+    .join("");
+}
+
+async function loadTplCountries() {
+  const d = ccState.tpl;
+  const hint = document.getElementById("ccTplLocHint");
+  const conn = tiktokState.connections[0];
+  const adv = conn ? advsForConnection(conn.id).find((a) => advIsApproved(a)) : null;
+  if (!conn || !adv) {
+    hint.textContent = "Connect a TikTok Business Center with an Approved account to load the location list.";
+    return;
+  }
+  hint.textContent = "Loading TikTok location list…";
+  d.countriesLoading = true;
+  try {
+    const data = await fetchWhCountries(conn.id, adv.advertiser_id);
+    d.countries = data.countries || [];
+    hint.textContent = d.countries.length ? "" : "TikTok returned no locations for this account.";
+  } catch (err) {
+    hint.textContent = `Couldn't load locations: ${err.message}`;
+  } finally {
+    d.countriesLoading = false;
+  }
+}
+
+function renderTplLocSuggest(query) {
+  const box = document.getElementById("ccTplLocSuggest");
+  const q = String(query || "").trim().toLowerCase();
+  if (!q || !ccState.tpl.countries.length) {
+    box.hidden = true;
+    return;
+  }
+  const hits = ccState.tpl.countries
+    .filter((c) => c.name.toLowerCase().includes(q) || String(c.code || "").toLowerCase() === q)
+    .slice(0, 8);
+  box.hidden = !hits.length;
+  box.innerHTML = hits
+    .map((c) => `<button type="button" data-loc-id="${escapeHtml(c.location_id)}" data-name="${escapeHtml(c.name)}">${escapeHtml(c.name)}</button>`)
+    .join("");
+}
+
+function tplGoStep(n) {
+  ccState.tpl.step = n;
+  document.getElementById("ccTplStep1").hidden = n !== 1;
+  document.getElementById("ccTplStep2").hidden = n !== 2;
+  document.getElementById("ccTplStep3").hidden = n !== 3;
+  ccSteps("ccTplSteps", n);
+  ["ccTplErr1", "ccTplErr2", "ccTplErr3"].forEach((id) => (document.getElementById(id).textContent = ""));
+
+  if (n === 2) {
+    // pull step-1 values into the draft
+    ccState.tpl.name = document.getElementById("ccTplName").value.trim();
+    ccState.tpl.cbo = document.getElementById("ccTplCbo").checked;
+    ccState.tpl.budget = document.getElementById("ccTplBudget").value;
+    const err = document.getElementById("ccTplErr1");
+    if (!ccState.tpl.name) return (tplGoBack(1), (err.textContent = "Enter a template name."));
+    if (!(Number(ccState.tpl.budget) > 0)) return (tplGoBack(1), (err.textContent = "Enter a daily budget greater than 0."));
+  }
+  if (n === 3) {
+    ccState.tpl.gender = document.getElementById("ccTplGender").value;
+    if (!ccState.tpl.locations.length) return (tplGoBack(2), (document.getElementById("ccTplErr2").textContent = "Add at least one location."));
+    if (!ccState.tpl.ages.size) return (tplGoBack(2), (document.getElementById("ccTplErr2").textContent = "Select at least one age range."));
+  }
+}
+function tplGoBack(n) {
+  ccState.tpl.step = n;
+  document.getElementById("ccTplStep1").hidden = n !== 1;
+  document.getElementById("ccTplStep2").hidden = n !== 2;
+  document.getElementById("ccTplStep3").hidden = n !== 3;
+  ccSteps("ccTplSteps", n);
+}
+
+async function saveTplWizard() {
+  const d = ccState.tpl;
+  d.cta = document.getElementById("ccTplCta").value;
+  d.text = document.getElementById("ccTplText").value.trim();
+  d.cardEnabled = document.getElementById("ccTplCard").checked;
+  d.cardUrl = document.getElementById("ccTplCardUrl").value.trim();
+  const err = document.getElementById("ccTplErr3");
+  err.textContent = "";
+  if (d.cardEnabled && !d.cardUrl) return (err.textContent = "Add the card image link or turn Interactive Card off.");
+
+  const config = {
+    cbo: d.cbo,
+    daily_budget: Number(d.budget),
+    location_ids: d.locations.map((l) => l.id),
+    location_labels: d.locations.map((l) => l.name),
+    age_groups: CC_AGE_OPTS.map((o) => o.v).filter((v) => d.ages.has(v)),
+    gender: d.gender,
+    cta: d.cta,
+    ad_text: d.text,
+    interactive_card: { enabled: d.cardEnabled, image_url: d.cardUrl },
+  };
+  const btn = document.getElementById("ccTplSave");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const payload = { action: d.id ? "update" : "create", name: d.name, campaign_type: d.type, config };
+    if (d.id) payload.id = d.id;
+    const res = await saveCampaignTemplate(payload);
+    const saved = res.template;
+    const i = ccState.templates.findIndex((t) => t.id === saved.id);
+    if (i >= 0) ccState.templates[i] = saved;
+    else ccState.templates.push(saved);
+    ccState.templates.sort((a, b) => a.name.localeCompare(b.name));
+    ccShowView("home");
+    renderCcTemplateList();
+  } catch (e2) {
+    err.textContent = e2.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save Template";
+  }
+}
+
+// ---- runtime wizard ----
+
+function ccRunAdvs() {
+  return advsForConnection(ccState.run.connectionId);
+}
+function ccSelectedAdvs() {
+  return ccRunAdvs().filter((a) => ccState.run.selected.has(String(a.advertiser_id)));
+}
+
+function openRunWizard(tpl) {
+  if (!tpl) return;
+  const r = ccState.run;
+  r.template = tpl;
+  r.selected.clear();
+  r.step = 1;
+  r.base = "";
+  r.spark = "";
+  r.links = "";
+  r.resources = null;
+  r.identityId = "";
+  r.formId = "";
+  r.salesEvent = "";
+  ccShowView("run");
+  document.getElementById("ccRunTplLabel").innerHTML =
+    `Template: <strong>${escapeHtml(tpl.name)}</strong> · ${tpl.campaign_type === "SALES" ? "Sales" : "Lead Generation"} · $${Number((tpl.config || {}).daily_budget || 0)}/day`;
+  document.getElementById("ccRunBase").value = "";
+  document.getElementById("ccRunSpark").value = "";
+  document.getElementById("ccRunLinks").value = "";
+
+  const sel = document.getElementById("ccRunBcSelect");
+  if (!tiktokState.connections.length) {
+    sel.innerHTML = "";
+    document.getElementById("ccRunAdvList").innerHTML = `<p class="tk-empty">No TikTok Business Centers connected. Add one under Tools → TikTok Ads first.</p>`;
+    document.getElementById("ccRunSummary").innerHTML = "";
+  } else {
+    sel.innerHTML = tiktokState.connections.map((c) => `<option value="${c.id}">${escapeHtml(connBcOptionLabel(c))}</option>`).join("");
+    r.connectionId = tiktokState.connections[0].id;
+    sel.value = r.connectionId;
+    renderCcRunAdvertisers();
+  }
+  runGoStep(1);
+}
+
+function renderCcRunAdvertisers() {
+  const advs = ccRunAdvs();
+  const approved = advs.filter((a) => advIsApproved(a)).length;
+  document.getElementById("ccRunSummary").innerHTML = `
+    <span class="tk-sum-item"><strong>${advs.length}</strong> account${advs.length === 1 ? "" : "s"}</span>
+    <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
+    <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
+  const wrap = document.getElementById("ccRunAdvList");
+  wrap.innerHTML = advs.length
+    ? advs.map((a) => {
+        const ok = advIsApproved(a);
+        const id = String(a.advertiser_id);
+        const meta = [id, a.currency || null, a.display_timezone || a.timezone || null].filter(Boolean).join(" · ");
+        return `<label class="tk-adv${ok ? "" : " disabled"}">
+          <input type="checkbox" data-cc-adv="${escapeHtml(id)}" ${ccState.run.selected.has(id) ? "checked" : ""} ${ok ? "" : "disabled"} />
+          <span class="tk-adv-main"><span class="tk-adv-name">${escapeHtml(a.advertiser_name || id)}</span><span class="tk-adv-meta">${escapeHtml(meta)}</span></span>
+          <span class="tk-adv-status ${ok ? "ok" : "warn"}">${ok ? "Approved" : "Suspended"}</span>
+        </label>`;
+      }).join("")
+    : `<p class="tk-empty">No advertiser accounts under this Business Center.</p>`;
+  syncCcRunSelectAll();
+  document.getElementById("ccRunNext1").disabled = ccState.run.selected.size === 0;
+}
+function syncCcRunSelectAll() {
+  const approved = ccRunAdvs().filter((a) => advIsApproved(a));
+  const cb = document.getElementById("ccRunSelectAll");
+  cb.checked = approved.length > 0 && approved.every((a) => ccState.run.selected.has(String(a.advertiser_id)));
+  cb.disabled = approved.length === 0;
+}
+
+function renderCcNamePreview() {
+  const advs = ccSelectedAdvs();
+  const base = ccState.run.base.trim();
+  document.getElementById("ccRunNamePreview").innerHTML = advs
+    .map((a, i) => `<div class="row"><span>${escapeHtml(a.advertiser_name || a.advertiser_id)}</span><strong>${base ? escapeHtml(base + (i + 1)) : "—"}</strong></div>`)
+    .join("");
+}
+
+function ccLocalTime(tz) {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: true }).format(new Date());
+  } catch (_) {
+    return "—";
+  }
+}
+function renderCcTzList() {
+  const advs = ccSelectedAdvs();
+  const zones = new Set(advs.map((a) => a.timezone || a.display_timezone || "America/New_York"));
+  const hh = String(ccState.run.hour).padStart(2, "0");
+  const mm = String(ccState.run.minute).padStart(2, "0");
+  const multi = zones.size > 1
+    ? `<div class="row"><span>Note</span><strong>${zones.size} timezones — ${hh}:${mm} is applied in each account's own zone</strong></div>`
+    : "";
+  document.getElementById("ccRunTzList").innerHTML =
+    multi +
+    advs.map((a) => {
+      const tz = a.timezone || a.display_timezone || "America/New_York";
+      return `<div class="row"><span>${escapeHtml(a.advertiser_name || a.advertiser_id)}</span><strong>${escapeHtml(tz)} · now ${escapeHtml(ccLocalTime(tz))} · starts ${hh}:${mm}</strong></div>`;
+    }).join("");
+}
+
+function renderCcSparkCounts() {
+  const n = ccSelectedAdvs().length;
+  const sc = ccState.run.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length;
+  const lc = ccState.run.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length;
+  const mark = (c) => (c === n ? "✓" : "✗");
+  document.getElementById("ccRunSparkCount").textContent = `${sc} spark code${sc === 1 ? "" : "s"} ${mark(sc)}  (need ${n})`;
+  document.getElementById("ccRunLinksCount").textContent = `${lc} post link${lc === 1 ? "" : "s"} ${mark(lc)}  (need ${n})`;
+}
+
+async function runGoStep(n) {
+  if (n < 1) return ccShowView("home");
+  const r = ccState.run;
+  r.step = n;
+  for (const s of [1, 2, 3, 4, 5, 6, 7]) document.getElementById(`ccRunStep${s}`).hidden = s !== n;
+  ccSteps("ccRunSteps", Math.min(n, 6));
+  for (const id of ["ccRunErr1", "ccRunErr2", "ccRunErr3", "ccRunErr4", "ccRunErr5", "ccRunErr6"]) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "";
+  }
+
+  if (n === 2) {
+    if (!ccState.run.selected.size) return runGoStep(1);
+    renderCcNamePreview();
+  }
+  if (n === 3) {
+    r.base = document.getElementById("ccRunBase").value.trim();
+    if (!r.base) { document.getElementById("ccRunErr2").textContent = "Enter a campaign name base."; return runGoStepShow(2); }
+    renderCcTzList();
+  }
+  if (n === 4) renderCcSparkCounts();
+  if (n === 5) {
+    const need = ccSelectedAdvs().length;
+    const sc = r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const lc = r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (sc.length !== need || lc.length !== need) {
+      document.getElementById("ccRunErr4").textContent = `Need exactly ${need} spark codes and ${need} post links (one per line).`;
+      return runGoStepShow(4);
+    }
+    await loadCcResources();
+  }
+  if (n === 6) renderCcReview();
+}
+function runGoStepShow(n) {
+  ccState.run.step = n;
+  for (const s of [1, 2, 3, 4, 5, 6, 7]) document.getElementById(`ccRunStep${s}`).hidden = s !== n;
+  ccSteps("ccRunSteps", Math.min(n, 6));
+}
+
+async function loadCcResources() {
+  const r = ccState.run;
+  const type = r.template.campaign_type;
+  document.getElementById("ccRunResLoading").hidden = false;
+  document.getElementById("ccRunResBody").hidden = true;
+  document.getElementById("ccRunNext5").disabled = true;
+  try {
+    const res = await campaignCreatorResources(r.connectionId, type, ccSelectedAdvs().map((a) => String(a.advertiser_id)));
+    r.resources = res;
+  } catch (err) {
+    document.getElementById("ccRunResLoading").hidden = true;
+    document.getElementById("ccRunErr5").textContent = err.message;
+    return;
+  }
+  document.getElementById("ccRunResLoading").hidden = true;
+  document.getElementById("ccRunResBody").hidden = false;
+
+  const res = r.resources;
+  const idSel = document.getElementById("ccRunIdentity");
+  idSel.innerHTML = (res.identities || []).length
+    ? res.identities.map((x) => `<option value="${escapeHtml(x.identity_id)}" data-type="${escapeHtml(x.identity_type || "BC_AUTH_TT")}">${escapeHtml(x.name || x.identity_id)}</option>`).join("")
+    : `<option value="">— none available across all accounts —</option>`;
+  r.identityId = idSel.value || "";
+  r.identityType = idSel.selectedOptions[0]?.dataset.type || "BC_AUTH_TT";
+  idSel.onchange = () => {
+    r.identityId = idSel.value;
+    r.identityType = idSel.selectedOptions[0]?.dataset.type || "BC_AUTH_TT";
+    syncCcRunNext5();
+  };
+
+  const isLead = type === "LEAD_GENERATION";
+  document.getElementById("ccRunFormWrap").hidden = !isLead;
+  document.getElementById("ccRunEventWrap").hidden = isLead;
+  if (isLead) {
+    const fs = document.getElementById("ccRunForm");
+    fs.innerHTML = (res.forms || []).length
+      ? res.forms.map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}</option>`).join("")
+      : `<option value="">— no form shared by all accounts —</option>`;
+    r.formId = fs.value || "";
+  } else {
+    const es = document.getElementById("ccRunEvent");
+    es.innerHTML = (res.sales_events || []).length
+      ? res.sales_events.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join("")
+      : `<option value="">— no conversion event available —</option>`;
+    r.salesEvent = es.value || "";
+  }
+
+  const notes = [];
+  for (const b of res.blockers || []) notes.push(`<div class="note bad">✖ ${escapeHtml(b)}</div>`);
+  for (const a of res.advertisers || []) {
+    for (const nt of a.notes || []) notes.push(`<div class="note">⚠ ${escapeHtml(a.advertiser_name)}: ${escapeHtml(nt)}</div>`);
+  }
+  document.getElementById("ccRunResNotes").innerHTML = notes.join("");
+  syncCcRunNext5();
+}
+
+function syncCcRunNext5() {
+  const r = ccState.run;
+  const res = r.resources || {};
+  const isLead = r.template.campaign_type === "LEAD_GENERATION";
+  const hardBlock = (res.blockers || []).length > 0;
+  const ok = !hardBlock && !!r.identityId && (isLead ? !!r.formId : !!r.salesEvent);
+  document.getElementById("ccRunNext5").disabled = !ok;
+}
+
+function renderCcReview() {
+  const r = ccState.run;
+  const advs = ccSelectedAdvs();
+  const base = r.base.trim();
+  const sc = r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const lc = r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const isLead = r.template.campaign_type === "LEAD_GENERATION";
+  const idName = document.getElementById("ccRunIdentity").selectedOptions[0]?.textContent || r.identityId;
+  const pageByAdv = new Map((r.resources?.advertisers || []).map((a) => [String(a.advertiser_id), a.instant_page]));
+  const hh = String(r.hour).padStart(2, "0");
+  const mm = String(r.minute).padStart(2, "0");
+
+  document.getElementById("ccRunReview").innerHTML =
+    `<div class="row"><span>Identity</span><strong>${escapeHtml(idName)}</strong></div>` +
+    `<div class="row"><span>Start time</span><strong>${hh}:${mm} in each account's timezone</strong></div>` +
+    (isLead
+      ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(document.getElementById("ccRunForm").selectedOptions[0]?.textContent || "—")}</strong></div>`
+      : `<div class="row"><span>Conversion event</span><strong>${escapeHtml(r.salesEvent || "—")}</strong></div>`) +
+    advs
+      .map((a, i) => {
+        const id = String(a.advertiser_id);
+        const page = !isLead ? `<div class="row"><span>Instant Page</span><strong>${escapeHtml(pageByAdv.get(id) || "newest (auto)")}</strong></div>` : "";
+        return `<div class="rev-acct">${escapeHtml(a.advertiser_name || id)}</div>
+          <div class="row"><span>Campaign</span><strong>${escapeHtml(base + (i + 1))}</strong></div>
+          <div class="row"><span>Spark code</span><strong>#${i + 1} · ${escapeHtml((sc[i] || "").slice(0, 10))}…</strong></div>
+          <div class="row"><span>Post link</span><strong>${escapeHtml((lc[i] || "").replace(/^https:\/\/(www\.)?/, "").slice(0, 44))}</strong></div>
+          ${page}`;
+      })
+      .join("");
+}
+
+async function submitCampaignCreator() {
+  const r = ccState.run;
+  const btn = document.getElementById("ccRunCreate");
+  const prog = document.getElementById("ccRunProgress");
+  const err = document.getElementById("ccRunErr6");
+  err.textContent = "";
+  const advs = ccSelectedAdvs();
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+  prog.className = "eng-placeholder busy";
+  prog.textContent = `Creating ${advs.length} campaign${advs.length === 1 ? "" : "s"}… this can take a minute.`;
+  try {
+    const res = await runCampaignCreator({
+      template_id: r.template.id,
+      campaign_type: r.template.campaign_type,
+      connection_id: r.connectionId,
+      advertiser_ids: advs.map((a) => String(a.advertiser_id)),
+      base_name: r.base.trim(),
+      schedule: { hour: r.hour, minute: r.minute },
+      spark_codes: r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+      post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+      identity_id: r.identityId,
+      identity_type: r.identityType,
+      form_id: r.formId || undefined,
+      sales_event: r.salesEvent || undefined,
+    });
+    renderCcResults(res.results || []);
+    runGoStepShow(7);
+    ccSteps("ccRunSteps", 6);
+    loadTiktokCampaigns();
+    runCampaignCreatorDuplication();
+  } catch (e2) {
+    err.textContent = e2.message;
+    btn.disabled = false;
+    btn.textContent = "Create Campaigns";
+    prog.textContent = "";
+    prog.className = "eng-placeholder";
+  }
+}
+
+function renderCcResults(results) {
+  const el = document.getElementById("ccRunResults");
+  const tone = (s) => (s === "Created" ? "ok" : s === "Skipped" ? "warn" : "bad");
+  const created = results.filter((r) => r.status === "Created").length;
+  const failed = results.filter((r) => r.status === "Failed").length;
+  const skipped = results.filter((r) => r.status === "Skipped").length;
+  el.innerHTML =
+    `<div class="wh-result-row"><span class="wh-r-detail"><strong>${created}</strong> Created · <strong>${failed}</strong> Failed${skipped ? ` · <strong>${skipped}</strong> Skipped` : ""}</span></div>` +
+    results
+      .map((r) => {
+        const warn = (r.warnings || []).map((w) => `<div class="wh-r-detail">⚠ ${escapeHtml(w)}</div>`).join("");
+        return `<div class="wh-result-row ${tone(r.status)}">
+          <span class="wh-r-name">${escapeHtml(r.advertiser_name || r.advertiser_id)} — ${escapeHtml(r.campaign_name || "")}</span>
+          <span class="wh-r-status">${escapeHtml(r.status)}${r.error ? ` <span class="wh-r-detail">— ${escapeHtml(r.error)}</span>` : ""}${warn}</span>
+        </div>`;
+      })
+      .join("");
 }
 
 // ---- Business Center view filter (Detailed Metrics header) ----

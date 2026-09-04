@@ -25,7 +25,8 @@ const {
   connectMcp,
   json,
 } = require("./_shared/tiktok-mcp");
-const { duplicateForRow, DUPES_PER_CYCLE } = require("./_shared/campaign-creator.js");
+const { duplicateForRow, registerForDuplication, DUPES_PER_CYCLE } = require("./_shared/campaign-creator.js");
+const { handleAutoAppeal, isStaleSubmitting } = require("./_shared/appeals.js");
 
 async function withClient(supabase, connection, fn) {
   const { serverUrl, redirectUrl } = resolveConfig();
@@ -62,53 +63,9 @@ exports.handler = async function (event) {
 // ---------------------------------------------------------------------------
 
 async function register(supabase, body) {
-  const campaignId = String(body.campaign_id || "");
-  const advertiserId = String(body.advertiser_id || "");
-  const connectionId = body.connection_id;
-  const initialAdgroupId = String(body.initial_adgroup_id || "");
-  if (!campaignId || !advertiserId || !connectionId || !initialAdgroupId) {
-    return json(400, { error: "campaign_id, advertiser_id, connection_id and initial_adgroup_id are required" });
-  }
-  if (!body.adgroup_payload || typeof body.adgroup_payload !== "object") {
-    return json(400, { error: "adgroup_payload (the exact adgroup_create args) is required" });
-  }
-
-  // Never register a WH Warmup campaign for duplication.
-  try {
-    const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id").eq("campaign_id", campaignId).maybeSingle();
-    if (wh) return json(400, { error: "That campaign is a WH Warmup campaign and cannot be duplicated." });
-  } catch (_) {
-    /* table missing — fine */
-  }
-
-  const { data: existing } = await supabase
-    .from("campaign_creator_campaigns")
-    .select("campaign_id")
-    .eq("campaign_id", campaignId)
-    .maybeSingle();
-  if (existing) return json(200, { ok: true, already: true });
-
-  const { error } = await supabase.from("campaign_creator_campaigns").insert({
-    campaign_id: campaignId,
-    advertiser_id: advertiserId,
-    connection_id: connectionId,
-    bc_id: body.bc_id || null,
-    campaign_name: body.campaign_name || null,
-    initial_adgroup_id: initialAdgroupId,
-    initial_ad_id: body.initial_ad_id ? String(body.initial_ad_id) : null,
-    adgroup_payload: body.adgroup_payload,
-    ad_payload: body.ad_payload || null,
-    dupe_target: Number.isFinite(Number(body.dupe_target)) && Number(body.dupe_target) > 0 ? Number(body.dupe_target) : 20,
-    dupe_status: "WAITING_FOR_ACTIVE",
-    updated_at: new Date().toISOString(),
-  });
-  if (error) {
-    if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
-      return json(500, { error: "campaign_creator_campaigns isn't migrated yet. Run supabase/campaign_creator.sql." });
-    }
-    return json(500, { error: "Could not register the campaign", details: sbErr(error) });
-  }
-  return json(200, { ok: true });
+  const r = await registerForDuplication(supabase, body);
+  if (r.error) return json(r.code || 500, { error: r.error });
+  return json(200, { ok: true, ...(r.already ? { already: true } : {}) });
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +108,20 @@ async function processDuplication(supabase) {
       .in("advertiser_id", advIds);
     const advStatus = new Map((advRows || []).map((a) => [String(a.advertiser_id), a.status]));
 
+    // Recover any row wedged in APPEAL_SUBMITTING by a crash between claim and
+    // result — reset to REJECTED so the appeal can be retried. Never clears
+    // appeal_attempted, so a successful appeal is still never repeated.
+    for (const r of list) {
+      if (isStaleSubmitting(r)) {
+        await patchRow(supabase, r.campaign_id, {
+          appeal_state: "REJECTED",
+          appeal_updated_at: new Date().toISOString(),
+        });
+        r.appeal_state = "REJECTED";
+        console.log(`[appeals] ${r.campaign_id} — stale APPEAL_SUBMITTING reset to REJECTED`);
+      }
+    }
+
     try {
       await withClient(supabase, conn, async (client) => {
         for (const r of list) {
@@ -158,6 +129,35 @@ async function processDuplication(supabase) {
           tally.checked += 1;
           const before = Number(r.dupe_created) || 0;
           r.__persist = (patch) => patchRow(supabase, r.campaign_id, patch);
+
+          // ---- AUTO REJECTION APPEAL (initial review lifecycle only) ----
+          // Runs before duplication so a rejected / appealing campaign is never
+          // duplicated. Reuses its loadCampaignDetail result for the Active gate.
+          let preloadedDetail = null;
+          if (r.dupe_status === "WAITING_FOR_ACTIVE") {
+            let appeal;
+            try {
+              appeal = await handleAutoAppeal({
+                supabase,
+                client,
+                row: r,
+                advertiserStatus: advStatus.get(String(r.advertiser_id)),
+              });
+            } catch (err) {
+              console.error(`[appeals] ${r.campaign_id} — orchestrator failed: ${err.message}`);
+              appeal = { blockDuplication: true, detail: null };
+            }
+            preloadedDetail = appeal.detail || null;
+            // Keep the Detailed Metrics status current for creator campaigns
+            // (the 60s "metrics" tick doesn't re-derive status).
+            if (preloadedDetail) await persistTiktokCampaignStatus(supabase, r.campaign_id, preloadedDetail);
+            if (appeal.blockDuplication) {
+              await patchRow(supabase, r.campaign_id, { updated_at: new Date().toISOString() });
+              tally.pending += 1;
+              continue;
+            }
+          }
+
           let out;
           try {
             out = await duplicateForRow({
@@ -165,6 +165,7 @@ async function processDuplication(supabase) {
               row: r,
               advertiserStatus: advStatus.get(String(r.advertiser_id)),
               deadlineMs,
+              preloadedDetail,
             });
           } catch (err) {
             console.error(`[campaign-creator] ${r.campaign_id} failed: ${err.message}`);
@@ -193,14 +194,51 @@ async function patchRow(supabase, campaignId, patch) {
   }
 }
 
+// Refresh a campaign's derived status on its tiktok_campaigns row from a
+// loadCampaignDetail result. Best-effort — the "metrics" 60s tick doesn't
+// re-derive status, so this keeps a creator campaign's Detailed Metrics badge
+// current while it moves through review / appeal / Active.
+async function persistTiktokCampaignStatus(supabase, campaignId, detail) {
+  if (!detail || !detail.effective_status) return;
+  try {
+    await supabase
+      .from("tiktok_campaigns")
+      .update({
+        campaign_operation_status: detail.campaign_operation_status,
+        campaign_secondary_status: detail.campaign_secondary_status,
+        effective_status: detail.effective_status,
+        effective_tone: detail.effective_tone,
+        status_detail: detail.status_detail,
+        ad_count: detail.ad_count,
+        active_ad_count: detail.active_ad_count,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("campaign_id", String(campaignId));
+  } catch (err) {
+    console.error(`[campaign-creator] status persist ${campaignId} failed: ${err.message}`);
+  }
+}
+
 async function listRows(supabase) {
-  const { data, error } = await supabase
+  const BASE =
+    "campaign_id, advertiser_id, campaign_name, initial_adgroup_id, dupe_target, dupe_created, dupe_status, dupe_attempts, dupe_error, became_active_at, completed_at, created_at";
+  const APPEAL =
+    ", appeal_state, appeal_attempted, appeal_attempts, appeal_raw_reasons, appeal_reasons, appeal_text, appeal_ad_id, appeal_adgroup_id, appeal_submitted_at, appeal_error, appeal_updated_at";
+
+  let { data, error } = await supabase
     .from("campaign_creator_campaigns")
-    .select(
-      "campaign_id, advertiser_id, campaign_name, initial_adgroup_id, dupe_target, dupe_created, dupe_status, dupe_attempts, dupe_error, became_active_at, completed_at, created_at"
-    )
+    .select(BASE + APPEAL)
     .order("created_at", { ascending: false })
     .limit(200);
+
+  // Appeal columns not migrated yet — fall back to the base columns.
+  if (error && /appeal_|column .* does not exist/i.test(error.message || "")) {
+    ({ data, error } = await supabase
+      .from("campaign_creator_campaigns")
+      .select(BASE)
+      .order("created_at", { ascending: false })
+      .limit(200));
+  }
   if (error) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, campaigns: [], unmigrated: true });
