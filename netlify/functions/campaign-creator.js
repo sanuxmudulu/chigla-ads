@@ -51,8 +51,11 @@ exports.handler = async function (event) {
     }
 
     if (body.action === "register") return register(supabase, body);
-    if (body.action === "process_duplication") return processDuplication(supabase);
     if (body.action === "list") return listRows(supabase);
+    // "process_duplication" (dashboard 60s poll) OR a Netlify scheduled
+    // invocation (no recognizable action, e.g. body {"next_run":"..."}) — both
+    // just run the safe, idempotent duplication pass.
+    if (body.action === "process_duplication" || !body.action) return processDuplication(supabase);
 
     return json(400, { error: `Unknown action: ${body.action}` });
   } catch (err) {
@@ -158,6 +161,7 @@ async function processDuplication(supabase) {
             }
           }
 
+          const beforeStatus = r.dupe_status;
           let out;
           try {
             out = await duplicateForRow({
@@ -172,10 +176,24 @@ async function processDuplication(supabase) {
             continue;
           }
           await patchRow(supabase, r.campaign_id, out.patch);
-          tally.created += Math.max(0, (Number(out.patch.dupe_created) || before) - before);
-          if (out.status === "COMPLETE") tally.completed += 1;
-          else if (out.status === "FAILED") tally.failed += 1;
-          else tally.pending += 1;
+          const createdNow = Math.max(0, (Number(out.patch.dupe_created) || before) - before);
+          tally.created += createdNow;
+          const afterStatus = out.patch.dupe_status || out.status;
+          if (afterStatus !== beforeStatus) {
+            console.log(`[campaign-creator] ${r.campaign_id} — ${beforeStatus} -> ${afterStatus}`);
+          }
+          if (out.status === "COMPLETE") {
+            tally.completed += 1;
+            console.log(`[campaign-creator] ${r.campaign_id} — COMPLETE (${out.patch.dupe_created || Number(r.dupe_target) || 20}/${Number(r.dupe_target) || 20} ad groups)`);
+          } else if (out.status === "FAILED") {
+            tally.failed += 1;
+            console.log(`[campaign-creator] ${r.campaign_id} — FAILED: ${out.patch.dupe_error || "unknown"}`);
+          } else {
+            tally.pending += 1;
+            if (createdNow > 0) {
+              console.log(`[campaign-creator] ${r.campaign_id} — DUPLICATING (${out.patch.dupe_created}/${Number(r.dupe_target) || 20})`);
+            }
+          }
         }
       });
     } catch (err) {

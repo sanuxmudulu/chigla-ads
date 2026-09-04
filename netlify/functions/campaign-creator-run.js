@@ -2,15 +2,17 @@
 //
 //   "resources"  { connection_id, campaign_type, advertiser_ids:[...], form_ids?:[...] }
 //        -> per-advertiser preflight for the runtime wizard:
-//           { identities:[{Auto}], forms:[{id,name}] (Lead Gen), sales_events:[string] (Sales),
+//           { identities:[{Auto}], forms:[{id,name}] (Lead Gen),
 //             advertisers:[{advertiser_id,advertiser_name,timezone,local_time,instant_page,notes[]}],
 //             form_notes:[string], blockers:[string] }
+//        Sales has no conversion-event selection — optimization_goal CONVERT +
+//        optimization_event BUTTON (no pixel) are fixed and resolved automatically.
 //
 //   "validate_form"  { connection_id, advertiser_ids:[...], page_id }
 //        -> { ok, page_id, name, checks:[{advertiser_id,advertiser_name,ok,error?}] }
 //
 //   "create"  { template_id?, campaign_type, config?, connection_id, advertiser_ids:[...],
-//               base_name, spark_codes:[...], post_links:[...], form_id?, sales_event?,
+//               base_name, spark_codes:[...], post_links:[...], form_id?,
 //               schedules:{ "<IANA tz>": { date:"YYYY-MM-DD", hour, minute } }   (per tz group;
 //                 legacy: schedule:{hour,minute}) }
 //        -> identity is always Auto (each Spark code's own authorized identity).
@@ -42,7 +44,6 @@ const {
   validateFormForAdvertisers,
   listInstantPages,
   newestInstantPage,
-  instantPageConversion,
   createOneCampaign,
 } = require("./_shared/campaign-creator-build");
 
@@ -146,7 +147,6 @@ async function resources(supabase, body) {
     ok: true,
     identities: [],
     forms: [],
-    sales_events: [],
     advertisers: [],
     blockers: [],
   };
@@ -154,7 +154,6 @@ async function resources(supabase, body) {
   const deadline = Date.now() + 45000;
   let approvedSeen = 0;
   const formById = new Map(); // page_id -> { id, name, source: 'bc' | 'saved' }
-  let eventSets = [];
 
   await withClient(supabase, conn, async (client) => {
     // BC-wide Instant Forms — the "BC -> Assets -> Forms" list. Forms linked to
@@ -231,6 +230,9 @@ async function resources(supabase, body) {
         // Nothing per-account: forms come from the validated Form IDs + the
         // best-effort BC library sweep, both done once above.
       } else {
+        // Sales: only the newest Instant Page is shown here for a sanity check —
+        // optimization goal/event are fixed (CONVERT / BUTTON, no pixel) and
+        // resolved automatically at creation time, never selected in the UI.
         try {
           const pages = await listInstantPages(client, advId);
           const newest = newestInstantPage(pages);
@@ -238,13 +240,6 @@ async function resources(supabase, body) {
           else row.instant_page = newest.name || newest.page_id;
         } catch (err) {
           row.notes.push(`Instant Pages unavailable (${err.message})`);
-        }
-        try {
-          const conv = await instantPageConversion(client, advId);
-          if (conv.error) row.notes.push(conv.error);
-          else eventSets.push(new Set(conv.events));
-        } catch (err) {
-          row.notes.push(`conversion events unavailable (${err.message})`);
         }
       }
 
@@ -271,22 +266,9 @@ async function resources(supabase, body) {
         "No forms found automatically — paste your Instant Form ID below (the number in the form's URL). It's checked and remembered."
       );
     }
-  } else {
-    out.sales_events = [...intersect(eventSets)];
-    if (!out.sales_events.length && approvedSeen) {
-      out.blockers.push("No single Instant Page conversion event is available across all selected advertiser accounts.");
-    }
   }
 
   return json(200, out);
-}
-
-function intersect(sets) {
-  const nonEmpty = sets.filter((s) => s && s.size);
-  if (!nonEmpty.length) return new Set();
-  let acc = new Set(nonEmpty[0]);
-  for (let i = 1; i < nonEmpty.length; i++) acc = new Set([...acc].filter((x) => nonEmpty[i].has(x)));
-  return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +299,8 @@ async function createBatch(supabase, body) {
   const identityArgConst = { auto: true };
   const formId = body.form_id ? String(body.form_id).trim() : "";      // BC / account form page_id (primary)
   const formName = body.form_name ? String(body.form_name).trim() : ""; // name fallback (account-owned forms)
-  const salesEvent = body.sales_event ? String(body.sales_event) : null;
+  // Sales: no conversion-event selection — optimization_goal CONVERT +
+  // optimization_event BUTTON are resolved automatically (see instantPageConversion).
 
   // ---- static validation ----
   if (!connectionId) return json(400, { error: "connection_id is required" });
@@ -394,12 +377,10 @@ async function createBatch(supabase, body) {
 
   // Interactive card image -> one clean public URL for the whole batch.
   let cardImageUrl = null;
-  const cardWarnings = [];
   if (config.interactive_card?.enabled && config.interactive_card.image_url) {
     try {
       const r = await resolveCardImageUrl(config.interactive_card.image_url, { supabase });
       cardImageUrl = r.url;
-      if (r.warning) cardWarnings.push(r.warning);
     } catch (err) {
       return json(400, { error: `Interactive Card image: ${err.message}` });
     }
@@ -459,7 +440,6 @@ async function createBatch(supabase, body) {
           identity: identityArgConst,
           form: type === "LEAD_GENERATION" ? { id: formId || null, name: formName || null } : null,
           libraryId: libMap.get(advId) || null,
-          salesEvent,
           cardImageUrl,
         });
 
@@ -496,7 +476,7 @@ async function createBatch(supabase, body) {
           dupe_target: 20,
         });
 
-        const warnings = [...(created.warnings || []), ...cardWarnings];
+        const warnings = [...(created.warnings || [])];
         if (reg.error) warnings.push(`Created, but NOT enrolled for auto-duplication: ${reg.error}`);
 
         results.push({

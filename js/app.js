@@ -1622,7 +1622,6 @@ const ccState = {
     formId: "", // Instant Form page_id (dropdown or manual)
     formLabel: "", // display name for review
     formValidated: false, // page_field_get confirmed it works for the accounts
-    salesEvent: "",
   },
   minimized: false, // true = modal hidden but the draft is kept for resume
 };
@@ -1780,7 +1779,6 @@ function wireCampaignCreatorEvents() {
     st.className = "cc-formid-status busy";
     ccFormIdTimer = setTimeout(() => validateCcFormId(v), 600);
   });
-  document.getElementById("ccRunEvent").addEventListener("change", (e) => { ccState.run.salesEvent = e.target.value; syncCcRunNext5(); });
 
   // CTA options
   document.getElementById("ccTplCta").innerHTML = CC_CTA_OPTS.map((v) => `<option value="${v}">${ccCtaLabel(v)}</option>`).join("");
@@ -1837,7 +1835,7 @@ function ccResetRunDraft() {
   ccState.run = {
     template: null, connectionId: null, selected: new Set(), step: 1, base: "",
     hour: 8, minute: 0, spark: "", links: "", resources: null, resLoading: false,
-    schedules: {}, formId: "", formLabel: "", formValidated: false, salesEvent: "",
+    schedules: {}, formId: "", formLabel: "", formValidated: false,
   };
 }
 function ccResetTplDraft() {
@@ -2439,7 +2437,7 @@ function renderCcResourcesFromState() {
   document.getElementById("ccRunResBody").hidden = false;
 
   document.getElementById("ccRunFormWrap").hidden = !isLead;
-  document.getElementById("ccRunEventWrap").hidden = isLead;
+  document.getElementById("ccRunSalesNote").hidden = isLead;
 
   if (isLead) {
     const fs = document.getElementById("ccRunForm");
@@ -2466,15 +2464,9 @@ function renderCcResourcesFromState() {
       r.formValidated = false;
       fs.value = "";
     }
-  } else {
-    const es = document.getElementById("ccRunEvent");
-    const events = res.sales_events || [];
-    es.innerHTML = events.length
-      ? events.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join("")
-      : `<option value="">— no conversion event available —</option>`;
-    if (![...es.options].some((o) => o.value === r.salesEvent)) r.salesEvent = es.value || "";
-    es.value = r.salesEvent;
   }
+  // Sales has nothing to pick here — optimization goal/event are fixed and
+  // resolved automatically per advertiser at creation time.
 
   const notes = [];
   for (const b of res.blockers || []) notes.push(`<div class="note bad">✖ ${escapeHtml(b)}</div>`);
@@ -2491,8 +2483,9 @@ function syncCcRunNext5() {
   const res = r.resources || {};
   const isLead = r.template.campaign_type === "LEAD_GENERATION";
   const hardBlock = (res.blockers || []).length > 0;
-  // Identity is never a blocker (Auto always works). Lead Gen needs a form name.
-  const ok = !hardBlock && (isLead ? !!r.formId : !!r.salesEvent);
+  // Identity is never a blocker (Auto always works). Lead Gen needs a form pick;
+  // Sales needs nothing here (optimization is fixed / automatic).
+  const ok = !hardBlock && (!isLead || !!r.formId);
   document.getElementById("ccRunNext5").disabled = !ok;
 }
 
@@ -2514,7 +2507,7 @@ function renderCcReview() {
     `<div class="row"><span>Identity</span><strong>Auto — each Spark code's own identity</strong></div>` +
     (isLead
       ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(r.formLabel || r.formId || "—")}</strong></div>`
-      : `<div class="row"><span>Conversion event</span><strong>${escapeHtml(r.salesEvent || "—")}</strong></div>`) +
+      : `<div class="row"><span>Optimization</span><strong>Conversion — Highest Volume (Instant Page, no pixel)</strong></div>`) +
     advs
       .map((a, i) => {
         const id = String(a.advertiser_id);
@@ -2552,7 +2545,6 @@ async function submitCampaignCreator() {
       spark_codes: r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       form_id: r.formId || undefined,
-      sales_event: r.salesEvent || undefined,
     });
     renderCcResults(res.results || []);
     runGoStepShow(7);

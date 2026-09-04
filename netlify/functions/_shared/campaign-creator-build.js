@@ -308,14 +308,12 @@ async function resolveCardImageUrl(rawUrl, { supabase }) {
     const pub = supabase.storage.from(CARD_BUCKET).getPublicUrl(path);
     const publicUrl = pub?.data?.publicUrl;
     if (!publicUrl) throw new Error("no public URL");
-    return { url: publicUrl, rehosted: true, warning: null };
+    return { url: publicUrl, rehosted: true };
   } catch (err) {
-    // Bucket missing / storage disabled — fall back to the direct link.
-    return {
-      url: direct,
-      rehosted: false,
-      warning: `Could not re-host the card image (${err.message || "storage unavailable"}); using the direct link. Create a public Storage bucket named "${CARD_BUCKET}" for reliability.`,
-    };
+    // Storage re-host unavailable — the direct link is fine (tested against a
+    // real TikTok campaign). Server-side note only, never surfaced to the user.
+    console.warn(`[campaign-creator] card image direct link (no re-host): ${err.message || "storage unavailable"}`);
+    return { url: direct, rehosted: false };
   }
 }
 
@@ -590,25 +588,41 @@ async function listBcIdentities(client, advertiserId, bcId) {
     .filter((x) => x.identity_id);
 }
 
-// Instant Page conversion events for the Sales objective. -> { goal, events } | { error }
+// Instant Page conversion event for the Sales objective (TikTok Instant Page,
+// optimization goal Conversion, no pixel — matches Ads Manager's "Highest
+// Volume" Sales setup). Verified live against a real account:
+//   pixel_instant_page_event_get({objective_type:"CONVERSIONS",optimization_goal:"CONVERT"})
+//   -> { list: [{ instant_page_events: { objective_types: [{ objective_type:"CONVERSIONS",
+//        optimization_goals: [{ optimization_goal:"CONVERT", optimization_events:["BUTTON"] }] }] } }] }
+// and confirmed against an existing 21-ad-group Sales campaign, every ad group:
+// promotion_website_type TIKTOK_NATIVE_PAGE, optimization_goal CONVERT,
+// optimization_event BUTTON, pixel_id null. "BUTTON" is the safe default when
+// the lookup fails for any reason — this is never a blocker.
+// -> { goal: "CONVERT", event: string }  (never throws, never blocks Sales)
+const SALES_OPT_GOAL = "CONVERT";
+const SALES_OPT_EVENT_DEFAULT = "BUTTON";
+
 async function instantPageConversion(client, advertiserId) {
   try {
-    const d = await mcpCall(client, "pixel_instant_page_event_get", {
-      advertiser_id: String(advertiserId),
-      objective_type: "CONVERSIONS",
-      optimization_goal: "CONVERT",
-    });
-    const goals = d?.optimization_goals || d?.optimize_goals || [];
-    const eventsRaw = d?.optimization_events || d?.external_actions || d?.events || [];
-    const events = (eventsRaw || [])
-      .map((e) => (typeof e === "string" ? e : e.optimization_event || e.external_action || e.event || e.value))
-      .filter(Boolean)
-      .map(String);
-    if (!events.length) return { error: "no Instant Page conversion events are available for this account" };
-    const goal = Array.isArray(goals) && goals.length && !goals.includes("CONVERT") ? String(goals[0]) : "CONVERT";
-    return { goal, events };
+    const d = await mcpThrottled(
+      client,
+      "pixel_instant_page_event_get",
+      { advertiser_id: String(advertiserId), objective_type: "CONVERSIONS", optimization_goal: SALES_OPT_GOAL },
+      { tries: 3 }
+    );
+    const events = new Set();
+    for (const item of d?.list || []) {
+      for (const ot of item?.instant_page_events?.objective_types || []) {
+        for (const og of ot?.optimization_goals || []) {
+          for (const e of og?.optimization_events || []) if (e) events.add(String(e));
+        }
+      }
+    }
+    const event = [...events][0] || SALES_OPT_EVENT_DEFAULT;
+    return { goal: SALES_OPT_GOAL, event };
   } catch (err) {
-    return { error: `Instant Page conversion events unavailable (${err.message})` };
+    console.warn(`[campaign-creator] pixel_instant_page_event_get unavailable for ${advertiserId} (${err.message}) — using default "${SALES_OPT_EVENT_DEFAULT}"`);
+    return { goal: SALES_OPT_GOAL, event: SALES_OPT_EVENT_DEFAULT };
   }
 }
 
@@ -681,8 +695,8 @@ function buildAdgroupPayload({ advertiserId, campaignId, type, config, scheduleU
   if (type === "SALES") {
     p.promotion_type = "WEBSITE";
     p.promotion_website_type = "TIKTOK_NATIVE_PAGE"; // TikTok Instant Page
-    p.optimization_goal = sales?.goal || "CONVERT";
-    if (sales?.event) p.optimization_event = sales.event;
+    p.optimization_goal = sales?.goal || SALES_OPT_GOAL; // "CONVERT"
+    p.optimization_event = sales?.event || SALES_OPT_EVENT_DEFAULT; // "BUTTON" — no pixel involved
   } else {
     p.promotion_type = "LEAD_GENERATION";
     p.promotion_target_type = "INSTANT_PAGE"; // TikTok Instant Form
@@ -744,7 +758,6 @@ async function createOneCampaign({
   identity, // { identity_id, identity_type } | { auto: true }
   form, // Lead Gen: { name, id? } — resolved to this advertiser's own form
   libraryId, // Lead Gen: this advertiser's BC form-library id (optional)
-  salesEvent, // Sales: chosen Instant Page conversion event
   cardImageUrl, // resolved public URL when interactive card enabled, else null
 }) {
   const advId = String(advertiser.advertiser_id);
@@ -767,10 +780,9 @@ async function createOneCampaign({
     if (newest.error) throw new Error(`Instant Page: ${newest.error}`);
     pageId = newest.page_id;
     pageName = newest.name;
-    const conv = await instantPageConversion(client, advId);
-    if (conv.error) throw new Error(`Sales optimization: ${conv.error}`);
-    const event = salesEvent && conv.events.includes(salesEvent) ? salesEvent : conv.events[0];
-    sales = { goal: conv.goal, event };
+    // optimization_goal CONVERT + optimization_event BUTTON — no pixel, never
+    // blocks creation (instantPageConversion always returns a usable value).
+    sales = await instantPageConversion(client, advId);
   } else {
     // Lead Gen — resolve THIS advertiser's own Instant Form by the operator's pick.
     pageId = await resolveAdvertiserForm(client, advId, libraryId, form || {});

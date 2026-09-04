@@ -16,3 +16,12 @@
 # via vercel.json "crons". See netlify/functions/cleanup.js.
 [functions."cleanup"]
   schedule = "20 5 * * *"
+
+# Campaign Creator auto-duplication safety net — runs process_duplication even
+# when the dashboard tab is closed (the 60s in-browser poll is still the primary
+# trigger while it's open; this just means an ad group that goes Active
+# overnight still gets its 20 copies). Idempotent, no-op when nothing is
+# WAITING_FOR_ACTIVE/DUPLICATING. Netlify-only — Vercel Hobby crons are capped
+# to once/day, so on Vercel keep the dashboard open or upgrade for this net.
+[functions."campaign-creator"]
+  schedule = "*/5 * * * *"
