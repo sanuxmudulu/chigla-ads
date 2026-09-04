@@ -176,6 +176,21 @@ function fmtLocal(date, timeZone) {
   return `${p.year}-${pad(p.month)}-${pad(p.day)} ${pad(p.hour)}:${pad(p.minute)}`;
 }
 
+// Interpret an explicit wall clock "YYYY-MM-DD" + hour:minute in `timeZone` and
+// return the matching UTC instant. Same one-iteration offset solve as
+// nextLocalClockUtc, just with a caller-supplied date instead of "next".
+function zonedClockToUtc(dateStr, hour, minute, timeZone) {
+  const [y, m, d] = String(dateStr || "").split("-").map((n) => parseInt(n, 10));
+  if (!(y > 2000 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) {
+    return nextLocalClockUtc(hour, minute, timeZone); // bad date -> safe fallback
+  }
+  const base = Date.UTC(y, m - 1, d, hour, minute, 0);
+  let guess = base - tzOffsetMs(new Date(base), timeZone);
+  guess = base - tzOffsetMs(new Date(guess), timeZone); // second pass
+  const utc = new Date(guess);
+  return { utc, localLabel: fmtLocal(utc, timeZone) };
+}
+
 // "YYYY-MM-DD HH:MM:SS" UTC — the format adgroup_create wants.
 function toApiUtc(date) {
   return date.toISOString().slice(0, 19).replace("T", " ");
@@ -723,6 +738,7 @@ async function createOneCampaign({
   campaignName,
   scheduleHour,
   scheduleMinute,
+  scheduleDate, // "YYYY-MM-DD" in the advertiser's timezone (optional)
   sparkCode,
   postUrl,
   identity, // { identity_id, identity_type } | { auto: true }
@@ -802,7 +818,9 @@ async function createOneCampaign({
     }
   }
 
-  const scheduleLocal = nextLocalClockUtc(scheduleHour, scheduleMinute, tz);
+  const scheduleLocal = scheduleDate
+    ? zonedClockToUtc(scheduleDate, scheduleHour, scheduleMinute, tz)
+    : nextLocalClockUtc(scheduleHour, scheduleMinute, tz);
 
   let campaignId = null;
   try {
@@ -935,6 +953,7 @@ module.exports = {
   CARD_BUCKET,
   normalizeTemplateConfig,
   nextLocalClockUtc,
+  zonedClockToUtc,
   fmtLocal,
   resolveCardImageUrl,
   driveDirectUrl,

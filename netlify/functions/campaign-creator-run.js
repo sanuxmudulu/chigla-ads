@@ -1,16 +1,19 @@
 // POST /.netlify/functions/campaign-creator-run   { action, ... }   (Vercel: /api/campaign-creator-run)
 //
-//   "resources"  { connection_id, campaign_type, advertiser_ids: [...] }
+//   "resources"  { connection_id, campaign_type, advertiser_ids:[...], form_ids?:[...] }
 //        -> per-advertiser preflight for the runtime wizard:
-//           { identities:[{identity_id,identity_type,name}]  (usable across ALL selected),
-//             forms:[{id,name}]        (Lead Gen — shared by ALL selected; else []),
-//             sales_events:[string]    (Sales — Instant Page conversion events shared by ALL; else []),
+//           { identities:[{Auto}], forms:[{id,name}] (Lead Gen), sales_events:[string] (Sales),
 //             advertisers:[{advertiser_id,advertiser_name,timezone,local_time,instant_page,notes[]}],
-//             blockers:[string] }
+//             form_notes:[string], blockers:[string] }
+//
+//   "validate_form"  { connection_id, advertiser_ids:[...], page_id }
+//        -> { ok, page_id, name, checks:[{advertiser_id,advertiser_name,ok,error?}] }
 //
 //   "create"  { template_id?, campaign_type, config?, connection_id, advertiser_ids:[...],
-//               base_name, schedule:{hour,minute}, spark_codes:[...], post_links:[...],
-//               identity_id, identity_type, form_id?, sales_event? }
+//               base_name, spark_codes:[...], post_links:[...], form_id?, sales_event?,
+//               schedules:{ "<IANA tz>": { date:"YYYY-MM-DD", hour, minute } }   (per tz group;
+//                 legacy: schedule:{hour,minute}) }
+//        -> identity is always Auto (each Spark code's own authorized identity).
 //        -> creates ONE campaign per advertiser, registers each successful one for
 //           the existing duplication + auto-appeal lifecycle, stores its post URL.
 //           Partial failure tolerant. -> { results:[{advertiser_id,advertiser_name,
@@ -39,12 +42,11 @@ const {
   validateFormForAdvertisers,
   listInstantPages,
   newestInstantPage,
-  listBcIdentities,
   instantPageConversion,
   createOneCampaign,
 } = require("./_shared/campaign-creator-build");
 
-const AUTO_IDENTITY = { identity_id: "__AUTO__", identity_type: "AUTO", name: "Auto — use each Spark code's own identity" };
+const AUTO_IDENTITY = { identity_id: "__AUTO__", identity_type: "AUTO", name: "Auto — each Spark code's own identity" };
 
 const advApproved = (a) => String(a?.status || "").toUpperCase() === "STATUS_ENABLE";
 const uniq = (a) => [...new Set(a)];
@@ -151,8 +153,7 @@ async function resources(supabase, body) {
 
   const deadline = Date.now() + 45000;
   let approvedSeen = 0;
-  const idMeta = new Map(); // identity_id -> { identity_id, identity_type, name, count }
-  const formById = new Map(); // page_id -> { id, name, source: 'bc' | 'account' }
+  const formById = new Map(); // page_id -> { id, name, source: 'bc' | 'saved' }
   let eventSets = [];
 
   await withClient(supabase, conn, async (client) => {
@@ -181,16 +182,15 @@ async function resources(supabase, body) {
       }
 
       // 2. Best-effort BC-wide library sweep (works for connections whose token
-      //    owns the forms; often empty otherwise — non-fatal).
+      //    owns the forms; often empty otherwise — non-fatal, logged server-side).
       try {
         const { forms, diag } = await listBcForms(client, { deadlineMs: deadline - 8000, cacheKey: String(connectionId) });
         for (const f of forms) if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "bc" });
-        out.form_debug = diag;
         if (diag && diag.errors && diag.errors.length) {
-          out.form_debug_note = `Form scan: ${diag.libraries} libraries, ${diag.withForms} with forms, ${diag.errors.length} error(s): ${diag.errors.slice(0, 3).join(" | ")}`;
+          console.warn(`[campaign-creator] form library scan: ${diag.libraries} libs, ${diag.withForms} with forms, ${diag.errors.length} error(s): ${diag.errors.slice(0, 3).join(" | ")}`);
         }
       } catch (err) {
-        out.blockers.push(`Could not read Business Center forms: ${err.message}`);
+        console.warn(`[campaign-creator] form library sweep failed: ${err.message}`);
       }
     }
 
@@ -224,23 +224,8 @@ async function resources(supabase, body) {
       }
       approvedSeen += 1;
 
-      // Identity discovery is only for the optional dropdown ("Auto" is the
-      // default and always works), so only probe the first few accounts — this
-      // keeps the preflight well under TikTok's MCP rate limit.
-      const bcId = adv.bc_id || conn.bc_id || null;
-      if (approvedSeen <= 3) {
-        try {
-          const ids = await listBcIdentities(client, advId, bcId);
-          for (const x of ids) {
-            const cur = idMeta.get(x.identity_id) || { ...x, count: 0 };
-            cur.count += 1;
-            idMeta.set(x.identity_id, cur);
-          }
-        } catch (err) {
-          row.notes.push(`identities unavailable (${err.message})`);
-        }
-        await new Promise((r) => setTimeout(r, 250));
-      }
+      // Identity is always "Auto" (each Spark code's own authorized identity) —
+      // no discovery, no UI. See createBatch (identityArgConst = { auto: true }).
 
       if (type === "LEAD_GENERATION") {
         // Nothing per-account: forms come from the validated Form IDs + the
@@ -269,13 +254,8 @@ async function resources(supabase, body) {
     out.blockers.push(`Preflight failed: ${err.message}`);
   });
 
-  // Identity: "Auto" (each Spark code's own identity) is always available and is
-  // the default; connected BC identities are offered as additional choices.
-  // (BC identities are probed on only the first few accounts, so no coverage %.)
-  out.identities = [
-    { ...AUTO_IDENTITY },
-    ...[...idMeta.values()].map((x) => ({ identity_id: x.identity_id, identity_type: x.identity_type, name: x.name })),
-  ];
+  // Identity is always Auto — no selection.
+  out.identities = [{ ...AUTO_IDENTITY }];
 
   if (type === "LEAD_GENERATION") {
     // Every published Lead Gen Instant Form visible to this BC (Business Center
@@ -288,9 +268,7 @@ async function resources(supabase, body) {
     out.form_notes = [];
     if (approvedSeen && !out.forms.length) {
       out.form_notes.push(
-        `TikTok's API won't list this BC's forms for the dashboard connection (its token isn't the forms' owner). ` +
-          `Paste a Form ID once — open the form in BC → Assets → Forms and copy the number from its URL. ` +
-          `It's validated against your accounts and remembered for next time.`
+        "No forms found automatically — paste your Instant Form ID below (the number in the form's URL). It's checked and remembered."
       );
     }
   } else {
@@ -327,13 +305,16 @@ async function createBatch(supabase, body) {
   const type = String(body.campaign_type || "").toUpperCase();
   const advertiserIds = uniq((body.advertiser_ids || []).map(String).filter(Boolean));
   const base = String(body.base_name || "").trim();
-  const hour = Number(body.schedule?.hour);
-  const minute = Number(body.schedule?.minute);
+  // Per-timezone schedule: { "<IANA tz>": { date:"YYYY-MM-DD", hour, minute } }.
+  // Falls back to a single { hour, minute } for older callers.
+  const schedules = body.schedules && typeof body.schedules === "object" ? body.schedules : null;
+  const legacyHour = Number(body.schedule?.hour);
+  const legacyMinute = Number(body.schedule?.minute);
   const sparkCodes = Array.isArray(body.spark_codes) ? body.spark_codes.map((s) => String(s)) : splitLines(body.spark_codes);
   const postLinks = Array.isArray(body.post_links) ? body.post_links.map((s) => String(s).trim()) : splitLines(body.post_links);
-  const identityId = String(body.identity_id || "__AUTO__");
-  const identityType = String(body.identity_type || "AUTO");
-  const identityAuto = identityId === "__AUTO__" || identityType === "AUTO";
+  // Identity is always Auto (each Spark code's own authorized identity). The
+  // identity selection UI was removed; the payload is ignored beyond this.
+  const identityArgConst = { auto: true };
   const formId = body.form_id ? String(body.form_id).trim() : "";      // BC / account form page_id (primary)
   const formName = body.form_name ? String(body.form_name).trim() : ""; // name fallback (account-owned forms)
   const salesEvent = body.sales_event ? String(body.sales_event) : null;
@@ -343,9 +324,25 @@ async function createBatch(supabase, body) {
   if (!TEMPLATE_TYPES.includes(type)) return json(400, { error: `campaign_type must be one of ${TEMPLATE_TYPES.join(", ")}` });
   if (!advertiserIds.length) return json(400, { error: "Select at least one advertiser account." });
   if (!base) return json(400, { error: "Enter a campaign name base." });
-  if (!(Number.isInteger(hour) && hour >= 0 && hour <= 23)) return json(400, { error: "Pick a valid schedule hour (0–23)." });
-  if (!(Number.isInteger(minute) && minute >= 0 && minute <= 59)) return json(400, { error: "Pick a valid schedule minute (0–59)." });
-  if (!identityAuto && !identityId) return json(400, { error: "Select a TikTok identity, or choose Auto." });
+
+  // Normalize schedules -> { tz: { date, hour, minute } }
+  const schedByTz = {};
+  const validClock = (h, m) => Number.isInteger(h) && h >= 0 && h <= 23 && Number.isInteger(m) && m >= 0 && m <= 59;
+  if (schedules) {
+    for (const [tz, s] of Object.entries(schedules)) {
+      const h = Number(s?.hour);
+      const m = Number(s?.minute);
+      const date = String(s?.date || "").trim();
+      if (!validClock(h, m)) return json(400, { error: `Pick a valid time for ${tz}.` });
+      if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return json(400, { error: `Pick a valid date for ${tz}.` });
+      schedByTz[tz] = { date: date || null, hour: h, minute: m };
+    }
+  }
+  if (!Object.keys(schedByTz).length) {
+    if (!validClock(legacyHour, legacyMinute)) return json(400, { error: "Pick a valid schedule time." });
+    schedByTz.__default__ = { date: null, hour: legacyHour, minute: legacyMinute };
+  }
+
   if (sparkCodes.length !== advertiserIds.length) {
     return json(400, { error: `Spark codes (${sparkCodes.length}) must match selected accounts (${advertiserIds.length}).` });
   }
@@ -410,7 +407,12 @@ async function createBatch(supabase, body) {
 
   const results = [];
   const deadline = Date.now() + 52000;
-  const identityArg = identityAuto ? { auto: true } : { identity_id: identityId, identity_type: identityType };
+
+  // Pick the schedule for an advertiser from its own timezone group.
+  const schedFor = (adv) => {
+    const tz = adv?.timezone || adv?.display_timezone || "America/New_York";
+    return schedByTz[tz] || schedByTz.__default__ || Object.values(schedByTz)[0];
+  };
 
   await withClient(supabase, conn, async (client) => {
     // The BC form-library map is only needed when the form was picked by NAME
@@ -438,6 +440,7 @@ async function createBatch(supabase, body) {
       }
 
       const bcId = adv.bc_id || conn.bc_id || null;
+      const sched = schedFor(adv);
       try {
         const created = await createOneCampaign({
           client,
@@ -448,11 +451,12 @@ async function createBatch(supabase, body) {
           type,
           config,
           campaignName: name,
-          scheduleHour: hour,
-          scheduleMinute: minute,
+          scheduleHour: sched.hour,
+          scheduleMinute: sched.minute,
+          scheduleDate: sched.date || null,
           sparkCode: sparkCodes[i],
           postUrl: postLinks[i],
-          identity: identityArg,
+          identity: identityArgConst,
           form: type === "LEAD_GENERATION" ? { id: formId || null, name: formName || null } : null,
           libraryId: libMap.get(advId) || null,
           salesEvent,

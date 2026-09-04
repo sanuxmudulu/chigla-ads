@@ -841,3 +841,12 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .cc-formid-status.ok { color: var(--profit); }
 .cc-formid-status.bad { color: var(--loss); }
 .cc-formid-status.busy { color: var(--text-2); }
+.cc-tzblocks { display: flex; flex-direction: column; gap: 10px; margin: 6px 0 10px; }
+.cc-tzblock { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.cc-tzblock-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.cc-tzblock-head strong { font-size: 12.5px; color: var(--text-1); }
+.cc-tzblock-head span { font-size: 10.5px; color: var(--text-2); }
+.cc-tzblock-fields { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.cc-tzblock-fields label { display: flex; align-items: center; gap: 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); font-weight: 600; }
+.cc-tzblock-fields input[type="date"] { width: auto; }
+.cc-tzblock-fields select { width: auto; min-width: 64px; }

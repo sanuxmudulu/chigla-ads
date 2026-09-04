@@ -1613,14 +1613,12 @@ const ccState = {
     selected: new Set(),
     step: 1,
     base: "",
-    hour: 8,
-    minute: 0,
+    // one entry per advertiser timezone: { "<IANA tz>": { date:"YYYY-MM-DD", hour, minute } }
+    schedules: {},
     spark: "",
     links: "",
     resources: null,
     resLoading: false,
-    identityId: "__AUTO__",
-    identityType: "AUTO",
     formId: "", // Instant Form page_id (dropdown or manual)
     formLabel: "", // display name for review
     formValidated: false, // page_field_get confirmed it works for the accounts
@@ -1736,19 +1734,21 @@ function wireCampaignCreatorEvents() {
     ccState.run.base = e.target.value;
     renderCcNamePreview();
   });
-  document.getElementById("ccRunHour").addEventListener("change", (e) => { ccState.run.hour = +e.target.value; renderCcTzList(); });
-  document.getElementById("ccRunMinute").addEventListener("change", (e) => { ccState.run.minute = +e.target.value; renderCcTzList(); });
   document.getElementById("ccRunSpark").addEventListener("input", (e) => { ccState.run.spark = e.target.value; renderCcSparkCounts(); });
   document.getElementById("ccRunLinks").addEventListener("input", (e) => { ccState.run.links = e.target.value; renderCcSparkCounts(); });
-  document.getElementById("ccRunIdentity").addEventListener("change", (e) => {
-    ccState.run.identityId = e.target.value;
-    ccState.run.identityType = e.target.selectedOptions[0]?.dataset.type || "AUTO";
-    syncCcRunNext5();
+  // per-timezone schedule blocks (delegated)
+  document.getElementById("ccRunTzBlocks").addEventListener("change", (e) => {
+    const field = e.target.dataset.sched;
+    const block = e.target.closest("[data-tz]");
+    if (!field || !block) return;
+    const tz = block.dataset.tz;
+    ccState.run.schedules[tz] = ccState.run.schedules[tz] || {};
+    ccState.run.schedules[tz][field] = field === "date" ? e.target.value : +e.target.value;
   });
   document.getElementById("ccRunForm").addEventListener("change", (e) => {
     if (document.getElementById("ccRunFormId").value.trim()) return; // manual id wins
     ccState.run.formId = e.target.value;
-    ccState.run.formLabel = (e.target.selectedOptions[0]?.textContent || e.target.value).replace(/ \((saved|account)\)$/, "");
+    ccState.run.formLabel = e.target.selectedOptions[0]?.textContent || e.target.value;
     ccState.run.formValidated = !!e.target.value; // dropdown items are already validated
     syncCcRunNext5();
   });
@@ -1781,14 +1781,6 @@ function wireCampaignCreatorEvents() {
     ccFormIdTimer = setTimeout(() => validateCcFormId(v), 600);
   });
   document.getElementById("ccRunEvent").addEventListener("change", (e) => { ccState.run.salesEvent = e.target.value; syncCcRunNext5(); });
-
-  // hour / minute options
-  const hs = document.getElementById("ccRunHour");
-  const ms = document.getElementById("ccRunMinute");
-  hs.innerHTML = Array.from({ length: 24 }, (_, i) => `<option value="${i}">${String(i).padStart(2, "0")}</option>`).join("");
-  ms.innerHTML = Array.from({ length: 60 }, (_, i) => `<option value="${i}">${String(i).padStart(2, "0")}</option>`).join("");
-  hs.value = "8";
-  ms.value = "0";
 
   // CTA options
   document.getElementById("ccTplCta").innerHTML = CC_CTA_OPTS.map((v) => `<option value="${v}">${ccCtaLabel(v)}</option>`).join("");
@@ -1845,7 +1837,7 @@ function ccResetRunDraft() {
   ccState.run = {
     template: null, connectionId: null, selected: new Set(), step: 1, base: "",
     hour: 8, minute: 0, spark: "", links: "", resources: null, resLoading: false,
-    identityId: "__AUTO__", identityType: "AUTO", formId: "", formLabel: "", salesEvent: "",
+    schedules: {}, formId: "", formLabel: "", formValidated: false, salesEvent: "",
   };
 }
 function ccResetTplDraft() {
@@ -1870,22 +1862,24 @@ function ccSnapshotDom() {
   } else if (ccState.view === "run") {
     const r = ccState.run;
     r.base = g("ccRunBase").value;
-    r.hour = +g("ccRunHour").value;
-    r.minute = +g("ccRunMinute").value;
     r.spark = g("ccRunSpark").value;
     r.links = g("ccRunLinks").value;
-    if (!g("ccRunIdentity").disabled && g("ccRunIdentity").value) {
-      r.identityId = g("ccRunIdentity").value;
-      r.identityType = g("ccRunIdentity").selectedOptions[0]?.dataset.type || "AUTO";
-    }
+    // schedule blocks -> ccState.run.schedules
+    document.querySelectorAll("#ccRunTzBlocks [data-tz]").forEach((b) => {
+      const tz = b.dataset.tz;
+      r.schedules[tz] = {
+        date: b.querySelector('[data-sched="date"]')?.value || ccLocalDate(tz),
+        hour: +(b.querySelector('[data-sched="hour"]')?.value || 8),
+        minute: +(b.querySelector('[data-sched="minute"]')?.value || 0),
+      };
+    });
     const manualId = g("ccRunFormId").value.trim();
     if (manualId) {
-      // keep the validated name if it's for this same id
       if (r.formId !== manualId) r.formLabel = `Form ID ${manualId}`;
       r.formId = manualId;
     } else if (g("ccRunForm").value) {
       r.formId = g("ccRunForm").value;
-      r.formLabel = (g("ccRunForm").selectedOptions[0]?.textContent || r.formId).replace(/ \((saved|account)\)$/, "");
+      r.formLabel = g("ccRunForm").selectedOptions[0]?.textContent || r.formId;
     }
   }
 }
@@ -1921,10 +1915,9 @@ function ccRestoreDom() {
     if (r.connectionId) sel.value = r.connectionId;
     renderCcRunAdvertisers();
     document.getElementById("ccRunBase").value = r.base;
-    document.getElementById("ccRunHour").value = String(r.hour);
-    document.getElementById("ccRunMinute").value = String(r.minute);
     document.getElementById("ccRunSpark").value = r.spark;
     document.getElementById("ccRunLinks").value = r.links;
+    renderCcTzBlocks(); // rebuilds from r.schedules
     // Restore the picked Form ID before the resources step re-renders. If it's
     // not one of the dropdown options, put it back in the manual field.
     const inList = (r.resources?.forms || []).some((f) => String(f.id) === String(r.formId));
@@ -1938,7 +1931,6 @@ function ccRestoreDom() {
     if (step >= 5 && r.resources) renderCcResourcesFromState();
     runGoStepShow(step);
     if (step === 2) renderCcNamePreview();
-    if (step === 3) renderCcTzList();
     if (step === 4) renderCcSparkCounts();
     if (step === 6) renderCcReview();
   } else {
@@ -2194,6 +2186,8 @@ function openRunWizard(tpl) {
   document.getElementById("ccRunSpark").value = "";
   document.getElementById("ccRunLinks").value = "";
   document.getElementById("ccRunFormId").value = "";
+  document.getElementById("ccRunFormIdStatus").textContent = "";
+  document.getElementById("ccRunTzBlocks").innerHTML = "";
 
   const sel = document.getElementById("ccRunBcSelect");
   if (!tiktokState.connections.length) {
@@ -2247,6 +2241,7 @@ function renderCcNamePreview() {
     .join("");
 }
 
+const ccAdvTz = (a) => a.timezone || a.display_timezone || "America/New_York";
 function ccLocalTime(tz) {
   try {
     return new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: true }).format(new Date());
@@ -2254,20 +2249,56 @@ function ccLocalTime(tz) {
     return "—";
   }
 }
-function renderCcTzList() {
-  const advs = ccSelectedAdvs();
-  const zones = new Set(advs.map((a) => a.timezone || a.display_timezone || "America/New_York"));
-  const hh = String(ccState.run.hour).padStart(2, "0");
-  const mm = String(ccState.run.minute).padStart(2, "0");
-  const multi = zones.size > 1
-    ? `<div class="row"><span>Note</span><strong>${zones.size} timezones — ${hh}:${mm} is applied in each account's own zone</strong></div>`
-    : "";
-  document.getElementById("ccRunTzList").innerHTML =
-    multi +
-    advs.map((a) => {
-      const tz = a.timezone || a.display_timezone || "America/New_York";
-      return `<div class="row"><span>${escapeHtml(a.advertiser_name || a.advertiser_id)}</span><strong>${escapeHtml(tz)} · now ${escapeHtml(ccLocalTime(tz))} · starts ${hh}:${mm}</strong></div>`;
-    }).join("");
+// Today's calendar date IN that timezone as "YYYY-MM-DD" (never the browser's).
+function ccLocalDate(tz) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  } catch (_) {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+// Selected advertisers grouped by their configured timezone.
+function ccTzGroups() {
+  const groups = new Map();
+  for (const a of ccSelectedAdvs()) {
+    const tz = ccAdvTz(a);
+    if (!groups.has(tz)) groups.set(tz, []);
+    groups.get(tz).push(a);
+  }
+  return groups;
+}
+
+// One schedule block per advertiser timezone. Each block: tz name, current local
+// time, account count, and a DATE + HOUR + MINUTE picker. The date defaults to
+// today in that timezone. Existing picks in ccState.run.schedules are preserved.
+function renderCcTzBlocks() {
+  const groups = ccTzGroups();
+  const sched = ccState.run.schedules;
+  // drop stale timezones no longer selected
+  for (const tz of Object.keys(sched)) if (!groups.has(tz)) delete sched[tz];
+
+  const hourOpts = (sel) =>
+    Array.from({ length: 24 }, (_, i) => `<option value="${i}"${i === sel ? " selected" : ""}>${String(i).padStart(2, "0")}</option>`).join("");
+  const minOpts = (sel) =>
+    Array.from({ length: 60 }, (_, i) => `<option value="${i}"${i === sel ? " selected" : ""}>${String(i).padStart(2, "0")}</option>`).join("");
+
+  const html = [...groups.entries()]
+    .map(([tz, advs]) => {
+      if (!sched[tz]) sched[tz] = { date: ccLocalDate(tz), hour: 8, minute: 0 };
+      const s = sched[tz];
+      if (!s.date) s.date = ccLocalDate(tz);
+      const today = ccLocalDate(tz);
+      return `<div class="cc-tzblock" data-tz="${escapeHtml(tz)}">
+        <div class="cc-tzblock-head"><strong>${escapeHtml(tz)}</strong>
+          <span>${advs.length} account${advs.length === 1 ? "" : "s"} · now ${escapeHtml(ccLocalTime(tz))}</span></div>
+        <div class="cc-tzblock-fields">
+          <label>Date <input type="date" data-sched="date" value="${escapeHtml(s.date)}" min="${escapeHtml(today)}" /></label>
+          <label>Time <select data-sched="hour">${hourOpts(s.hour)}</select> : <select data-sched="minute">${minOpts(s.minute)}</select></label>
+        </div>
+      </div>`;
+    })
+    .join("");
+  document.getElementById("ccRunTzBlocks").innerHTML = html || `<p class="eng-hint">Select accounts first.</p>`;
 }
 
 function renderCcSparkCounts() {
@@ -2297,9 +2328,20 @@ async function runGoStep(n) {
   if (n === 3) {
     r.base = document.getElementById("ccRunBase").value.trim();
     if (!r.base) { document.getElementById("ccRunErr2").textContent = "Enter a campaign name base."; return runGoStepShow(2); }
-    renderCcTzList();
+    renderCcTzBlocks();
   }
-  if (n === 4) renderCcSparkCounts();
+  if (n === 4) {
+    // snapshot the schedule blocks before leaving step 3
+    document.querySelectorAll("#ccRunTzBlocks [data-tz]").forEach((b) => {
+      const tz = b.dataset.tz;
+      r.schedules[tz] = {
+        date: b.querySelector('[data-sched="date"]')?.value || ccLocalDate(tz),
+        hour: +(b.querySelector('[data-sched="hour"]')?.value || 8),
+        minute: +(b.querySelector('[data-sched="minute"]')?.value || 0),
+      };
+    });
+    renderCcSparkCounts();
+  }
   if (n === 5) {
     const need = ccSelectedAdvs().length;
     const sc = r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
@@ -2337,9 +2379,7 @@ async function loadCcResources() {
     document.getElementById("ccRunErr5").textContent = err.message;
     return;
   }
-  // A fresh preflight resets the identity/form picks so stale values can't carry.
-  r.identityId = "__AUTO__";
-  r.identityType = "AUTO";
+  // A fresh preflight resets the form pick so stale values can't carry.
   r.formId = "";
   r.formLabel = "";
   r.formValidated = false;
@@ -2376,7 +2416,7 @@ async function validateCcFormId(pageId) {
     if (![...fs.options].some((o) => o.value === pageId)) {
       const opt = document.createElement("option");
       opt.value = pageId;
-      opt.textContent = `${nm} (saved)`;
+      opt.textContent = nm;
       fs.appendChild(opt);
     }
   } else {
@@ -2398,17 +2438,6 @@ function renderCcResourcesFromState() {
   document.getElementById("ccRunResLoading").hidden = true;
   document.getElementById("ccRunResBody").hidden = false;
 
-  const idSel = document.getElementById("ccRunIdentity");
-  idSel.innerHTML = (res.identities || [])
-    .map((x) => {
-      const cov = x.total && x.count < x.total ? ` (in ${x.count}/${x.total})` : "";
-      return `<option value="${escapeHtml(x.identity_id)}" data-type="${escapeHtml(x.identity_type || "AUTO")}">${escapeHtml(x.name || x.identity_id)}${escapeHtml(cov)}</option>`;
-    })
-    .join("");
-  if (![...idSel.options].some((o) => o.value === r.identityId)) r.identityId = idSel.value || "__AUTO__";
-  idSel.value = r.identityId;
-  r.identityType = idSel.selectedOptions[0]?.dataset.type || "AUTO";
-
   document.getElementById("ccRunFormWrap").hidden = !isLead;
   document.getElementById("ccRunEventWrap").hidden = isLead;
 
@@ -2417,12 +2446,7 @@ function renderCcResourcesFromState() {
     const forms = res.forms || [];
     fs.innerHTML = forms.length
       ? [`<option value="">— select a form —</option>`]
-          .concat(
-            forms.map((f) => {
-              const tag = f.source === "saved" ? " (saved)" : f.source === "account" ? " (account)" : "";
-              return `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}${escapeHtml(tag)}</option>`;
-            })
-          )
+          .concat(forms.map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}</option>`))
           .join("")
       : `<option value="">— paste your Form ID below —</option>`;
     const manual = document.getElementById("ccRunFormId");
@@ -2455,10 +2479,6 @@ function renderCcResourcesFromState() {
   const notes = [];
   for (const b of res.blockers || []) notes.push(`<div class="note bad">✖ ${escapeHtml(b)}</div>`);
   for (const n of res.form_notes || []) notes.push(`<div class="note">⚠ ${escapeHtml(n)}</div>`);
-  if (isLead && res.form_debug) {
-    const d = res.form_debug;
-    notes.push(`<div class="note" style="opacity:.7">Form scan: ${d.libraries || 0} libraries · ${d.withForms || 0} with forms · ${d.scanned || 0} scanned${(d.errors || []).length ? ` · ${d.errors.length} error(s)` : ""}</div>`);
-  }
   for (const a of res.advertisers || []) {
     for (const nt of a.notes || []) notes.push(`<div class="note">⚠ ${escapeHtml(a.advertiser_name)}: ${escapeHtml(nt)}</div>`);
   }
@@ -2483,23 +2503,26 @@ function renderCcReview() {
   const sc = r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const lc = r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const isLead = r.template.campaign_type === "LEAD_GENERATION";
-  const idName = document.getElementById("ccRunIdentity").selectedOptions[0]?.textContent || r.identityId;
   const pageByAdv = new Map((r.resources?.advertisers || []).map((a) => [String(a.advertiser_id), a.instant_page]));
-  const hh = String(r.hour).padStart(2, "0");
-  const mm = String(r.minute).padStart(2, "0");
+  const pad = (n) => String(n).padStart(2, "0");
+  const schedText = (tz) => {
+    const s = r.schedules[tz] || {};
+    return `${s.date || ccLocalDate(tz)} · ${pad(s.hour ?? 8)}:${pad(s.minute ?? 0)}`;
+  };
 
   document.getElementById("ccRunReview").innerHTML =
-    `<div class="row"><span>Identity</span><strong>${escapeHtml(idName)}</strong></div>` +
-    `<div class="row"><span>Start time</span><strong>${hh}:${mm} in each account's timezone</strong></div>` +
+    `<div class="row"><span>Identity</span><strong>Auto — each Spark code's own identity</strong></div>` +
     (isLead
       ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(r.formLabel || r.formId || "—")}</strong></div>`
       : `<div class="row"><span>Conversion event</span><strong>${escapeHtml(r.salesEvent || "—")}</strong></div>`) +
     advs
       .map((a, i) => {
         const id = String(a.advertiser_id);
+        const tz = ccAdvTz(a);
         const page = !isLead ? `<div class="row"><span>Instant Page</span><strong>${escapeHtml(pageByAdv.get(id) || "newest (auto)")}</strong></div>` : "";
         return `<div class="rev-acct">${escapeHtml(a.advertiser_name || id)}</div>
           <div class="row"><span>Campaign</span><strong>${escapeHtml(base + (i + 1))}</strong></div>
+          <div class="row"><span>Start</span><strong>${escapeHtml(schedText(tz))} <em>(${escapeHtml(tz)})</em></strong></div>
           <div class="row"><span>Spark code</span><strong>#${i + 1} · ${escapeHtml((sc[i] || "").slice(0, 10))}…</strong></div>
           <div class="row"><span>Post link</span><strong>${escapeHtml((lc[i] || "").replace(/^https:\/\/(www\.)?/, "").slice(0, 44))}</strong></div>
           ${page}`;
@@ -2525,11 +2548,9 @@ async function submitCampaignCreator() {
       connection_id: r.connectionId,
       advertiser_ids: advs.map((a) => String(a.advertiser_id)),
       base_name: r.base.trim(),
-      schedule: { hour: r.hour, minute: r.minute },
+      schedules: r.schedules,
       spark_codes: r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-      identity_id: r.identityId,
-      identity_type: r.identityType,
       form_id: r.formId || undefined,
       sales_event: r.salesEvent || undefined,
     });

@@ -524,13 +524,10 @@
         </div>
       </div>
 
-      <!-- Step 3 — Schedule -->
+      <!-- Step 3 — Schedule (one block per advertiser timezone) -->
       <div class="cc-step" id="ccRunStep3" hidden>
-        <label class="budget-field-label">Start time <span class="eng-hint">(interpreted in EACH advertiser's own timezone)</span></label>
-        <div class="cc-time">
-          <select id="ccRunHour"></select><span>:</span><select id="ccRunMinute"></select>
-        </div>
-        <div id="ccRunTzList" class="cc-tzlist"></div>
+        <label class="budget-field-label">Start date &amp; time <span class="eng-hint">(each block is one advertiser timezone)</span></label>
+        <div id="ccRunTzBlocks" class="cc-tzblocks"></div>
         <div class="modal-error" id="ccRunErr3"></div>
         <div class="modal-actions">
           <button class="icon-btn" id="ccRunBack3">Back</button>
@@ -559,9 +556,6 @@
       <div class="cc-step" id="ccRunStep5" hidden>
         <div id="ccRunResLoading" class="eng-placeholder busy">Loading account resources…</div>
         <div id="ccRunResBody" hidden>
-          <label class="budget-field-label" for="ccRunIdentity">TikTok identity</label>
-          <select id="ccRunIdentity"></select>
-
           <div id="ccRunFormWrap" hidden>
             <label class="budget-field-label" for="ccRunForm">Instant Form <span class="eng-hint">(from BC → Assets → Forms)</span></label>
             <select id="ccRunForm"></select>
