@@ -1617,7 +1617,8 @@ const ccState = {
     resLoading: false,
     identityId: "__AUTO__",
     identityType: "AUTO",
-    formName: "",
+    formId: "", // Instant Form page_id (dropdown or manual)
+    formLabel: "", // display name for review
     salesEvent: "",
   },
   minimized: false, // true = modal hidden but the draft is kept for resume
@@ -1739,7 +1740,24 @@ function wireCampaignCreatorEvents() {
     ccState.run.identityType = e.target.selectedOptions[0]?.dataset.type || "AUTO";
     syncCcRunNext5();
   });
-  document.getElementById("ccRunForm").addEventListener("change", (e) => { ccState.run.formName = e.target.value; syncCcRunNext5(); });
+  document.getElementById("ccRunForm").addEventListener("change", (e) => {
+    if (document.getElementById("ccRunFormId").value.trim()) return; // manual id wins
+    ccState.run.formId = e.target.value;
+    ccState.run.formLabel = e.target.selectedOptions[0]?.textContent || e.target.value;
+    syncCcRunNext5();
+  });
+  document.getElementById("ccRunFormId").addEventListener("input", (e) => {
+    const v = e.target.value.trim();
+    if (v) {
+      ccState.run.formId = v;
+      ccState.run.formLabel = `Form ID ${v}`;
+    } else {
+      const fs = document.getElementById("ccRunForm");
+      ccState.run.formId = fs.value || "";
+      ccState.run.formLabel = fs.selectedOptions[0]?.textContent || fs.value || "";
+    }
+    syncCcRunNext5();
+  });
   document.getElementById("ccRunEvent").addEventListener("change", (e) => { ccState.run.salesEvent = e.target.value; syncCcRunNext5(); });
 
   // hour / minute options
@@ -1805,7 +1823,7 @@ function ccResetRunDraft() {
   ccState.run = {
     template: null, connectionId: null, selected: new Set(), step: 1, base: "",
     hour: 8, minute: 0, spark: "", links: "", resources: null, resLoading: false,
-    identityId: "__AUTO__", identityType: "AUTO", formName: "", salesEvent: "",
+    identityId: "__AUTO__", identityType: "AUTO", formId: "", formLabel: "", salesEvent: "",
   };
 }
 function ccResetTplDraft() {
@@ -1838,7 +1856,9 @@ function ccSnapshotDom() {
       r.identityId = g("ccRunIdentity").value;
       r.identityType = g("ccRunIdentity").selectedOptions[0]?.dataset.type || "AUTO";
     }
-    if (!g("ccRunForm").disabled && g("ccRunForm").value) r.formName = g("ccRunForm").value;
+    const manualId = g("ccRunFormId").value.trim();
+    if (manualId) { r.formId = manualId; r.formLabel = `Form ID ${manualId}`; }
+    else if (g("ccRunForm").value) { r.formId = g("ccRunForm").value; r.formLabel = g("ccRunForm").selectedOptions[0]?.textContent || r.formId; }
   }
 }
 
@@ -1877,6 +1897,8 @@ function ccRestoreDom() {
     document.getElementById("ccRunMinute").value = String(r.minute);
     document.getElementById("ccRunSpark").value = r.spark;
     document.getElementById("ccRunLinks").value = r.links;
+    // Restore a manually-typed Form ID before the resources step re-renders.
+    document.getElementById("ccRunFormId").value = /^Form ID /.test(r.formLabel || "") ? r.formId : "";
     const step = r.step || 1;
     if (step >= 5 && r.resources) renderCcResourcesFromState();
     runGoStepShow(step);
@@ -2136,6 +2158,7 @@ function openRunWizard(tpl) {
   document.getElementById("ccRunBase").value = "";
   document.getElementById("ccRunSpark").value = "";
   document.getElementById("ccRunLinks").value = "";
+  document.getElementById("ccRunFormId").value = "";
 
   const sel = document.getElementById("ccRunBcSelect");
   if (!tiktokState.connections.length) {
@@ -2276,7 +2299,8 @@ async function loadCcResources() {
   // A fresh preflight resets the identity/form picks so stale values can't carry.
   r.identityId = "__AUTO__";
   r.identityType = "AUTO";
-  r.formName = "";
+  r.formId = "";
+  r.formLabel = "";
   renderCcResourcesFromState();
 }
 
@@ -2311,14 +2335,24 @@ function renderCcResourcesFromState() {
       ? [`<option value="">— select a form —</option>`]
           .concat(
             forms.map((f) => {
-              const cov = f.total && f.count < f.total ? ` — in ${f.count}/${f.total} accounts` : "";
-              return `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)}${escapeHtml(cov)}</option>`;
+              const tag = f.source === "account" ? " (account)" : "";
+              return `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}${escapeHtml(tag)}</option>`;
             })
           )
           .join("")
-      : `<option value="">— no published Instant Form found —</option>`;
-    if (![...fs.options].some((o) => o.value === r.formName)) r.formName = "";
-    fs.value = r.formName;
+      : `<option value="">— none found via API — paste a Form ID below —</option>`;
+    const manual = document.getElementById("ccRunFormId");
+    // Keep an existing pick if it still matches a dropdown option or a manual id.
+    if (manual.value.trim()) {
+      r.formId = manual.value.trim();
+      r.formLabel = `Form ID ${r.formId}`;
+    } else if ([...fs.options].some((o) => o.value === r.formId) && r.formId) {
+      fs.value = r.formId;
+    } else {
+      r.formId = "";
+      r.formLabel = "";
+      fs.value = "";
+    }
   } else {
     const es = document.getElementById("ccRunEvent");
     const events = res.sales_events || [];
@@ -2344,7 +2378,7 @@ function syncCcRunNext5() {
   const isLead = r.template.campaign_type === "LEAD_GENERATION";
   const hardBlock = (res.blockers || []).length > 0;
   // Identity is never a blocker (Auto always works). Lead Gen needs a form name.
-  const ok = !hardBlock && (isLead ? !!r.formName : !!r.salesEvent);
+  const ok = !hardBlock && (isLead ? !!r.formId : !!r.salesEvent);
   document.getElementById("ccRunNext5").disabled = !ok;
 }
 
@@ -2364,7 +2398,7 @@ function renderCcReview() {
     `<div class="row"><span>Identity</span><strong>${escapeHtml(idName)}</strong></div>` +
     `<div class="row"><span>Start time</span><strong>${hh}:${mm} in each account's timezone</strong></div>` +
     (isLead
-      ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(r.formName || "—")} <em>(each account uses its own form with this name)</em></strong></div>`
+      ? `<div class="row"><span>Instant Form</span><strong>${escapeHtml(r.formLabel || r.formId || "—")}</strong></div>`
       : `<div class="row"><span>Conversion event</span><strong>${escapeHtml(r.salesEvent || "—")}</strong></div>`) +
     advs
       .map((a, i) => {
@@ -2402,7 +2436,7 @@ async function submitCampaignCreator() {
       post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       identity_id: r.identityId,
       identity_type: r.identityType,
-      form_name: r.formName || undefined,
+      form_id: r.formId || undefined,
       sales_event: r.salesEvent || undefined,
     });
     renderCcResults(res.results || []);

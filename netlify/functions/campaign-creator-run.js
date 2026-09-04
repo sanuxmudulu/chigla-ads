@@ -34,7 +34,7 @@ const {
   normalizeTemplateConfig,
   fmtLocal,
   resolveCardImageUrl,
-  listInstantForms,
+  listBcForms,
   formLibraryMap,
   listInstantPages,
   newestInstantPage,
@@ -119,11 +119,22 @@ async function resources(supabase, body) {
   const deadline = Date.now() + 45000;
   let approvedSeen = 0;
   const idMeta = new Map(); // identity_id -> { identity_id, identity_type, name, count }
-  const formMeta = new Map(); // lower(name) -> { name, id, count }
+  const formById = new Map(); // page_id -> { id, name, source: 'bc' | 'account' }
   let eventSets = [];
 
   await withClient(supabase, conn, async (client) => {
-    const libMap = type === "LEAD_GENERATION" ? await formLibraryMap(client) : new Map();
+    // BC-wide Instant Forms — the "BC -> Assets -> Forms" list. Forms linked to
+    // ad accounts are NOT visible via page_get(advertiser_id); they live in a
+    // form library and are only listable by sweeping page_get(library_id).
+    if (type === "LEAD_GENERATION") {
+      try {
+        for (const f of await listBcForms(client, { deadlineMs: deadline })) {
+          if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "bc" });
+        }
+      } catch (err) {
+        out.blockers.push(`Could not read Business Center forms: ${err.message}`);
+      }
+    }
 
     for (const advId of advertiserIds) {
       if (Date.now() > deadline) {
@@ -168,18 +179,8 @@ async function resources(supabase, body) {
       }
 
       if (type === "LEAD_GENERATION") {
-        try {
-          const forms = await listInstantForms(client, advId, libMap.get(advId));
-          if (!forms.length) row.notes.push("no published Instant Form in this account");
-          for (const f of forms) {
-            const key = String(f.name || f.id).trim().toLowerCase();
-            const cur = formMeta.get(key) || { name: f.name || f.id, id: f.id, count: 0 };
-            cur.count += 1;
-            formMeta.set(key, cur);
-          }
-        } catch (err) {
-          row.notes.push(`Instant Forms unavailable (${err.message})`);
-        }
+        // Forms are read once, BC-wide, above (every form library is swept —
+        // which already includes each account's own library). Nothing per-account.
       } else {
         try {
           const pages = await listInstantPages(client, advId);
@@ -212,13 +213,16 @@ async function resources(supabase, body) {
   ];
 
   if (type === "LEAD_GENERATION") {
-    // Every published Lead Gen form found in ANY selected Approved account, one
-    // entry per name. NOT an intersection. Each campaign uses its own account's
-    // form with the chosen name.
-    out.forms = [...formMeta.values()].map((f) => ({ name: f.name, id: f.id, count: f.count, total: approvedSeen }));
-    out.forms.sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name)));
-    if (approvedSeen && !out.forms.length) {
-      out.blockers.push("None of the selected Approved accounts has a published Instant Form. Create one in TikTok first.");
+    // Every published Lead Gen Instant Form visible to this BC (Business Center
+    // forms + any account-owned ones), by page_id. The operator picks one; that
+    // exact page_id is used for every campaign (the form is linked to the
+    // accounts). NOT an intersection; suspended accounts never affect it.
+    out.forms = [...formById.values()].map((f) => ({ id: f.id, name: f.name || f.id, source: f.source }));
+    out.forms.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    if (approvedSeen && !out.forms.length && !out.blockers.length) {
+      out.blockers.push(
+        "No published Instant Form is visible to this Business Center. Create/publish one in BC → Assets → Forms, or paste its Form ID."
+      );
     }
   } else {
     out.sales_events = [...intersect(eventSets)];
@@ -261,8 +265,8 @@ async function createBatch(supabase, body) {
   const identityId = String(body.identity_id || "__AUTO__");
   const identityType = String(body.identity_type || "AUTO");
   const identityAuto = identityId === "__AUTO__" || identityType === "AUTO";
-  const formName = body.form_name ? String(body.form_name).trim() : "";
-  const formId = body.form_id ? String(body.form_id) : null; // optional exact-id hint
+  const formId = body.form_id ? String(body.form_id).trim() : "";      // BC / account form page_id (primary)
+  const formName = body.form_name ? String(body.form_name).trim() : ""; // name fallback (account-owned forms)
   const salesEvent = body.sales_event ? String(body.sales_event) : null;
 
   // ---- static validation ----
@@ -290,7 +294,7 @@ async function createBatch(supabase, body) {
       return json(400, { error: `Post links must be https tiktok.com URLs: "${l.slice(0, 60)}"` });
     }
   }
-  if (type === "LEAD_GENERATION" && !formName) return json(400, { error: "Select an Instant Form." });
+  if (type === "LEAD_GENERATION" && !formId && !formName) return json(400, { error: "Select an Instant Form (or paste a Form ID)." });
 
   // ---- template config ----
   let config, campaignType;
@@ -378,7 +382,7 @@ async function createBatch(supabase, body) {
           sparkCode: sparkCodes[i],
           postUrl: postLinks[i],
           identity: identityArg,
-          form: type === "LEAD_GENERATION" ? { name: formName, id: formId } : null,
+          form: type === "LEAD_GENERATION" ? { id: formId || null, name: formName || null } : null,
           libraryId: libMap.get(advId) || null,
           salesEvent,
           cardImageUrl,

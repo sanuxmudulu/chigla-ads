@@ -322,19 +322,24 @@ function pagesFrom(resp) {
     .filter(Boolean);
 }
 
-// Business Center form libraries, keyed by the ad account they belong to.
-// A library is the BC-side container for an ad account's Lead Gen forms + leads.
-// -> Map<advertiser_id, library_id>
-async function formLibraryMap(client) {
-  const map = new Map();
+// Every Business Center form library the authorized user can access.
+// -> [{ library_id, library_name, advertiser_id }]
+//
+// IMPORTANT (verified live 2026-09-04): a form created in "BC -> Assets -> Forms"
+// and linked to ad accounts is NOT returned by page_get(advertiser_id) for any of
+// those accounts. It lives in ONE form library and is only visible via
+// page_get(library_id). So the BC-wide form list = sweep page_get over every
+// library. page_get has no bc_id parameter and there is no dedicated BC-forms
+// endpoint — this sweep is the only way.
+async function listFormLibraries(client) {
+  const out = [];
   try {
     let page = 1;
     for (;;) {
       const d = await mcpCall(client, "page_library_get", { page, page_size: 50 });
       for (const lib of d?.list || []) {
-        const advId = String(lib.advertiser_id || "");
         const libId = String(lib.library_id || "");
-        if (advId && libId && !map.has(advId)) map.set(advId, libId);
+        if (libId) out.push({ library_id: libId, library_name: lib.library_name || null, advertiser_id: String(lib.advertiser_id || "") });
       }
       const info = d?.page_info || {};
       if (!info.total_page || page >= info.total_page) break;
@@ -342,20 +347,55 @@ async function formLibraryMap(client) {
       if (page > 40) break;
     }
   } catch (_) {
-    /* BC form libraries unavailable — the advertiser route below still works */
+    /* BC form libraries unavailable */
+  }
+  return out;
+}
+
+// Kept for callers that want a quick advertiser -> library_id lookup.
+async function formLibraryMap(client) {
+  const map = new Map();
+  for (const lib of await listFormLibraries(client)) {
+    if (lib.advertiser_id && !map.has(lib.advertiser_id)) map.set(lib.advertiser_id, lib.library_id);
   }
   return map;
 }
 
-// Published Lead Gen Instant Forms usable by ONE ad account. Queries both the
-// ad-account route (forms created in the account) and, when known, the account's
-// BC form-library route (forms migrated to the Business Center) and merges by id.
-// Instant Forms are ad-account scoped for /ad/create/ (page_id must belong to the
-// advertiser) — there is no BC-wide "one shared form for every account".
+async function _libForms(client, libraryId) {
+  try {
+    const d = await mcpCall(client, "page_get", {
+      library_id: String(libraryId),
+      business_type: "LEAD_GEN",
+      status: "PUBLISHED",
+      page_size: 100,
+    });
+    return pagesFrom(d).map((p) => ({ id: p.page_id, name: p.name, library_id: String(libraryId) }));
+  } catch (_) {
+    return [];
+  }
+}
+
+// Every published Lead Gen Instant Form visible to the BC, by sweeping every form
+// library (parallel, bounded). -> [{ id, name, library_id }] deduped by id.
+async function listBcForms(client, { deadlineMs } = {}) {
+  const libs = await listFormLibraries(client);
+  const byId = new Map();
+  const BATCH = 8;
+  for (let i = 0; i < libs.length; i += BATCH) {
+    if (deadlineMs && Date.now() > deadlineMs) break;
+    const chunk = libs.slice(i, i + BATCH);
+    const results = await Promise.all(chunk.map((l) => _libForms(client, l.library_id)));
+    for (const rows of results) for (const f of rows) if (!byId.has(f.id)) byId.set(f.id, f);
+  }
+  return [...byId.values()];
+}
+
+// Published Lead Gen forms visible to ONE ad account via its own route + its
+// own library (used to merge account-owned forms into the picker).
 async function listInstantForms(client, advertiserId, libraryId) {
   const byId = new Map();
   const add = (rows) => {
-    for (const p of rows) if (!byId.has(p.page_id)) byId.set(p.page_id, { id: p.page_id, name: p.name });
+    for (const p of rows) if (!byId.has(p.page_id ?? p.id)) byId.set(p.page_id ?? p.id, { id: p.page_id ?? p.id, name: p.name });
   };
   try {
     const d = await mcpCall(client, "page_get", {
@@ -366,34 +406,20 @@ async function listInstantForms(client, advertiserId, libraryId) {
     });
     add(pagesFrom(d));
   } catch (_) {
-    /* try the library route */
+    /* library route below */
   }
-  if (libraryId) {
-    try {
-      const d = await mcpCall(client, "page_get", {
-        library_id: String(libraryId),
-        business_type: "LEAD_GEN",
-        status: "PUBLISHED",
-        page_size: 100,
-      });
-      add(pagesFrom(d));
-    } catch (_) {
-      /* ignore */
-    }
-  }
+  if (libraryId) add(await _libForms(client, libraryId));
   return [...byId.values()];
 }
 
-// Resolve the Instant Form to use for ONE advertiser from the operator's pick.
-// The pick is by NAME (the same form is normally recreated per account with the
-// same name); an exact page_id match wins when present. -> page_id | throws.
+// Resolve the Instant Form page_id to use for ONE advertiser from the operator's
+// pick. A BC-level form is referenced by its page_id verbatim (page_get can't
+// list it per-account, but ad_create accepts it when the form is linked to the
+// account). -> page_id | throws.
 async function resolveAdvertiserForm(client, advertiserId, libraryId, pick) {
+  if (pick.id) return String(pick.id); // explicit BC / account form id — use as-is
   const forms = await listInstantForms(client, advertiserId, libraryId);
-  if (!forms.length) throw new Error("this account has no published Instant Form");
-  if (pick.id) {
-    const byId = forms.find((f) => String(f.id) === String(pick.id));
-    if (byId) return byId.id;
-  }
+  if (!forms.length) throw new Error("no published Instant Form found for this account and no Form ID was given");
   const want = String(pick.name || "").trim().toLowerCase();
   const byName = forms.find((f) => String(f.name || "").trim().toLowerCase() === want);
   if (byName) return byName.id;
@@ -815,6 +841,8 @@ module.exports = {
   driveDirectUrl,
   imageDimensions,
   listInstantForms,
+  listBcForms,
+  listFormLibraries,
   formLibraryMap,
   resolveAdvertiserForm,
   listInstantPages,

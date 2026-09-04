@@ -563,8 +563,10 @@
           <select id="ccRunIdentity"></select>
 
           <div id="ccRunFormWrap" hidden>
-            <label class="budget-field-label" for="ccRunForm">Instant Form</label>
+            <label class="budget-field-label" for="ccRunForm">Instant Form <span class="eng-hint">(from BC → Assets → Forms)</span></label>
             <select id="ccRunForm"></select>
+            <label class="budget-field-label" for="ccRunFormId" style="margin-top:8px;">…or paste a Form ID <span class="eng-hint">(overrides the dropdown)</span></label>
+            <input type="text" id="ccRunFormId" placeholder="e.g. 7669997520298361108" autocomplete="off" />
           </div>
 
           <div id="ccRunEventWrap" hidden>
