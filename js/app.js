@@ -2365,6 +2365,11 @@ function renderCcResourcesFromState() {
 
   const notes = [];
   for (const b of res.blockers || []) notes.push(`<div class="note bad">✖ ${escapeHtml(b)}</div>`);
+  for (const n of res.form_notes || []) notes.push(`<div class="note">⚠ ${escapeHtml(n)}</div>`);
+  if (isLead && res.form_debug) {
+    const d = res.form_debug;
+    notes.push(`<div class="note" style="opacity:.7">Form scan: ${d.libraries || 0} libraries · ${d.withForms || 0} with forms · ${d.scanned || 0} scanned${(d.errors || []).length ? ` · ${d.errors.length} error(s)` : ""}</div>`);
+  }
   for (const a of res.advertisers || []) {
     for (const nt of a.notes || []) notes.push(`<div class="note">⚠ ${escapeHtml(a.advertiser_name)}: ${escapeHtml(nt)}</div>`);
   }

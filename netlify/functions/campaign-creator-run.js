@@ -128,8 +128,11 @@ async function resources(supabase, body) {
     // form library and are only listable by sweeping page_get(library_id).
     if (type === "LEAD_GENERATION") {
       try {
-        for (const f of await listBcForms(client, { deadlineMs: deadline })) {
-          if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "bc" });
+        const { forms, diag } = await listBcForms(client, { deadlineMs: deadline });
+        for (const f of forms) if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "bc" });
+        out.form_debug = diag;
+        if (diag && diag.errors && diag.errors.length) {
+          out.form_debug_note = `Form scan: ${diag.libraries} libraries, ${diag.withForms} with forms, ${diag.errors.length} error(s): ${diag.errors.slice(0, 3).join(" | ")}`;
         }
       } catch (err) {
         out.blockers.push(`Could not read Business Center forms: ${err.message}`);
@@ -179,8 +182,17 @@ async function resources(supabase, body) {
       }
 
       if (type === "LEAD_GENERATION") {
-        // Forms are read once, BC-wide, above (every form library is swept —
-        // which already includes each account's own library). Nothing per-account.
+        // Fallback: if the BC library sweep found nothing, also check this
+        // selected account's own page_get(advertiser_id) route.
+        if (!formById.size) {
+          try {
+            for (const f of await listInstantForms(client, advId, null)) {
+              if (!formById.has(f.id)) formById.set(f.id, { id: f.id, name: f.name, source: "account" });
+            }
+          } catch (_) {
+            /* optional */
+          }
+        }
       } else {
         try {
           const pages = await listInstantPages(client, advId);
@@ -217,12 +229,19 @@ async function resources(supabase, body) {
     // forms + any account-owned ones), by page_id. The operator picks one; that
     // exact page_id is used for every campaign (the form is linked to the
     // accounts). NOT an intersection; suspended accounts never affect it.
+    // NEVER a hard blocker — the operator can always paste a Form ID.
     out.forms = [...formById.values()].map((f) => ({ id: f.id, name: f.name || f.id, source: f.source }));
     out.forms.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    if (approvedSeen && !out.forms.length && !out.blockers.length) {
-      out.blockers.push(
-        "No published Instant Form is visible to this Business Center. Create/publish one in BC → Assets → Forms, or paste its Form ID."
+    out.form_notes = [];
+    if (approvedSeen && !out.forms.length) {
+      const d = out.form_debug || {};
+      out.form_notes.push(
+        `No Instant Form returned by the API (scanned ${d.libraries || 0} form libraries, ${d.withForms || 0} had forms` +
+          (d.errors && d.errors.length ? `, errors: ${d.errors.slice(0, 3).join(" | ")}` : "") +
+          `). Paste the Form ID from BC → Assets → Forms.`
       );
+    } else if (out.form_debug_note) {
+      out.form_notes.push(out.form_debug_note);
     }
   } else {
     out.sales_events = [...intersect(eventSets)];

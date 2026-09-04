@@ -317,7 +317,7 @@ function pagesFrom(resp) {
       const name = String(p.title || p.name || p.page_name || p.instant_page_name || id).trim();
       const t = p.create_time || p.created_time || p.create_at || p.created_at || null;
       const mt = p.modify_time || p.update_time || p.modified_time || null;
-      return { page_id: id, name, create_time: t, modify_time: mt };
+      return { page_id: id, name, create_time: t, modify_time: mt, status: p.status || null };
     })
     .filter(Boolean);
 }
@@ -331,23 +331,25 @@ function pagesFrom(resp) {
 // page_get(library_id). So the BC-wide form list = sweep page_get over every
 // library. page_get has no bc_id parameter and there is no dedicated BC-forms
 // endpoint — this sweep is the only way.
-async function listFormLibraries(client) {
+async function listFormLibraries(client, diag) {
   const out = [];
-  try {
-    let page = 1;
-    for (;;) {
-      const d = await mcpCall(client, "page_library_get", { page, page_size: 50 });
-      for (const lib of d?.list || []) {
-        const libId = String(lib.library_id || "");
-        if (libId) out.push({ library_id: libId, library_name: lib.library_name || null, advertiser_id: String(lib.advertiser_id || "") });
-      }
-      const info = d?.page_info || {};
-      if (!info.total_page || page >= info.total_page) break;
-      page += 1;
-      if (page > 40) break;
+  let page = 1;
+  for (;;) {
+    let d;
+    try {
+      d = await mcpCall(client, "page_library_get", { page, page_size: 50 });
+    } catch (err) {
+      if (diag) diag.errors.push(`page_library_get p${page}: ${err.message}`);
+      break;
     }
-  } catch (_) {
-    /* BC form libraries unavailable */
+    for (const lib of d?.list || []) {
+      const libId = String(lib.library_id || "");
+      if (libId) out.push({ library_id: libId, library_name: lib.library_name || null, advertiser_id: String(lib.advertiser_id || "") });
+    }
+    const info = d?.page_info || {};
+    if (!info.total_page || page >= info.total_page) break;
+    page += 1;
+    if (page > 40) break;
   }
   return out;
 }
@@ -361,54 +363,75 @@ async function formLibraryMap(client) {
   return map;
 }
 
-async function _libForms(client, libraryId) {
-  try {
-    const d = await mcpCall(client, "page_get", {
-      library_id: String(libraryId),
-      business_type: "LEAD_GEN",
-      status: "PUBLISHED",
-      page_size: 100,
-    });
-    return pagesFrom(d).map((p) => ({ id: p.page_id, name: p.name, library_id: String(libraryId) }));
-  } catch (_) {
-    return [];
+// One page_get by library_id OR advertiser_id, trying with and without the
+// PUBLISHED filter. Throws on MCP error so the caller can record it.
+async function _formsFrom(client, key) {
+  const base = { business_type: "LEAD_GEN", page_size: 100, ...key };
+  const seen = new Map();
+  for (const extra of [{ status: "PUBLISHED" }, {}]) {
+    let d;
+    try {
+      d = await mcpCall(client, "page_get", { ...base, ...extra });
+    } catch (err) {
+      if (extra.status) continue; // retry once without the filter
+      throw err;
+    }
+    for (const p of pagesFrom(d)) {
+      const id = p.page_id;
+      if (id && !seen.has(id)) seen.set(id, { id, name: p.name, status: p.status || null });
+    }
+    if (seen.size) break; // got results — no need to widen
   }
+  return [...seen.values()];
 }
 
-// Every published Lead Gen Instant Form visible to the BC, by sweeping every form
-// library (parallel, bounded). -> [{ id, name, library_id }] deduped by id.
+// Every Lead Gen Instant Form visible to the BC. Sweeps every form library from
+// page_library_get. -> { forms: [{id,name}], diag }
 async function listBcForms(client, { deadlineMs } = {}) {
-  const libs = await listFormLibraries(client);
+  const diag = { libraries: 0, scanned: 0, withForms: 0, errors: [] };
+  const libs = await listFormLibraries(client, diag);
+  diag.libraries = libs.length;
+
   const byId = new Map();
-  const BATCH = 8;
+  const BATCH = 6;
   for (let i = 0; i < libs.length; i += BATCH) {
-    if (deadlineMs && Date.now() > deadlineMs) break;
+    if (deadlineMs && Date.now() > deadlineMs) {
+      diag.errors.push(`deadline reached after ${diag.scanned}/${libs.length} libraries`);
+      break;
+    }
     const chunk = libs.slice(i, i + BATCH);
-    const results = await Promise.all(chunk.map((l) => _libForms(client, l.library_id)));
-    for (const rows of results) for (const f of rows) if (!byId.has(f.id)) byId.set(f.id, f);
+    const results = await Promise.allSettled(chunk.map((l) => _formsFrom(client, { library_id: l.library_id })));
+    results.forEach((res, j) => {
+      diag.scanned += 1;
+      if (res.status === "rejected") {
+        diag.errors.push(`lib ${chunk[j].library_id}: ${res.reason?.message || res.reason}`);
+        return;
+      }
+      if (res.value.length) diag.withForms += 1;
+      for (const f of res.value) if (!byId.has(f.id)) byId.set(f.id, f);
+    });
   }
-  return [...byId.values()];
+  return { forms: [...byId.values()].map((f) => ({ id: f.id, name: f.name })), diag };
 }
 
-// Published Lead Gen forms visible to ONE ad account via its own route + its
-// own library (used to merge account-owned forms into the picker).
+// Published Lead Gen forms visible to ONE ad account (its own route + its library).
 async function listInstantForms(client, advertiserId, libraryId) {
   const byId = new Map();
   const add = (rows) => {
-    for (const p of rows) if (!byId.has(p.page_id ?? p.id)) byId.set(p.page_id ?? p.id, { id: p.page_id ?? p.id, name: p.name });
+    for (const f of rows) if (!byId.has(f.id)) byId.set(f.id, { id: f.id, name: f.name });
   };
   try {
-    const d = await mcpCall(client, "page_get", {
-      advertiser_id: String(advertiserId),
-      business_type: "LEAD_GEN",
-      status: "PUBLISHED",
-      page_size: 100,
-    });
-    add(pagesFrom(d));
+    add(await _formsFrom(client, { advertiser_id: String(advertiserId) }));
   } catch (_) {
     /* library route below */
   }
-  if (libraryId) add(await _libForms(client, libraryId));
+  if (libraryId) {
+    try {
+      add(await _formsFrom(client, { library_id: String(libraryId) }));
+    } catch (_) {
+      /* ignore */
+    }
+  }
   return [...byId.values()];
 }
 
