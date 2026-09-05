@@ -164,7 +164,25 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshAll();
   loadTiktokCampaigns();
   loadTiktokBudgets();
+  loadTiktokConnectionsForBcFilter();
 });
+
+// Loads the full connections/advertisers list once at startup purely so the
+// Detailed Metrics Business Center selector lists every connected BC — not
+// just ones with campaigns currently showing (the TikTok Ads / WH Warmup /
+// Campaign Creator modals already load this same data themselves, on open;
+// this just makes it available before any of them are ever opened). Shares
+// tiktokState with those modals; harmless if it runs again after them.
+async function loadTiktokConnectionsForBcFilter() {
+  try {
+    const data = await fetchTiktokConnections();
+    tiktokState.connections = data.connections || [];
+    tiktokState.advertisers = data.advertisers || [];
+    renderDetailBcSelector();
+  } catch (_) {
+    /* non-fatal — the selector just stays however it last was */
+  }
+}
 
 // Loads stored TikTok campaign rows (fast, from Supabase) and merges them into
 // the Detailed Metrics table. Does not hit the TikTok API — that only happens
@@ -2820,10 +2838,15 @@ async function submitManualDupe() {
 
 // ---- Business Center view filter (Detailed Metrics header) ----
 
+// Every connected Business Center (from tiktokState.advertisers, loaded once
+// at startup by loadTiktokConnectionsForBcFilter — see DOMContentLoaded),
+// not just ones with campaigns currently in Detailed Metrics. A BC with zero
+// campaigns still shows in the dropdown; selecting it just shows an empty
+// table, same as any other filter with no matches.
 function trackedBcOptions() {
   const map = new Map();
-  for (const c of state.tiktokCampaigns) {
-    if (c && c.bc_id) map.set(String(c.bc_id), c.bc_name || `BC ${c.bc_id}`);
+  for (const a of tiktokState.advertisers) {
+    if (a && a.bc_id) map.set(String(a.bc_id), a.bc_name || `BC ${a.bc_id}`);
   }
   return [...map.entries()].map(([bc_id, bc_name]) => ({ bc_id, bc_name }));
 }
