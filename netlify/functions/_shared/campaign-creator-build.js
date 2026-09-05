@@ -680,7 +680,7 @@ function buildAdgroupPayload({ advertiserId, campaignId, type, config, scheduleU
   const p = {
     advertiser_id: String(advertiserId),
     campaign_id: String(campaignId),
-    adgroup_name: `AG${rand4()}`,
+    adgroup_name: "adg1", // always the first ad group of a fresh campaign — duplicateForRow names the rest adg2, adg3, ...
     placement_type: "PLACEMENT_TYPE_NORMAL",
     placements: ["PLACEMENT_TIKTOK"],
     location_ids: config.location_ids.slice(),
@@ -733,7 +733,7 @@ function buildAdgroupPayload({ advertiserId, campaignId, type, config, scheduleU
 
 function buildAdCreative({ type, config, identity, sparkItemId, pageId, cardId, adFormat }) {
   const creative = {
-    ad_name: `AD${rand4()}`,
+    ad_name: "ad1", // always the first ad of a fresh campaign — duplicateForRow names the rest ad2, ad3, ...
     ad_format: adFormat, // SINGLE_VIDEO | CAROUSEL_ADS
     identity_type: identity.identity_type,
     identity_id: identity.identity_id,

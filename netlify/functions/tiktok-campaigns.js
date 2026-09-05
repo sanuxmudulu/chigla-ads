@@ -239,6 +239,13 @@ exports.handler = async function (event) {
     // ---- read-only: today's live TikTok campaign metrics (spend/CPM/CPA) ----
     if (action === "metrics") return campaignMetricsForScopedAdvertisers(supabase);
 
+    // ---- write: recompute daily_totals.total_spend for one past date from
+    // TikTok's own historical report, across every scoped advertiser. Manual
+    // recovery path for a date the automatic rollover backfill (see
+    // backfillStaleDailyTotals) missed — e.g. one that already rolled over
+    // before that fix existed. Never touches total_earnings. { date:"YYYY-MM-DD" } ----
+    if (action === "backfill_daily_total") return backfillDailyTotalForDate(supabase, body.date);
+
     // ---- read-only: engagement orders for one campaign (likes / saves / comments) ----
     if (action === "engagement_orders") {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
@@ -774,8 +781,191 @@ async function budgetsForScopedAdvertisers(supabase) {
 //   cpa, impressions, clicks, conversions } }, okAdvertiserIds: [...], errors,
 //   spendToday: { date, currentHour, cumulative, byHour: { <hour>: cumulative } } }
 //   — spendToday is for the Live Performance graph only.
+// A campaign whose today_date is stale (belongs to a past NY date) is about
+// to have its running total_spend counter reset to 0 by the rollover reset
+// below — but that counter may have stopped updating BEFORE the stale day
+// actually ended (dashboard closed), so it was never the real final total for
+// that day. Correct daily_totals for every such stale date first, using
+// loadCampaignMetricsForAdvertiser's own historical report query (it already
+// takes an arbitrary `date` — TikTok returns a campaign's true spend for any
+// past date regardless of when it's asked, unaffected by our own poll gaps).
+// Aggregates ACROSS every connection/advertiser for that date (matching
+// glitchy-daily.js's tiktokSpendForToday, which sums the same way) and writes
+// ONLY total_spend — total_earnings (Glitchy/Mabac) is a separate, already-
+// correct concern untouched here. Runs only when something is actually stale
+// (rare — at most once per NY-day rollover), so the extra connections are
+// negligible; a connect/report failure just leaves that date's row as-is
+// rather than risk zeroing out real spend.
+async function backfillStaleDailyTotals(supabase, currentDate) {
+  let staleRows;
+  try {
+    const { data, error } = await supabase
+      .from("tiktok_campaigns")
+      .select("campaign_id, connection_id, advertiser_id, today_date")
+      .not("today_date", "is", null)
+      .neq("today_date", currentDate);
+    if (error) return; // column not migrated yet — nothing to backfill
+    staleRows = data || [];
+  } catch (_) {
+    return;
+  }
+  if (!staleRows.length) return;
+
+  // stale date -> connection_id -> Set(advertiser_id)
+  const byDate = new Map();
+  for (const r of staleRows) {
+    const d = String(r.today_date);
+    if (!byDate.has(d)) byDate.set(d, new Map());
+    const byConn = byDate.get(d);
+    if (!byConn.has(r.connection_id)) byConn.set(r.connection_id, new Set());
+    byConn.get(r.connection_id).add(String(r.advertiser_id));
+  }
+
+  let whIds = new Set();
+  try {
+    const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id");
+    whIds = new Set((wh || []).map((r) => String(r.campaign_id)));
+  } catch (_) {
+    /* no WH table — nothing to exclude */
+  }
+
+  const { serverUrl, redirectUrl } = resolveConfig();
+
+  for (const [staleDate, byConn] of byDate.entries()) {
+    let total = 0;
+    let sawFailure = false;
+    for (const [connectionId, advIds] of byConn.entries()) {
+      const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+      if (!conn) {
+        sawFailure = true;
+        continue;
+      }
+      const provider = new SupabaseOAuthProvider({ supabase, serverUrl, redirectUrl, connection: conn });
+      let client;
+      try {
+        ({ client } = await connectMcp({ provider, serverUrl }));
+      } catch (err) {
+        console.error(`[tiktok-metrics] backfill connect failed conn=${connectionId} date=${staleDate}: ${err.message}`);
+        sawFailure = true;
+        continue;
+      }
+      try {
+        for (const advId of advIds) {
+          try {
+            const byId = await loadCampaignMetricsForAdvertiser(client, advId, { date: staleDate });
+            for (const [cid, m] of Object.entries(byId)) {
+              if (whIds.has(cid)) continue;
+              total += Number(m.spend) || 0;
+            }
+          } catch (err) {
+            console.error(`[tiktok-metrics] backfill report failed adv=${advId} date=${staleDate}: ${err.message}`);
+            sawFailure = true;
+          }
+        }
+      } finally {
+        await client.close().catch(() => {});
+      }
+    }
+    if (sawFailure && total === 0) continue; // couldn't get a real number — leave the existing row alone
+
+    total = Math.round(total * 100) / 100;
+    try {
+      const { error } = await supabase
+        .from("daily_totals")
+        .update({ total_spend: total, updated_at: new Date().toISOString() })
+        .eq("date", staleDate);
+      if (error) console.error(`[tiktok-metrics] daily_totals backfill write failed date=${staleDate}: ${error.message}`);
+      else console.log(`[tiktok-metrics] backfilled daily_totals ${staleDate} total_spend=${total}`);
+    } catch (err) {
+      console.error(`[tiktok-metrics] daily_totals backfill crashed date=${staleDate}: ${err.message}`);
+    }
+  }
+}
+
+// Manual counterpart to backfillStaleDailyTotals, for a date whose
+// tiktok_campaigns.today_date has ALREADY been reset (so the automatic
+// stale-row detection has nothing left to find) — e.g. a day that rolled over
+// before that fix existed. Recomputes total_spend for `date` from TikTok's
+// own historical report across EVERY currently scoped advertiser (not just
+// ones with a stale row), same WH-exclusion rule as tiktokSpendForToday, and
+// writes only total_spend (never total_earnings). Safe to run for any past
+// date at any time — read-mostly, one targeted correction at the end.
+async function backfillDailyTotalForDate(supabase, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) return json(400, { error: "date must be YYYY-MM-DD" });
+
+  let scoped;
+  try {
+    scoped = await scopedAdvertisers(supabase, null);
+  } catch (err) {
+    return json(500, { error: "Supabase read failed", details: err.message });
+  }
+  if (!scoped.length) return json(200, { ok: true, date, total_spend: 0, note: "No scoped advertisers." });
+
+  let whIds = new Set();
+  try {
+    const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id");
+    whIds = new Set((wh || []).map((r) => String(r.campaign_id)));
+  } catch (_) {
+    /* no WH table — nothing to exclude */
+  }
+
+  const byConnection = {};
+  for (const a of scoped) (byConnection[a.connection_id] = byConnection[a.connection_id] || []).push(a);
+  const { serverUrl, redirectUrl } = resolveConfig();
+
+  let total = 0;
+  const errors = {};
+  for (const [connectionId, advs] of Object.entries(byConnection)) {
+    const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+    if (!conn) {
+      errors[`conn:${connectionId}`] = "connection not found";
+      continue;
+    }
+    const provider = new SupabaseOAuthProvider({ supabase, serverUrl, redirectUrl, connection: conn });
+    let client;
+    try {
+      ({ client } = await connectMcp({ provider, serverUrl }));
+    } catch (err) {
+      errors[`conn:${connectionId}`] = err.message;
+      continue;
+    }
+    try {
+      for (const a of advs) {
+        try {
+          const byId = await loadCampaignMetricsForAdvertiser(client, String(a.advertiser_id), { date });
+          for (const [cid, m] of Object.entries(byId)) {
+            if (whIds.has(cid)) continue;
+            total += Number(m.spend) || 0;
+          }
+        } catch (err) {
+          errors[`adv:${a.advertiser_id}`] = err.message;
+        }
+      }
+    } finally {
+      await client.close().catch(() => {});
+    }
+  }
+  total = Math.round(total * 100) / 100;
+
+  const upd = await supabase
+    .from("daily_totals")
+    .update({ total_spend: total, updated_at: new Date().toISOString() })
+    .eq("date", date);
+  if (upd.error) return json(500, { error: "daily_totals write failed", details: sbErr(upd.error) });
+
+  return json(200, { ok: true, date, total_spend: total, errors });
+}
+
 async function campaignMetricsForScopedAdvertisers(supabase) {
   const date = dashboardToday();
+
+  // A day that rolled over while the dashboard was CLOSED can lose that day's
+  // spend from the calendar forever: our own today_spend tracking only ever
+  // reflects the LAST poll before the dashboard closed, so the reset below
+  // would commit whatever partial number that was — never the real final
+  // total for that day. Fix it first, using TikTok's own historical report
+  // for the stale date (it doesn't care that the date has passed).
+  await backfillStaleDailyTotals(supabase, date);
 
   // NY-day rollover: any campaign whose today_* still belongs to a past date is
   // reset to $0 / 0 (and re-dated) BEFORE we pull fresh numbers, so it never

@@ -15,7 +15,6 @@ const DUPES_PER_CYCLE = 5; // bounded work per 60s invocation (40 MCP calls for 
 const DUPE_ATTEMPT_CAP = 5; // consecutive failed copy attempts before giving up
 const GIVE_UP_AFTER_MS = 3 * 24 * 3600 * 1000; // never-Active after 3 days -> FAILED
 
-const rand4 = () => String(Math.floor(1000 + Math.random() * 9000));
 const reqId = () => String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, "0");
 const startMinus3h = () => new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 19).replace("T", " ");
 const startNow = () => new Date(Date.now() + 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
@@ -146,11 +145,16 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, prel
   while (created < target && madeThisCycle < DUPES_PER_CYCLE) {
     if (Date.now() > deadlineMs) break;
     try {
+      // Sequential naming: the original ad group is always "adg1"/"ad1"
+      // (buildAdgroupPayload/buildAdCreative), so the Nth duplicate — the
+      // (created)th one made so far, 0-indexed — is ad group/ad number
+      // created+2 overall.
+      const seq = created + 2;
       const agBody = {
         ...agBase,
         advertiser_id: advId,
         campaign_id: campaignId,
-        adgroup_name: `AG${rand4()}`,
+        adgroup_name: `adg${seq}`,
         schedule_type: "SCHEDULE_FROM_NOW",
         schedule_start_time: startMinus3h(),
         operation_status: "ENABLE",
@@ -174,7 +178,7 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, prel
         await mcpCall(client, "ad_create", {
           advertiser_id: advId,
           adgroup_id: newAdgroupId,
-          creatives: [{ ...adBase, ad_name: `AD${rand4()}`, operation_status: "ENABLE" }],
+          creatives: [{ ...adBase, ad_name: `ad${seq}`, operation_status: "ENABLE" }],
         });
       }
 

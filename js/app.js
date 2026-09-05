@@ -458,6 +458,19 @@ function startTimers() {
   // Auto-refresh real data periodically. This only re-fetches the running
   // session's totals — it never starts a new session.
   setInterval(() => refreshAll(), 60000);
+
+  // Chrome (and other browsers) throttle setInterval in a BACKGROUND tab —
+  // after a while it can fire far less often than every 60s, so data looks
+  // stale until the next tick finally lands. Force an immediate refresh the
+  // moment the tab becomes visible again, so switching back always shows the
+  // freshest data Chigla Ads can get right then, instead of waiting on a
+  // throttled timer to catch up. Guarded so a rapid re-focus (e.g. alt-tabbing
+  // back and forth) can't fire back-to-back refreshes.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (lastUpdatedAt && Date.now() - lastUpdatedAt < 5000) return;
+    refreshAll();
+  });
 }
 
 // ============================== DATA FETCH ==============================
@@ -3188,12 +3201,18 @@ function hourlyPayoutCombined() {
 }
 
 // Hourly TikTok spend for the Live Performance graph, derived from the
-// cumulative-spend snapshots the metrics refresh stores each NY hour:
-//   hour H spend = cumulative(H) − cumulative(nearest earlier hour, else 0)
-// Completed hours use their frozen snapshot; the current (unfinished) hour uses
-// the live cumulative minus the last completed-hour snapshot. Hours we never
-// captured stay null (a gap, not a wrong bar); future hours stay null.
-// Aggregate only — shown just for "All Sources Combined".
+// cumulative-spend snapshots the metrics refresh stores each NY hour.
+//
+// Cumulative spend only ever goes up, so an hour with no recorded snapshot
+// safely means "still whatever it last was" — never a real unknown. Forward-
+// filling the cumulative total across every hour (starting from 0 at
+// midnight) turns that into a smooth, always-connected line running from
+// 00:00 through the current hour, instead of a broken gap wherever a snapshot
+// happened not to land (e.g. before the first poll of the day, or across any
+// stretch the dashboard was closed). Each hour's bar is then just the delta
+// between its filled-in cumulative total and the previous hour's — still
+// clamped at 0 so a counter reset never shows as a negative dip.
+// Future hours stay null. Aggregate only — shown just for "All Sources Combined".
 function hourlySpendSeries() {
   const st = state.spendToday;
   if (!st || st.date !== todayStr() || state.chartSource !== "__all__") return Array(24).fill(null);
@@ -3203,21 +3222,20 @@ function hourlySpendSeries() {
   const liveCum = toNum(st.cumulative);
   const at = (h) => (byHour[String(h)] != null ? toNum(byHour[String(h)]) : null);
 
-  const out = Array(24).fill(null);
+  const cumByHour = Array(24).fill(0);
+  let running = 0;
   for (let h = 0; h <= curH && h < 24; h++) {
-    const thisCum = h === curH ? liveCum : at(h);
-    if (thisCum == null) continue; // never captured this completed hour — leave a gap
+    const known = h === curH ? liveCum : at(h);
+    if (known != null) running = known;
+    cumByHour[h] = running;
+  }
 
-    let prev = 0;
-    for (let p = h - 1; p >= 0; p--) {
-      const v = at(p);
-      if (v != null) {
-        prev = v;
-        break;
-      }
-    }
-    const delta = thisCum - prev;
+  const out = Array(24).fill(null);
+  let prev = 0;
+  for (let h = 0; h <= curH && h < 24; h++) {
+    const delta = cumByHour[h] - prev;
     out[h] = delta > 0 ? Math.round(delta * 100) / 100 : 0; // clamp: no negative bars at a reset
+    prev = cumByHour[h];
   }
   return out;
 }
