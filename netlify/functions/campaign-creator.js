@@ -7,12 +7,16 @@
 //           (Called by the future Campaign Creator tool — nothing else writes here.)
 //
 //   "process_duplication"  (no body)
-//        -> for every registered campaign still WAITING_FOR_ACTIVE (checks
-//           whether the initial ad group is genuinely Active yet — auto
-//           appeal also runs here) or already DUPLICATING (a manual_dupe run
-//           still in progress — creates up to DUPES_PER_CYCLE more copies).
-//           Idempotent. Driven ONLY by the existing ~60s dashboard refresh
-//           (js/app.js runCampaignCreatorDuplication()) — there is NO
+//        -> for EVERY registered campaign: WAITING_FOR_ACTIVE (checks whether
+//           the initial ad group is genuinely Active yet — auto appeal also
+//           runs here) and DUPLICATING (a manual_dupe run still in progress —
+//           creates up to DUPES_PER_CYCLE more copies) get the full
+//           appeal/duplication treatment; READY/FAILED/COMPLETE rows get a
+//           cheap READ-ONLY status refresh only (no appeal or ad-group-
+//           creation calls) so Detailed Metrics keeps matching TikTok's real
+//           current state for the campaign's whole life, not just its initial
+//           review. Idempotent. Driven ONLY by the existing ~60s dashboard
+//           refresh (js/app.js runCampaignCreatorDuplication()) — there is NO
 //           scheduler/cron for this. See the NOTE below for why.
 //
 //   DUPLICATION IS MANUAL (2026-09-05): reaching Active no longer auto-starts
@@ -55,6 +59,7 @@ const {
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
+  loadCampaignDetail,
   json,
 } = require("./_shared/tiktok-mcp");
 const { duplicateForRow, registerForDuplication, DUPES_PER_CYCLE } = require("./_shared/campaign-creator.js");
@@ -212,10 +217,13 @@ async function manualDupe(supabase, body) {
 // ---------------------------------------------------------------------------
 
 async function processDuplication(supabase) {
-  const { data: rows, error } = await supabase
-    .from("campaign_creator_campaigns")
-    .select("*")
-    .in("dupe_status", ["WAITING_FOR_ACTIVE", "DUPLICATING"]);
+  // Every registered row, not just WAITING_FOR_ACTIVE/DUPLICATING: a row that
+  // has moved on to READY/FAILED/COMPLETE still gets a cheap read-only status
+  // refresh below (see "STATUS-ONLY REFRESH") so Detailed Metrics keeps
+  // matching TikTok's real current state for the campaign's whole life, not
+  // just during its initial review — it just never re-enters appeal/
+  // duplication handling once it's past that stage.
+  const { data: rows, error } = await supabase.from("campaign_creator_campaigns").select("*");
   if (error) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, checked: 0, created: 0, completed: 0, failed: 0, unmigrated: true });
@@ -268,6 +276,30 @@ async function processDuplication(supabase) {
         for (const r of list) {
           if (Date.now() > deadlineMs) break;
           tally.checked += 1;
+
+          // ---- STATUS-ONLY REFRESH (READY / FAILED / COMPLETE) ----
+          // These rows are done with appeal/duplication handling for good —
+          // but the campaign itself keeps running (or not) on TikTok for its
+          // whole real life, and nothing else refreshes Detailed Metrics'
+          // effective_status for a Campaign Creator campaign once it leaves
+          // WAITING_FOR_ACTIVE/DUPLICATING. One cheap read-only detail pull,
+          // no appeal or ad-group-creation calls at all.
+          if (r.dupe_status !== "WAITING_FOR_ACTIVE" && r.dupe_status !== "DUPLICATING") {
+            try {
+              const detail = await loadCampaignDetail({
+                client,
+                advertiserId: r.advertiser_id,
+                advertiserStatus: advStatus.get(String(r.advertiser_id)),
+                campaignId: r.campaign_id,
+                timezone: null,
+              });
+              await persistTiktokCampaignStatus(supabase, r.campaign_id, detail);
+            } catch (err) {
+              console.error(`[campaign-creator] ${r.campaign_id} — status refresh failed: ${err.message}`);
+            }
+            continue;
+          }
+
           const before = Number(r.dupe_created) || 0;
           r.__persist = (patch) => patchRow(supabase, r.campaign_id, patch);
 
