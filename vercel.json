@@ -7,7 +7,6 @@
     "api/[fn].js": { "maxDuration": 60 }
   },
   "crons": [
-    { "path": "/api/cleanup", "schedule": "20 5 * * *" },
-    { "path": "/api/campaign-creator", "schedule": "*/5 * * * *" }
+    { "path": "/api/cleanup", "schedule": "20 5 * * *" }
   ]
 }

@@ -11,8 +11,9 @@
 //           whether the initial ad group is genuinely Active yet — auto
 //           appeal also runs here) or already DUPLICATING (a manual_dupe run
 //           still in progress — creates up to DUPES_PER_CYCLE more copies).
-//           Idempotent. Driven by the existing ~60s dashboard refresh AND by
-//           a scheduler (see below) for when the dashboard is closed.
+//           Idempotent. Driven ONLY by the existing ~60s dashboard refresh
+//           (js/app.js runCampaignCreatorDuplication()) — there is NO
+//           scheduler/cron for this. See the NOTE below for why.
 //
 //   DUPLICATION IS MANUAL (2026-09-05): reaching Active no longer auto-starts
 //   creating 20 copies. A WAITING_FOR_ACTIVE row that goes Active advances to
@@ -39,14 +40,14 @@
 // No admin password (same posture as the other tiktok-* write actions). All MCP
 // calls run here; no tokens are ever returned to the browser.
 //
-// SCHEDULER: a bare GET to this route (no body) also runs process_duplication —
-// this is what a Vercel Cron Job invokes (Vercel cron sends GET, never POST;
-// see vercel.json "crons"). Netlify's own scheduled function invocation still
-// arrives as a bodyless POST (see netlify.toml "schedule") and is handled
-// exactly as before. If CRON_SECRET is set in the environment, a GET must carry
-// `Authorization: Bearer <CRON_SECRET>` — Vercel adds that header automatically
-// for its own cron invocations once CRON_SECRET is set (same convention as
-// cleanup.js); a manual GET without it is rejected.
+// NOTE: there is deliberately NO cron/scheduler for this function (removed
+// 2026-09-05). A vercel.json cron finer than once/day (it was */5 * * * *)
+// makes Vercel's Hobby plan reject the ENTIRE deployment — every commit from
+// the moment that cron was added until it was removed silently failed to
+// deploy at all, not just this feature. Duplication is manual by design now
+// anyway (the "Dupe" button), and progress on an in-progress job continues via
+// the ~60s in-browser poll while the dashboard is open — no closed-dashboard
+// background trigger is needed or wanted. Do not re-add a sub-daily cron here.
 
 const {
   getSupabase,
@@ -73,18 +74,7 @@ async function withClient(supabase, connection, fn) {
 exports.handler = async function (event) {
   try {
     const supabase = getSupabase();
-
-    // Scheduler entry point (Vercel Cron -> GET; see header comment).
-    if (event.httpMethod === "GET") {
-      if (process.env.CRON_SECRET) {
-        const h = (event && event.headers) || {};
-        const auth = h.authorization || h.Authorization || "";
-        if (auth !== `Bearer ${process.env.CRON_SECRET}`) return json(401, { error: "unauthorized" });
-      }
-      return processDuplication(supabase);
-    }
-
-    if (event.httpMethod !== "POST") return json(405, { error: "Use GET (cron) or POST" });
+    if (event.httpMethod !== "POST") return json(405, { error: "Use POST" });
     let body = {};
     try {
       body = JSON.parse(event.body || "{}");
@@ -95,10 +85,8 @@ exports.handler = async function (event) {
     if (body.action === "register") return register(supabase, body);
     if (body.action === "manual_dupe") return manualDupe(supabase, body);
     if (body.action === "list") return listRows(supabase);
-    // "process_duplication" (dashboard 60s poll) OR a Netlify scheduled
-    // invocation (no recognizable action, e.g. body {"next_run":"..."}) — both
-    // just run the safe, idempotent duplication pass.
-    if (body.action === "process_duplication" || !body.action) return processDuplication(supabase);
+    // Driven only by the dashboard's ~60s poll — no scheduler calls this.
+    if (body.action === "process_duplication") return processDuplication(supabase);
 
     return json(400, { error: `Unknown action: ${body.action}` });
   } catch (err) {

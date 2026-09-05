@@ -17,14 +17,12 @@
 [functions."cleanup"]
   schedule = "20 5 * * *"
 
-# Campaign Creator auto-duplication safety net — runs process_duplication even
-# when the dashboard tab is closed (the 60s in-browser poll is still the primary
-# trigger while it's open; this just means an ad group that goes Active
-# overnight still gets its 20 copies). Idempotent, no-op when nothing is
-# WAITING_FOR_ACTIVE/DUPLICATING. Production is Vercel now — see vercel.json
-# "crons" for the real one (GET /api/campaign-creator; Vercel Hobby crons are
-# capped to once/day, Pro runs the real */5 schedule). This Netlify schedule
-# is kept only in case a Netlify deploy of this repo is ever used again — it
-# arrives as a bodyless POST, handled the same as the Vercel GET.
-[functions."campaign-creator"]
-  schedule = "*/5 * * * *"
+# NOTE: Campaign Creator duplication has NO scheduler (2026-09-05, by design —
+# duplication is manual, triggered only by the dashboard's "Dupe" button). A
+# */5 cron here previously mirrored one in vercel.json, but Vercel's Hobby
+# plan REJECTS THE ENTIRE DEPLOYMENT for any cron finer than once/day — that
+# silently blocked every deploy from the moment it was added until it was
+# removed. Don't re-add a sub-daily cron for this function without confirming
+# the Vercel plan supports it. Progress on an in-progress manual dupe (and
+# auto-appeal) continues via the existing ~60s in-browser poll while the
+# dashboard is open — see js/app.js runCampaignCreatorDuplication().
