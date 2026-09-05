@@ -2833,12 +2833,12 @@ function renderDetailBcSelector() {
   const select = document.getElementById("detailBcSelect");
   const opts = trackedBcOptions();
 
-  // Only worth showing once ≥ 2 BCs contribute tracked campaigns.
-  if (opts.length < 2) {
+  // Show whenever at least one BC has campaigns — "All Business Centers" plus
+  // each one, so the filter is always available rather than only once a 2nd
+  // BC shows up. Only truly nothing to show when there are zero BCs at all.
+  if (!opts.length) {
     wrap.hidden = true;
-    if (state.detailBcFilter !== "all" && !opts.some((o) => o.bc_id === state.detailBcFilter)) {
-      state.detailBcFilter = "all";
-    }
+    state.detailBcFilter = "all";
     updateBcBalanceBanner();
     return;
   }
