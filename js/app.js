@@ -35,6 +35,8 @@ import {
   loadRememberedForms,
   rememberForm,
   runCampaignCreator,
+  listCampaignCreatorCampaigns,
+  runManualDupe,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -336,6 +338,7 @@ function wireEvents() {
   wireTiktokEvents();
   wireWhWarmupEvents();
   wireCampaignCreatorEvents();
+  wireDupeEvents();
 
   document.getElementById("toolsCalendarBtn").addEventListener("click", openCalendarModal);
   document.getElementById("closeCalendarModal").addEventListener("click", closeCalendarModal);
@@ -2663,6 +2666,156 @@ function renderCcResults(results) {
         </div>`;
       })
       .join("");
+}
+
+// ============================== MANUAL DUPE (Detailed Metrics) ==============================
+// Duplication no longer starts automatically once a Campaign Creator
+// campaign goes Active (see _shared/campaign-creator.js — it now stops at
+// dupe_status READY) — this "Dupe" button + modal is the only thing that
+// starts it, via the manual_dupe action. Lists every currently-Active
+// campaign from Detailed Metrics, merges in its duplication progress (if
+// registered), and lets the user pick which to duplicate and how many copies.
+
+const dupeState = { campaigns: [], selected: new Set() };
+
+function wireDupeEvents() {
+  document.getElementById("openDupeModalBtn").addEventListener("click", openDupeModal);
+  document.getElementById("closeDupeModal").addEventListener("click", closeDupeModal);
+  document.getElementById("cancelDupeBtn").addEventListener("click", closeDupeModal);
+  document.getElementById("dupeModal").addEventListener("click", (e) => {
+    if (e.target.id === "dupeModal") closeDupeModal();
+  });
+  document.getElementById("dupeList").addEventListener("change", (e) => {
+    const cb = e.target.closest('input[type="checkbox"][data-dupe-campaign]');
+    if (!cb) return;
+    const id = cb.dataset.dupeCampaign;
+    if (cb.checked) dupeState.selected.add(id);
+    else dupeState.selected.delete(id);
+    syncDupeConfirmButton();
+  });
+  document.getElementById("confirmDupeBtn").addEventListener("click", submitManualDupe);
+}
+
+function closeDupeModal() {
+  document.getElementById("dupeModal").classList.remove("open");
+}
+
+async function openDupeModal() {
+  document.getElementById("dupeModal").classList.add("open");
+  dupeState.selected.clear();
+  document.getElementById("dupeCount").value = "20";
+  document.getElementById("dupeError").textContent = "";
+  document.getElementById("dupeProgress").textContent = "";
+  document.getElementById("dupeProgress").className = "eng-placeholder";
+  await loadDupeCampaigns();
+}
+
+// Active campaigns come straight from Detailed Metrics' own data (already
+// loaded) — WH Warmup campaigns are excluded, they're never duplicated.
+// Duplication progress (if any) is merged in from the Campaign Creator
+// registry so the list shows exactly what's eligible and what's already done.
+async function loadDupeCampaigns() {
+  const list = document.getElementById("dupeList");
+  list.innerHTML = `<p class="tk-loading">Loading active campaigns…</p>`;
+  const active = state.tiktokCampaigns.filter((c) => c.effective_status === "Active" && !c.is_wh_warmup);
+  if (!active.length) {
+    dupeState.campaigns = [];
+    list.innerHTML = `<p class="tk-empty">No Active campaigns right now.</p>`;
+    syncDupeConfirmButton();
+    return;
+  }
+  let progressById = new Map();
+  try {
+    const res = await listCampaignCreatorCampaigns();
+    progressById = new Map((res.campaigns || []).map((r) => [String(r.campaign_id), r]));
+  } catch (_) {
+    /* progress is a nice-to-have — the list still renders without it */
+  }
+  dupeState.campaigns = active.map((c) => {
+    const p = progressById.get(String(c.campaign_id));
+    return {
+      campaign_id: String(c.campaign_id),
+      campaign_name: c.campaign_name || c.campaign_id,
+      advertiser_name: c.advertiser_name || c.advertiser_id,
+      registered: !!p,
+      dupe_status: p ? p.dupe_status : null,
+      dupe_created: p ? Number(p.dupe_created) || 0 : 0,
+      dupe_target: p ? Number(p.dupe_target) || 20 : 20,
+      waiting: !!p && p.dupe_status === "WAITING_FOR_ACTIVE",
+    };
+  });
+  renderDupeList();
+}
+
+function dupeProgressNote(c) {
+  if (!c.registered) return "Not a Campaign Creator campaign";
+  if (c.waiting) return "Ad group not yet confirmed Active";
+  if (c.dupe_status === "COMPLETE") return `Done — ${c.dupe_created}/${c.dupe_target}`;
+  if (c.dupe_status === "DUPLICATING") return `In progress — ${c.dupe_created}/${c.dupe_target}`;
+  if (c.dupe_status === "FAILED") return `Failed at ${c.dupe_created}/${c.dupe_target} — pick again to retry`;
+  return "Ready to duplicate";
+}
+
+function renderDupeList() {
+  const list = document.getElementById("dupeList");
+  const rows = dupeState.campaigns
+    .map((c) => {
+      const disabled = !c.registered || c.waiting;
+      return `<label class="tk-adv${disabled ? " disabled" : ""}">
+        <input type="checkbox" data-dupe-campaign="${escapeHtml(c.campaign_id)}" ${disabled ? "disabled" : ""} ${dupeState.selected.has(c.campaign_id) ? "checked" : ""} />
+        <span class="tk-adv-main">
+          <span class="tk-adv-name">${escapeHtml(c.campaign_name)}</span>
+          <span class="tk-adv-meta">${escapeHtml(c.advertiser_name)} · ${escapeHtml(dupeProgressNote(c))}</span>
+        </span>
+      </label>`;
+    })
+    .join("");
+  list.innerHTML = `<div class="tk-adv-list">${rows}</div>`;
+  syncDupeConfirmButton();
+}
+
+function syncDupeConfirmButton() {
+  document.getElementById("confirmDupeBtn").disabled = dupeState.selected.size === 0;
+}
+
+async function submitManualDupe() {
+  const err = document.getElementById("dupeError");
+  const prog = document.getElementById("dupeProgress");
+  const btn = document.getElementById("confirmDupeBtn");
+  err.textContent = "";
+  const count = Number(document.getElementById("dupeCount").value);
+  if (!Number.isFinite(count) || count < 1 || count > 100) {
+    err.textContent = "Enter a number of dupes between 1 and 100.";
+    return;
+  }
+  const ids = [...dupeState.selected];
+  if (!ids.length || btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = "Duplicating…";
+  prog.className = "eng-placeholder busy";
+  prog.textContent = `Duplicating ${ids.length} campaign${ids.length === 1 ? "" : "s"}… this can take a minute.`;
+  try {
+    const res = await runManualDupe(ids, count);
+    const results = res.results || [];
+    const ok = results.filter((r) => r.ok).length;
+    const failed = results.length - ok;
+    prog.className = "eng-placeholder";
+    prog.textContent = `${ok} campaign${ok === 1 ? "" : "s"} started/updated${failed ? `, ${failed} failed` : ""}.`;
+    const failMsgs = results.filter((r) => !r.ok).map((r) => `${r.campaign_id}: ${r.error}`);
+    if (failMsgs.length) err.textContent = failMsgs.join(" · ");
+    dupeState.selected.clear();
+    await loadDupeCampaigns();
+    loadTiktokCampaigns();
+    runCampaignCreatorDuplication();
+  } catch (e2) {
+    err.textContent = e2.message;
+    prog.textContent = "";
+    prog.className = "eng-placeholder";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Dupe";
+    syncDupeConfirmButton();
+  }
 }
 
 // ---- Business Center view filter (Detailed Metrics header) ----

@@ -38,6 +38,15 @@ function cleanPayload(obj, strip) {
 // `preloadedDetail` (optional): a loadCampaignDetail result the caller already
 // fetched this cycle (the auto-appeal check does) — reused for the Active gate
 // so we don't pull the same campaign detail twice per tick.
+//
+// Duplication is MANUAL (2026-09-05): reaching Active no longer auto-starts
+// creating copies. WAITING_FOR_ACTIVE only ever advances to READY (ad group
+// confirmed Active, sitting idle) — actual ad-group creation only happens for
+// a row already in DUPLICATING, which is entered exclusively via the "Dupe"
+// button's manual_dupe action (campaign-creator.js). This function still does
+// ALL the actual TikTok work either way — the manual trigger just decides
+// WHEN a row is allowed to reach the creation loop below, reusing this exact
+// engine rather than a separate one.
 async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, preloadedDetail = null }) {
   const advId = String(row.advertiser_id);
   const campaignId = String(row.campaign_id);
@@ -46,7 +55,7 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, prel
   const now = () => new Date().toISOString();
   const advHealthy = ["", "STATUS_ENABLE"].includes(String(advertiserStatus || "").toUpperCase());
 
-  if (created >= target) {
+  if (created >= target && row.dupe_status !== "WAITING_FOR_ACTIVE" && row.dupe_status !== "READY") {
     return { status: "COMPLETE", patch: { dupe_status: "COMPLETE", completed_at: now(), updated_at: now() } };
   }
 
@@ -84,9 +93,24 @@ async function duplicateForRow({ client, row, advertiserStatus, deadlineMs, prel
       }
       return { status: "WAITING_FOR_ACTIVE", patch: { updated_at: now() } };
     }
+
+    // Genuinely Active — stop here. No automatic duplicate creation; sit at
+    // READY until the user explicitly triggers "Dupe" (manual_dupe action).
+    return {
+      status: "READY",
+      patch: { dupe_status: "READY", became_active_at: row.became_active_at || now(), updated_at: now(), dupe_error: null },
+    };
   }
 
-  // --- Active: create up to DUPES_PER_CYCLE copies, persisting after each ---
+  // READY = Active, waiting for a manual trigger. Nothing to do on our own —
+  // the periodic tick's own query normally excludes READY rows entirely, this
+  // is just a safe no-op if it's ever called directly on one anyway.
+  if (row.dupe_status === "READY") {
+    return { status: "READY", patch: {} };
+  }
+
+  // --- DUPLICATING (manually triggered): create up to DUPES_PER_CYCLE copies,
+  // persisting after each ---
   const patch = { dupe_status: "DUPLICATING", updated_at: now() };
   if (!row.became_active_at) patch.became_active_at = now();
   patch.dupe_created = created;

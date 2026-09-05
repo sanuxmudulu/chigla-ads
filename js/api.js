@@ -305,6 +305,29 @@ export async function registerCampaignCreatorCampaign(payload) {
   return readTiktokResponse(res, "Couldn't register the campaign");
 }
 
+// Registered campaigns + duplication state — used by the "Dupe" modal to show
+// each Active campaign's current progress (dupe_status/dupe_created/dupe_target).
+export async function listCampaignCreatorCampaigns() {
+  const res = await fetch("/.netlify/functions/campaign-creator", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "list" }),
+  });
+  return readTiktokResponse(res, "Couldn't load duplication status"); // { campaigns: [...] }
+}
+
+// Manual duplication trigger (the "Dupe" button). Duplication no longer
+// starts automatically once a campaign goes Active — this is the only thing
+// that does. Partial per-campaign failures come back 200 with results[].
+export async function runManualDupe(campaignIds, count) {
+  const res = await fetch("/.netlify/functions/campaign-creator", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "manual_dupe", campaign_ids: campaignIds, count }),
+  });
+  return readTiktokResponse(res, "Duplication failed"); // { results: [...] }
+}
+
 // ---------------- Campaign Creator (templates + batch create) ----------------
 // Templates hold reusable settings only. The runner creates one campaign per
 // selected advertiser and registers each with the existing duplication +

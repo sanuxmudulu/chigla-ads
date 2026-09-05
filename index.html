@@ -100,6 +100,7 @@
           <select id="detailBcSelect"></select>
         </div>
         <div class="detail-bc-balance" id="detailBcBalance" hidden></div>
+        <button class="icon-btn primary" id="openDupeModalBtn">Dupe</button>
       </div>
     </div>
     <div class="table-wrap">
@@ -243,6 +244,26 @@
     <div class="modal-actions">
       <button class="icon-btn" id="cancelDeleteCampaignBtn">Cancel</button>
       <button class="icon-btn danger" id="confirmDeleteCampaignBtn">Delete Campaign</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MANUAL DUPE MODAL ============ -->
+<div class="modal-backdrop" id="dupeModal">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h3>Duplicate Ad Groups</h3>
+      <button id="closeDupeModal">✕</button>
+    </div>
+    <p class="eng-hint">Pick Active campaigns to duplicate their ad group, then choose how many copies. Only campaigns created through Campaign Creator can be duplicated.</p>
+    <div id="dupeList" class="tk-wrap"><p class="tk-loading">Loading active campaigns…</p></div>
+    <label class="budget-field-label" for="dupeCount">Number of dupes</label>
+    <input type="number" id="dupeCount" min="1" max="100" value="20" />
+    <div class="modal-error" id="dupeError"></div>
+    <div class="eng-placeholder" id="dupeProgress"></div>
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelDupeBtn">Cancel</button>
+      <button class="icon-btn primary" id="confirmDupeBtn" disabled>Dupe</button>
     </div>
   </div>
 </div>

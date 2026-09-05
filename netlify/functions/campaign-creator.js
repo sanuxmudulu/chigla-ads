@@ -7,21 +7,34 @@
 //           (Called by the future Campaign Creator tool — nothing else writes here.)
 //
 //   "process_duplication"  (no body)
-//        -> for every registered campaign still WAITING_FOR_ACTIVE / DUPLICATING:
-//           if the initial ad group is genuinely Active, create up to
-//           DUPES_PER_CYCLE more copies of it (default target 20). Idempotent.
-//           Driven by the existing ~60s dashboard refresh AND by a scheduler
-//           (see below) for when the dashboard is closed.
+//        -> for every registered campaign still WAITING_FOR_ACTIVE (checks
+//           whether the initial ad group is genuinely Active yet — auto
+//           appeal also runs here) or already DUPLICATING (a manual_dupe run
+//           still in progress — creates up to DUPES_PER_CYCLE more copies).
+//           Idempotent. Driven by the existing ~60s dashboard refresh AND by
+//           a scheduler (see below) for when the dashboard is closed.
 //
-//   "retry"  { campaign_id }
-//        -> un-stick a row stuck in dupe_status FAILED (dupe_created < dupe_target)
-//           by resetting it back to DUPLICATING (if its initial ad group already
-//           went Active) or WAITING_FOR_ACTIVE (if not), clearing dupe_attempts/
-//           dupe_error so the NEXT process_duplication pass picks it back up.
-//           dupe_created (progress so far) is never touched — a retry always
-//           resumes, never restarts, so it can never exceed dupe_target.
+//   DUPLICATION IS MANUAL (2026-09-05): reaching Active no longer auto-starts
+//   creating 20 copies. A WAITING_FOR_ACTIVE row that goes Active advances to
+//   READY and just sits there — the dashboard's "Dupe" button
+//   (manual_dupe below) is the only thing that starts the creation loop.
 //
-//   "list"  -> registered campaigns + duplication state (monitoring)
+//   "manual_dupe"  { campaign_ids: [...], count }
+//        -> for each campaign_id already registered (skips + reports any that
+//           aren't, or whose initial ad group isn't Active yet): sets
+//           dupe_target = count, clears dupe_attempts/dupe_error, sets
+//           dupe_status DUPLICATING, then immediately runs one duplication
+//           pass for it (reusing the exact same engine as process_duplication)
+//           so the dashboard shows progress right away. dupe_created (progress
+//           already made) is never reset — this doubles as "retry a FAILED
+//           row" and "raise/lower the target on an in-progress or COMPLETE
+//           row" — a count below what's already been created is just a no-op.
+//           Any remainder beyond one pass continues on the next
+//           process_duplication tick, capped at DUPES_PER_CYCLE per tick, and
+//           can never exceed dupe_target.
+//
+//   "list"  -> registered campaigns + duplication state (monitoring; the
+//              dashboard's Dupe modal uses this to show current progress)
 //
 // No admin password (same posture as the other tiktok-* write actions). All MCP
 // calls run here; no tokens are ever returned to the browser.
@@ -80,7 +93,7 @@ exports.handler = async function (event) {
     }
 
     if (body.action === "register") return register(supabase, body);
-    if (body.action === "retry") return retryFailed(supabase, body);
+    if (body.action === "manual_dupe") return manualDupe(supabase, body);
     if (body.action === "list") return listRows(supabase);
     // "process_duplication" (dashboard 60s poll) OR a Netlify scheduled
     // invocation (no recognizable action, e.g. body {"next_run":"..."}) — both
@@ -101,34 +114,111 @@ async function register(supabase, body) {
   return json(200, { ok: true, ...(r.already ? { already: true } : {}) });
 }
 
-async function retryFailed(supabase, body) {
-  const campaignId = String(body.campaign_id || "");
-  if (!campaignId) return json(400, { error: "campaign_id is required" });
-
-  const { data: row, error } = await supabase
-    .from("campaign_creator_campaigns")
-    .select("campaign_id, dupe_status, dupe_created, dupe_target, became_active_at")
-    .eq("campaign_id", campaignId)
-    .maybeSingle();
-  if (error) return json(500, { error: "Supabase read failed", details: sbErr(error) });
-  if (!row) return json(404, { error: "Campaign not found in campaign_creator_campaigns." });
-  if (row.dupe_status !== "FAILED") {
-    return json(400, { error: `Only a FAILED row can be retried (this one is ${row.dupe_status}).` });
-  }
-  if ((Number(row.dupe_created) || 0) >= (Number(row.dupe_target) || 20)) {
-    return json(400, { error: "This row already reached its dupe_target — nothing to retry." });
+// The Dupe button's action. Sets dupe_target + flips selected rows to
+// DUPLICATING, then runs ONE duplication pass immediately (same engine as
+// process_duplication) so progress shows right away. Reuses withClient,
+// patchRow, and duplicateForRow exactly as process_duplication does — no
+// second duplication system.
+async function manualDupe(supabase, body) {
+  const campaignIds = Array.isArray(body.campaign_ids) ? [...new Set(body.campaign_ids.map(String).filter(Boolean))] : [];
+  if (!campaignIds.length) return json(400, { error: "campaign_ids (a non-empty array) is required" });
+  const count = Number(body.count);
+  if (!Number.isFinite(count) || count < 1 || count > 100) {
+    return json(400, { error: "count must be a number between 1 and 100" });
   }
 
-  const nextStatus = row.became_active_at ? "DUPLICATING" : "WAITING_FOR_ACTIVE";
-  const patch = {
-    dupe_status: nextStatus,
-    dupe_attempts: 0,
-    dupe_error: null,
-    updated_at: new Date().toISOString(),
-  };
-  const upd = await supabase.from("campaign_creator_campaigns").update(patch).eq("campaign_id", campaignId);
-  if (upd.error) return json(500, { error: "Retry failed", details: sbErr(upd.error) });
-  return json(200, { ok: true, campaign_id: campaignId, dupe_status: nextStatus, dupe_created: row.dupe_created });
+  const { data: rows, error } = await supabase.from("campaign_creator_campaigns").select("*").in("campaign_id", campaignIds);
+  if (error) {
+    if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
+      return json(200, {
+        ok: true,
+        results: campaignIds.map((id) => ({ campaign_id: id, ok: false, error: "Campaign Creator isn't migrated yet." })),
+      });
+    }
+    return json(500, { error: "Supabase read failed", details: sbErr(error) });
+  }
+
+  const byId = new Map((rows || []).map((r) => [String(r.campaign_id), r]));
+  const results = [];
+  const toProcess = [];
+  const now = new Date().toISOString();
+
+  for (const id of campaignIds) {
+    const row = byId.get(id);
+    if (!row) {
+      results.push({ campaign_id: id, ok: false, error: "Not a Campaign Creator campaign — nothing to duplicate." });
+      continue;
+    }
+    if (row.dupe_status === "WAITING_FOR_ACTIVE") {
+      results.push({ campaign_id: id, ok: false, error: "The initial ad group isn't Active yet." });
+      continue;
+    }
+    const patch = { dupe_target: count, dupe_status: "DUPLICATING", dupe_attempts: 0, dupe_error: null, updated_at: now };
+    const upd = await supabase.from("campaign_creator_campaigns").update(patch).eq("campaign_id", id);
+    if (upd.error) {
+      results.push({ campaign_id: id, ok: false, error: upd.error.message });
+      continue;
+    }
+    toProcess.push({ ...row, ...patch });
+  }
+
+  if (!toProcess.length) return json(200, { ok: true, results });
+
+  const byConnection = {};
+  for (const r of toProcess) (byConnection[r.connection_id] = byConnection[r.connection_id] || []).push(r);
+  const deadlineMs = Date.now() + 45000; // this endpoint gets maxDuration 60 on Vercel
+
+  for (const [connectionId, list] of Object.entries(byConnection)) {
+    if (Date.now() > deadlineMs) {
+      for (const r of list) results.push({ campaign_id: r.campaign_id, ok: true, dupe_status: "DUPLICATING", note: "queued for the next automatic cycle" });
+      continue;
+    }
+    const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+    if (!conn) {
+      for (const r of list) results.push({ campaign_id: r.campaign_id, ok: false, error: "Connection removed." });
+      continue;
+    }
+    const advIds = [...new Set(list.map((r) => String(r.advertiser_id)))];
+    const { data: advRows } = await supabase
+      .from("tiktok_advertisers")
+      .select("advertiser_id, status")
+      .eq("connection_id", connectionId)
+      .in("advertiser_id", advIds);
+    const advStatus = new Map((advRows || []).map((a) => [String(a.advertiser_id), a.status]));
+
+    try {
+      await withClient(supabase, conn, async (client) => {
+        for (const r of list) {
+          if (Date.now() > deadlineMs) {
+            results.push({ campaign_id: r.campaign_id, ok: true, dupe_status: "DUPLICATING", note: "queued for the next automatic cycle" });
+            continue;
+          }
+          r.__persist = (patch) => patchRow(supabase, r.campaign_id, patch);
+          let out;
+          try {
+            out = await duplicateForRow({ client, row: r, advertiserStatus: advStatus.get(String(r.advertiser_id)), deadlineMs });
+          } catch (err) {
+            results.push({ campaign_id: r.campaign_id, ok: false, error: err.message });
+            continue;
+          }
+          await patchRow(supabase, r.campaign_id, out.patch);
+          console.log(`[campaign-creator] ${r.campaign_id} — manual_dupe -> ${out.patch.dupe_status || out.status} (${out.patch.dupe_created ?? r.dupe_created}/${count})`);
+          results.push({
+            campaign_id: r.campaign_id,
+            ok: out.status !== "FAILED",
+            dupe_status: out.patch.dupe_status || out.status,
+            dupe_created: out.patch.dupe_created ?? r.dupe_created,
+            dupe_target: count,
+            error: out.patch.dupe_error || null,
+          });
+        }
+      });
+    } catch (err) {
+      for (const r of list) results.push({ campaign_id: r.campaign_id, ok: false, error: err.message });
+    }
+  }
+
+  return json(200, { ok: true, results });
 }
 
 // ---------------------------------------------------------------------------
