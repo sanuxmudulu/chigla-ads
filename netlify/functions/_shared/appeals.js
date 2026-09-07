@@ -150,41 +150,52 @@ function rejectStringsFromAdItem(item) {
   return out;
 }
 
-// -> { review: object|null, error: string|null }. Errors are surfaced (not
-// swallowed) so a persistent adgroup_review_info_get failure shows up in
-// appeal_error instead of silently looking like "TikTok never gave a reason."
+// -> { review: object|null, adReviewMap: object|null, error: string|null }.
+//
+// VERIFIED LIVE against the real API (2026-09-07): `ad_review_map` (per-ad
+// review, including each ad's own reject_info when rejected) is a TOP-LEVEL
+// SIBLING of `ad_group_review_map` in the response, keyed by adgroup_id — it
+// is NOT nested inside the ad_group_review_map entry. An earlier version of
+// this code assumed the nested shape and silently found nothing for every
+// rejected campaign because of it. Real sample for an (approved) ad group:
+//   { ad_group_review_map: { "<agId>": { is_approved, review_status,
+//       appeal_status, contains_rejected_ads, forbidden_placements, ... } },
+//     ad_review_map: { "<agId>": { "<adId>": { is_approved, review_status,
+//       forbidden_placements, ... } } } }
+// Errors are surfaced (not swallowed) so a persistent
+// adgroup_review_info_get failure shows up in appeal_error instead of
+// silently looking like "TikTok never gave a reason."
 async function fetchInitialAdgroupReview(client, advertiserId, adgroupId) {
   try {
     const r = await mcpCall(client, "adgroup_review_info_get", {
       advertiser_id: String(advertiserId),
       adgroup_ids: [String(adgroupId)],
     });
-    const map = (r && r.ad_group_review_map) || {};
-    return { review: map[String(adgroupId)] || null, error: null };
+    const review = (r && r.ad_group_review_map && r.ad_group_review_map[String(adgroupId)]) || null;
+    const adReviewMap = (r && r.ad_review_map && r.ad_review_map[String(adgroupId)]) || null;
+    return { review, adReviewMap, error: null };
   } catch (err) {
-    return { review: null, error: err.message };
+    return { review: null, adReviewMap: null, error: err.message };
   }
 }
 
 // Ad-group-level rejection reasons — the last-resort source when the ad-level
-// read (fetchAdLevelReasons) comes back empty. TikTok's exact shape for a
-// MANUAL (non-Smart+) ad group's reject_info isn't nailed down from docs alone
-// — it's been seen directly on the ad_group_review_map entry, but per-ad
-// review data also nests under that entry's own ad_review_map — so both are
-// scanned with the same broad key-probing as the ad-level extractor rather
-// than assuming one exact location.
-function rejectStringsFromAdgroupReview(review) {
-  if (!review) return [];
-  const out = [...rejectStringsFromAdItem(review)];
-  for (const adReview of Object.values(review.ad_review_map || {})) {
+// read (fetchAdLevelReasons) comes back empty. Scans both the ad-group's own
+// review object and every per-ad entry in its (correctly top-level) review
+// map, with the same broad key-probing as the ad-level extractor rather than
+// assuming one exact field name for the reason text.
+function rejectStringsFromAdgroupReview(review, adReviewMap) {
+  const out = [];
+  if (review) out.push(...rejectStringsFromAdItem(review));
+  for (const adReview of Object.values(adReviewMap || {})) {
     out.push(...rejectStringsFromAdItem(adReview));
   }
   return out;
 }
 
 // Real ad ids for the campaign's initial ad group. Prefer the id we recorded at
-// creation, then ad_get, then the review map as a last resort.
-async function resolveInitialAdIds(client, advertiserId, adgroupId, knownAdId, review) {
+// creation, then ad_get, then the per-ad review map as a last resort.
+async function resolveInitialAdIds(client, advertiserId, adgroupId, knownAdId, adReviewMap) {
   const ids = new Set();
   if (knownAdId) ids.add(String(knownAdId));
   if (!ids.size) {
@@ -201,7 +212,7 @@ async function resolveInitialAdIds(client, advertiserId, adgroupId, knownAdId, r
     }
   }
   if (!ids.size) {
-    for (const k of Object.keys((review && review.ad_review_map) || {})) ids.add(String(k));
+    for (const k of Object.keys(adReviewMap || {})) ids.add(String(k));
   }
   return [...ids];
 }
@@ -348,8 +359,8 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
   }
 
   // ---- fetch AD-LEVEL rejection reasons (source of truth) ----
-  const { review, error: reviewError } = await fetchInitialAdgroupReview(client, advId, adgroupId);
-  const adIds = await resolveInitialAdIds(client, advId, adgroupId, row.initial_ad_id, review);
+  const { review, adReviewMap, error: reviewError } = await fetchInitialAdgroupReview(client, advId, adgroupId);
+  const adIds = await resolveInitialAdIds(client, advId, adgroupId, row.initial_ad_id, adReviewMap);
   const adLevel = await fetchAdLevelReasons(client, advId, adIds);
   log(`ad review info fetched — adIds=${adIds.length} rawReasons=${adLevel.raw.length} reviewError=${reviewError || "-"}`);
 
@@ -362,7 +373,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
     // per-creative rejection, so the ad itself can come back is_approved=true
     // while the ad group is still genuinely Rejected — this is the normal path
     // for that case, not a fallback for a broken read.
-    const adgroupReasons = rejectStringsFromAdgroupReview(review);
+    const adgroupReasons = rejectStringsFromAdgroupReview(review, adReviewMap);
     if (adgroupReasons.length) {
       rawReasons = adgroupReasons;
       source = "adgroup";
@@ -372,18 +383,20 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
 
   if (!rawReasons.length) {
     // No ad rejection information obtained — never appeal on campaign status
-    // alone. Log the raw review payload so a shape this doesn't already know
-    // how to read is visible in the function logs instead of a dead end.
+    // alone. The raw shapes go into BOTH the function log and appeal_error
+    // (truncated) so this is diagnosable straight from Supabase if this still
+    // doesn't know how to read whatever TikTok actually sent back.
     const reason = adLevel.error
       ? `ad_review_info_get failed: ${adLevel.error}`
       : reviewError
       ? `adgroup_review_info_get failed: ${reviewError}`
       : "No ad-level rejection reason returned yet";
-    log(`rejection detected but NO ad-level reason available yet (${reason}) — not appealing. raw review=${JSON.stringify(review).slice(0, 800)}`);
+    const rawDump = `review=${JSON.stringify(review)} adReviewMap=${JSON.stringify(adReviewMap)}`;
+    log(`rejection detected but NO ad-level reason available yet (${reason}) — not appealing. raw ${rawDump}`.slice(0, 2000));
     await persist({
       appeal_state: "REJECTED",
       appeal_adgroup_id: adgroupId,
-      appeal_error: reason,
+      appeal_error: `${reason} | raw ${rawDump}`.slice(0, 1500),
     });
     return { blockDuplication: true, detail };
   }
