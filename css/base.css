@@ -403,7 +403,17 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 /* ---- expanded ad-group panel — narrow, centered, roomy columns ---- */
 .adgroups-loading, .adgroups-empty, .adgroups-error { font-size: 12px; color: var(--text-2); padding: 4px 2px; text-align: center; }
 .adgroups-error { color: var(--loss); }
-.adgroups-wrap { display: flex; justify-content: center; }
+/* The ad-group table is centered in the (much wider) detail row, leaving a
+   gutter on the left — the ad account name lives there so it's visible
+   without opening the account picker to figure out which account a campaign
+   is running under. */
+.adgroups-wrap { display: flex; align-items: center; justify-content: center; position: relative; min-height: 30px; }
+.adgroups-account {
+  position: absolute; left: 2px; top: 50%; transform: translateY(-50%);
+  text-align: left; line-height: 1.35; max-width: 200px;
+}
+.adgroups-account-label { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-2); font-weight: 600; }
+.adgroups-account-name { font-size: 13px; font-weight: 600; color: var(--text-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 .adgroups-table {
   width: auto; max-width: 600px; margin: 0 auto;
   border-collapse: collapse; font-size: 12px; table-layout: fixed;

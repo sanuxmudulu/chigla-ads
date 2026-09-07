@@ -2991,6 +2991,16 @@ function panelEl(campaignId) {
   return document.querySelector(`.adgroups-panel[data-adgroups-for="${cssEscapeAttr(campaignId || "")}"]`);
 }
 
+// The gutter to the left of the (centered) ad-group table — shows which ad
+// account this campaign runs under, so it doesn't have to be found by
+// checking each account one by one. Empty when there's nothing to show yet
+// (e.g. no tracked TikTok campaign at all).
+function adAccountLabelHtml(s) {
+  const name = s?.advertiserName || s?.advertiserId;
+  if (!name) return "";
+  return `<div class="adgroups-account"><div class="adgroups-account-label">Ad account</div><div class="adgroups-account-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div></div>`;
+}
+
 async function renderAdGroupsPanel(s, { force } = {}) {
   const panel = panelEl(s.campaignId);
   if (!panel) return;
@@ -3000,6 +3010,7 @@ async function renderAdGroupsPanel(s, { force } = {}) {
     return;
   }
 
+  const acct = adAccountLabelHtml(s);
   const cached = state.adGroupsByCampaign[s.campaignId];
   const fresh = cached && Date.now() - cached.loadedAt < 60000 && !force;
   if (fresh && cached.rows) {
@@ -3007,11 +3018,11 @@ async function renderAdGroupsPanel(s, { force } = {}) {
     return;
   }
   if (cached && cached.error && !force) {
-    panel.innerHTML = `<div class="adgroups-error">Couldn't load ad groups: ${escapeHtml(cached.error)}</div>`;
+    panel.innerHTML = `<div class="adgroups-wrap">${acct}<div class="adgroups-error">Couldn't load ad groups: ${escapeHtml(cached.error)}</div></div>`;
     return;
   }
 
-  panel.innerHTML = `<div class="adgroups-loading">Loading ad groups…</div>`;
+  panel.innerHTML = `<div class="adgroups-wrap">${acct}<div class="adgroups-loading">Loading ad groups…</div></div>`;
   try {
     const res = await fetchCampaignAdGroups(s.campaignId);
     state.adGroupsByCampaign[s.campaignId] = { loadedAt: Date.now(), rows: res.adgroups || [] };
@@ -3022,17 +3033,19 @@ async function renderAdGroupsPanel(s, { force } = {}) {
   } catch (err) {
     state.adGroupsByCampaign[s.campaignId] = { loadedAt: Date.now(), error: err.message };
     const p = panelEl(s.campaignId);
-    if (p) p.innerHTML = `<div class="adgroups-error">Couldn't load ad groups: ${escapeHtml(err.message)}</div>`;
+    if (p) p.innerHTML = `<div class="adgroups-wrap">${acct}<div class="adgroups-error">Couldn't load ad groups: ${escapeHtml(err.message)}</div></div>`;
   }
 }
 
 function paintAdGroups(panel, s, rows) {
+  const acct = adAccountLabelHtml(s);
   if (!rows.length) {
-    panel.innerHTML = `<div class="adgroups-empty">This campaign has no ad groups.</div>`;
+    panel.innerHTML = `<div class="adgroups-wrap">${acct}<div class="adgroups-empty">This campaign has no ad groups.</div></div>`;
     return;
   }
   panel.innerHTML = `
     <div class="adgroups-wrap">
+      ${acct}
       <table class="adgroups-table">
         <colgroup>
           <col style="width:40px" /><col style="width:118px" /><col style="width:210px" /><col style="width:96px" /><col style="width:96px" />
