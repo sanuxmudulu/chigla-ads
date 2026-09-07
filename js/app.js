@@ -25,6 +25,7 @@ import {
   deleteCommentTemplate,
   createWhWarmup,
   cleanupWhWarmup,
+  listWhWarmup,
   fetchWhCountries,
   fetchTemplateCountries,
   processCampaignCreatorDuplication,
@@ -126,12 +127,12 @@ const state = {
   adGroupsByCampaign: {}, // campaign_id -> { loadedAt, rows, error }
   pendingActions: new Set(), // in-flight campaign/adgroup writes (double-click guard)
   raw: [],
-  chartSource: "__all__",
   hasFetchedOnce: false,
   prevConversions: new Map(),
   baseSpendTotal: 0,
   baseEarningsTotal: 0,
   expandedSources: new Set(),
+  selectedCampaigns: new Set(), // campaign_ids checked in the Select column
 };
 
 let lastUpdatedAt = null;
@@ -142,7 +143,7 @@ let ccDupeInFlight = false; // guards the Campaign-Creator duplication poll
 let mainChartCanvas = null;
 let openRowMenuFor = null; // campaignId whose ⋮ menu is open, or null
 let rowMenuEl = null; // the floating menu element (appended to <body>)
-let deleteCampaignTarget = null; // source row pending delete confirmation
+let deleteCampaignTargets = []; // source row(s) pending delete confirmation
 let engagementTarget = null; // source row for the open engagement / comments modal
 const ENGAGEMENT_SERVICE_ID_KEY = "chigla_engagement_service_id_v1";
 
@@ -356,6 +357,7 @@ function wireEvents() {
   });
   wireTiktokEvents();
   wireWhWarmupEvents();
+  wireWhWarmingUpEvents();
   wireCampaignCreatorEvents();
   wireDupeEvents();
 
@@ -366,11 +368,6 @@ function wireEvents() {
   });
   document.getElementById("calPrevMonth").addEventListener("click", () => shiftCalendarMonth(-1));
   document.getElementById("calNextMonth").addEventListener("click", () => shiftCalendarMonth(1));
-
-  document.getElementById("chartSourceSelect").addEventListener("change", (e) => {
-    state.chartSource = e.target.value;
-    renderChart();
-  });
 
   document.getElementById("detailBcSelect").addEventListener("change", (e) => {
     state.detailBcFilter = e.target.value;
@@ -417,6 +414,12 @@ function wireEvents() {
   wireCommentTemplateEvents();
 
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
+    // Select checkbox — must NOT toggle the row (its own `change` listener
+    // below handles the actual selection).
+    if (e.target.closest("[data-select-campaign]")) {
+      e.stopPropagation();
+      return;
+    }
     // Campaign pause/unpause button — must NOT toggle the row.
     const campBtn = e.target.closest("[data-campaign-action]");
     if (campBtn) {
@@ -431,16 +434,28 @@ function wireEvents() {
       handleAdgroupAction(agBtn);
       return;
     }
-    // Far-right ⋮ campaign action menu — must NOT toggle the row.
-    const menuBtn = e.target.closest("[data-row-menu]");
-    if (menuBtn) {
-      e.stopPropagation();
-      toggleRowMenu(menuBtn);
-      return;
-    }
     const row = e.target.closest("tr.source-row");
     if (!row) return;
     toggleRowExpand(row.dataset.source);
+  });
+  document.getElementById("sourcesBody").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[data-select-campaign]");
+    if (!cb) return;
+    const id = String(cb.dataset.selectCampaign);
+    if (cb.checked) state.selectedCampaigns.add(id);
+    else state.selectedCampaigns.delete(id);
+  });
+  // Double-click any select checkbox -> select every campaign in the table.
+  document.getElementById("sourcesBody").addEventListener("dblclick", (e) => {
+    if (!e.target.closest("[data-select-campaign]")) return;
+    state.sources.forEach((s) => {
+      if (s.hasTiktok && s.campaignId) state.selectedCampaigns.add(String(s.campaignId));
+    });
+    renderTable();
+  });
+  document.getElementById("detailBulkActionsBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleDetailActionsMenu(e.currentTarget);
   });
 }
 
@@ -653,24 +668,9 @@ function rebuildSources(opts = {}) {
   state.baseSpendTotal = merged.reduce((a, s) => a + s.spend, 0);
   state.baseEarningsTotal = merged.reduce((a, s) => a + s.payout, 0);
 
-  populateChartSourceOptions(merged);
   renderKpis();
   renderTable(opts.newConversionSources);
   renderChart();
-}
-
-function populateChartSourceOptions(sources) {
-  const select = document.getElementById("chartSourceSelect");
-  const current = state.chartSource;
-  select.innerHTML = `<option value="__all__">All Sources Combined</option>`;
-  sources.forEach((s) => {
-    const opt = document.createElement("option");
-    opt.value = s.source;
-    opt.textContent = s.source;
-    select.appendChild(opt);
-  });
-  if ([...select.options].some((o) => o.value === current)) select.value = current;
-  else state.chartSource = "__all__";
 }
 
 // ============================== KPI ROW ==============================
@@ -712,6 +712,11 @@ function renderTable(newConversionSources) {
   closeRowMenu(); // any re-render invalidates the floating menu's anchor
   tbody.innerHTML = "";
 
+  // Drop selections for campaigns that no longer exist in this render (e.g.
+  // deleted, or filtered out by the BC view).
+  const liveIds = new Set(state.sources.filter((s) => s.campaignId).map((s) => String(s.campaignId)));
+  for (const id of [...state.selectedCampaigns]) if (!liveIds.has(id)) state.selectedCampaigns.delete(id);
+
   // Winners first: highest ROAS, then (tie-break) highest spend. Re-sorted on
   // every rebuild so the table re-orders itself as fresh metrics land.
   const sorted = [...state.sources].sort((a, b) => b.roas - a.roas || b.spend - a.spend);
@@ -734,6 +739,7 @@ function renderTable(newConversionSources) {
     const crown = bestRoas && s === bestRoas ? `<span class="crown" title="Best ROAS today">👑</span>` : "";
 
     tr.innerHTML = `
+      <td class="select-cell">${selectCell(s)}</td>
       <td class="toggle-cell">${campaignToggle(s)}</td>
       <td>${statusBadge(s.status)}</td>
       <td class="source-name"><span class="expand-caret">▸</span>${crown}${escapeHtml(s.source)}</td>
@@ -746,7 +752,6 @@ function renderTable(newConversionSources) {
       <td class="num">${money(s.epc)}</td>
       <td class="num roas-cell" style="color:${roasColor(s.roas)}">${s.roas.toFixed(2)}x</td>
       <td class="budget-cell">${budgetCell(s)}</td>
-      <td class="row-action-cell">${actionMenuCell(s)}</td>
     `;
     tbody.appendChild(tr);
 
@@ -808,15 +813,19 @@ function budgetCell(s) {
     </div>`;
 }
 
-// Far-right 3-dot menu trigger. Only for rows backed by a tracked TikTok
-// campaign — the menu (Edit budget / Delete campaign) is built on open.
-function actionMenuCell(s) {
+// Selector checkbox — the table's leftmost column. Only for rows backed by a
+// tracked TikTok campaign (the bulk actions all need a campaign_id).
+function selectCell(s) {
   if (!s.hasTiktok || !s.campaignId) return "";
-  const open = openRowMenuFor === String(s.campaignId);
-  return `<button type="button" class="rowmenu-btn${open ? " active" : ""}" data-row-menu="${escapeHtml(s.campaignId)}" aria-label="Campaign actions" title="Campaign actions">⋮</button>`;
+  const checked = state.selectedCampaigns.has(String(s.campaignId));
+  return `<input type="checkbox" class="row-select" data-select-campaign="${escapeHtml(s.campaignId)}" ${checked ? "checked" : ""} title="Select" />`;
 }
 
-// ---- far-right ⋮ campaign action menu ----
+// ---- campaign actions menu — top-right of Detailed Metrics, next to Dupe.
+// Acts on whatever's currently checked in the Select column (one or many),
+// replacing the old per-row ⋮ button. Shares the same floating-menu plumbing
+// (openRowMenuFor / rowMenuEl / closeRowMenu) as the WH Warmup panel's menu —
+// keyed "bulk" so it can't collide with a campaign_id or "wh:<id>" key. ----
 
 function closeRowMenu() {
   openRowMenuFor = null;
@@ -824,33 +833,42 @@ function closeRowMenu() {
     rowMenuEl.remove();
     rowMenuEl = null;
   }
-  document.querySelectorAll(".rowmenu-btn.active").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".rowmenu-btn.active, .icon-btn.active").forEach((b) => b.classList.remove("active"));
 }
 
-function toggleRowMenu(btn) {
-  const campaignId = String(btn.dataset.rowMenu || "");
-  if (openRowMenuFor === campaignId) {
+function toggleDetailActionsMenu(btn) {
+  if (openRowMenuFor === "bulk") {
     closeRowMenu();
     return;
   }
+  const ids = [...state.selectedCampaigns];
+  if (!ids.length) {
+    setStatus("Select at least one campaign first.", true);
+    return;
+  }
   closeRowMenu();
+  const selected = state.sources.filter((s) => s.campaignId && ids.includes(String(s.campaignId)));
+  if (!selected.length) return;
 
-  const s = state.sources.find((x) => String(x.campaignId) === campaignId);
-  if (!s) return;
-
-  openRowMenuFor = campaignId;
+  openRowMenuFor = "bulk";
   btn.classList.add("active");
+
+  // Add comments opens ONE campaign's own modal (post URL, saved orders,
+  // template picker) — there's no single-campaign UI to generalize to many,
+  // so it stays a single-selection action; Edit budget and Delete both have
+  // well-defined bulk behavior and stay enabled for any selection size.
+  const anyWh = selected.some((s) => s.isWhWarmup);
+  const addCommentsItem =
+    selected.length === 1 && !anyWh
+      ? `<button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>`
+      : `<button type="button" class="rowmenu-item" disabled title="${anyWh ? "WH Warmup campaigns don't use engagement" : "Select exactly one campaign to add comments"}">Add comments</button>`;
 
   const menu = document.createElement("div");
   menu.className = "rowmenu";
-  // WH Warmup campaigns appear in Detailed Metrics but never enter engagement.
-  const addComments = s.isWhWarmup
-    ? ""
-    : `<button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>`;
   menu.innerHTML = `
-    <button type="button" class="rowmenu-item" data-menu-action="edit-budget">Edit budget</button>
-    ${addComments}
-    <button type="button" class="rowmenu-item danger" data-menu-action="delete-campaign">Delete campaign</button>`;
+    <button type="button" class="rowmenu-item" data-menu-action="edit-budget">Edit budget${selected.length > 1 ? ` (${selected.length})` : ""}</button>
+    ${addCommentsItem}
+    <button type="button" class="rowmenu-item danger" data-menu-action="delete-campaign">Delete campaign${selected.length > 1 ? `s (${selected.length})` : ""}</button>`;
   document.body.appendChild(menu);
   rowMenuEl = menu;
 
@@ -862,71 +880,84 @@ function toggleRowMenu(btn) {
 
   menu.addEventListener("click", (e) => {
     const item = e.target.closest("[data-menu-action]");
-    if (!item) return;
+    if (!item || item.disabled) return;
     const act = item.dataset.menuAction;
-    const src = state.sources.find((x) => String(x.campaignId) === campaignId);
     closeRowMenu();
-    if (!src) return;
     if (act === "edit-budget") {
-      if (src.advertiserId) openBudgetModal(src.advertiserId);
-      else setStatus("No ad-account budget is available for this campaign.", true);
+      const advIds = [...new Set(selected.map((s) => s.advertiserId).filter(Boolean))];
+      if (advIds.length) openBudgetModal(advIds);
+      else setStatus("No ad-account budget is available for the selected campaign(s).", true);
     } else if (act === "add-comments") {
-      openEngagementCommentsModal(src);
+      openEngagementCommentsModal(selected[0]);
     } else if (act === "delete-campaign") {
-      openDeleteCampaignModal(src);
+      openDeleteCampaignModal(selected);
     }
   });
 }
 
-// ---- delete campaign (always confirmed first) ----
+// ---- delete campaign(s) (always confirmed first) ----
 
-function openDeleteCampaignModal(s) {
-  deleteCampaignTarget = s;
-  document.getElementById("deleteCampaignName").textContent = s.source;
+function openDeleteCampaignModal(sources) {
+  deleteCampaignTargets = (Array.isArray(sources) ? sources : [sources]).filter(Boolean);
+  if (!deleteCampaignTargets.length) return;
+  document.getElementById("deleteCampaignName").textContent =
+    deleteCampaignTargets.length === 1 ? deleteCampaignTargets[0].source : `${deleteCampaignTargets.length} campaigns`;
   document.getElementById("deleteCampaignError").textContent = "";
   const btn = document.getElementById("confirmDeleteCampaignBtn");
   btn.disabled = false;
-  btn.textContent = "Delete Campaign";
+  btn.textContent = deleteCampaignTargets.length > 1 ? `Delete ${deleteCampaignTargets.length} Campaigns` : "Delete Campaign";
   document.getElementById("deleteCampaignModal").classList.add("open");
 }
 
 function closeDeleteCampaignModal() {
   document.getElementById("deleteCampaignModal").classList.remove("open");
-  deleteCampaignTarget = null;
+  deleteCampaignTargets = [];
 }
 
 async function confirmDeleteCampaign() {
-  if (!deleteCampaignTarget) return;
-  const s = deleteCampaignTarget;
+  if (!deleteCampaignTargets.length) return;
+  const targets = deleteCampaignTargets;
   const btn = document.getElementById("confirmDeleteCampaignBtn");
   const errEl = document.getElementById("deleteCampaignError");
   errEl.textContent = "";
   btn.disabled = true;
-  btn.textContent = "Deleting…";
-  try {
-    const res = await deleteTiktokCampaign(s.campaignId);
-    // Remove locally right away — whether TikTok deleted it or we hid it, it
-    // should leave the table now. A background reload confirms.
-    state.tiktokCampaigns = state.tiktokCampaigns.filter((c) => String(c.campaign_id) !== String(s.campaignId));
-    delete state.adGroupsByCampaign[s.campaignId];
-    delete state.campaignMetrics[String(s.campaignId)];
-    state.expandedSources.delete(s.source);
-    renderDetailBcSelector();
-    rebuildSources();
-    closeDeleteCampaignModal();
-    setStatus(
-      res.message ||
-        (res.outcome === "hidden"
-          ? "Campaign hidden from Chigla Ads."
-          : "Campaign deleted from TikTok."),
-      false
-    );
-    loadTiktokCampaigns();
-  } catch (err) {
-    errEl.textContent = err.message;
-    btn.disabled = false;
-    btn.textContent = "Delete Campaign";
+  btn.textContent = targets.length > 1 ? `Deleting ${targets.length}…` : "Deleting…";
+
+  const failed = [];
+  let lastRes = null;
+  for (const s of targets) {
+    try {
+      const res = await deleteTiktokCampaign(s.campaignId);
+      lastRes = res;
+      // Remove locally right away — whether TikTok deleted it or we hid it, it
+      // should leave the table now. A background reload confirms.
+      state.tiktokCampaigns = state.tiktokCampaigns.filter((c) => String(c.campaign_id) !== String(s.campaignId));
+      delete state.adGroupsByCampaign[s.campaignId];
+      delete state.campaignMetrics[String(s.campaignId)];
+      state.expandedSources.delete(s.source);
+      state.selectedCampaigns.delete(String(s.campaignId));
+    } catch (err) {
+      failed.push(`${s.source}: ${err.message}`);
+    }
   }
+  renderDetailBcSelector();
+  rebuildSources();
+
+  if (failed.length) {
+    btn.disabled = false;
+    btn.textContent = targets.length > 1 ? `Delete ${targets.length} Campaigns` : "Delete Campaign";
+    errEl.textContent = `${failed.length} failed — ${failed.join("; ")}`;
+    return;
+  }
+
+  closeDeleteCampaignModal();
+  setStatus(
+    targets.length > 1
+      ? `${targets.length} campaigns deleted.`
+      : lastRes?.message || (lastRes?.outcome === "hidden" ? "Campaign hidden from Chigla Ads." : "Campaign deleted from TikTok."),
+    false
+  );
+  loadTiktokCampaigns();
 }
 
 // ---- engagement FOUNDATION: "Add comments" ----
@@ -1278,17 +1309,31 @@ const whState = {
   countryLoading: false,
   selectedCountry: null, // { location_id, name } — a confirmed pick; required to create
   suggestActive: -1, // keyboard-highlighted suggestion index
+  spark: "", // Spark code textarea, mirrored here so it survives a minimize
+  minimized: false, // true = modal hidden but the draft is kept for resume
 };
+
+// Ordered per whAdvsForConnection() (not Set order) — the account whose
+// country list step 2 uses, and the one Back/Next re-picking-invalidation
+// compares against. See whGoToStep().
+function whRepresentativeAdvId() {
+  const first = whAdvsForConnection().find((a) => whState.selected.has(String(a.advertiser_id)));
+  return first ? String(first.advertiser_id) : null;
+}
 
 function wireWhWarmupEvents() {
   document.getElementById("toolsWhWarmupBtn").addEventListener("click", openWhWarmupModal);
-  document.getElementById("closeWhWarmupModal").addEventListener("click", closeWhWarmupModal);
+  // X and backdrop MINIMIZE (keep the draft) — Cancel/Done are the explicit
+  // discard, matching Campaign Creator's minimize logic exactly.
+  document.getElementById("closeWhWarmupModal").addEventListener("click", minimizeWhWarmup);
+  const whMinBtn = document.getElementById("whMinimizeModal");
+  if (whMinBtn) whMinBtn.addEventListener("click", minimizeWhWarmup);
   document.getElementById("whWarmupModal").addEventListener("click", (e) => {
-    if (e.target.id === "whWarmupModal") closeWhWarmupModal();
+    if (e.target.id === "whWarmupModal") minimizeWhWarmup();
   });
-  document.getElementById("whCancelBtn1").addEventListener("click", closeWhWarmupModal);
-  document.getElementById("whCancelBtn2").addEventListener("click", closeWhWarmupModal);
-  document.getElementById("whDoneBtn").addEventListener("click", closeWhWarmupModal);
+  document.getElementById("whCancelBtn1").addEventListener("click", () => { whResetDraft(); closeWhWarmupModal(); });
+  document.getElementById("whCancelBtn2").addEventListener("click", () => { whResetDraft(); closeWhWarmupModal(); });
+  document.getElementById("whDoneBtn").addEventListener("click", () => { whResetDraft(); closeWhWarmupModal(); });
   document.getElementById("whBackBtn").addEventListener("click", () => whGoToStep(1));
   document.getElementById("whNextBtn").addEventListener("click", () => whGoToStep(2));
   document.getElementById("whCreateBtn").addEventListener("click", submitWhWarmup);
@@ -1345,6 +1390,11 @@ function wireWhWarmupEvents() {
       e.preventDefault();
       pickCountry(b.dataset.locId, b.dataset.name);
     }
+  });
+
+  // Mirrored into whState so a minimize/resume never loses what was typed.
+  document.getElementById("whSparkInput").addEventListener("input", (e) => {
+    whState.spark = e.target.value;
   });
 }
 
@@ -1422,28 +1472,31 @@ async function loadWhCountries(advertiserId) {
   }
 }
 
+// Approved first, Suspended after — but WITHIN each group, keeps whatever
+// order tiktokState.advertisers already arrived in (the backend orders by
+// list_order, i.e. the Business Center's own order), never alphabetical.
+// Array.prototype.sort is stable, so sorting on rank alone preserves that.
 function whAdvsForConnection() {
   return tiktokState.advertisers
     .filter((a) => a.connection_id === whState.connectionId)
     .slice()
-    .sort(
-      (a, b) =>
-        advApprovedRank(a) - advApprovedRank(b) ||
-        String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
-    );
+    .sort((a, b) => advApprovedRank(a) - advApprovedRank(b));
 }
 
+// Reopen: if the user minimized mid-flow, resume exactly where they were —
+// same logic as Campaign Creator (openCampaignCreatorModal).
 async function openWhWarmupModal() {
   closeToolsDrawer();
-  whState.selected.clear();
-  whState.step = 1;
-  whState.countries = [];
-  whState.countriesForAdv = null;
-  whState.selectedCountry = null;
-  document.getElementById("whCountryInput").value = "";
-  document.getElementById("whCountryOk").textContent = "";
-  document.getElementById("whSparkInput").value = "";
   document.getElementById("whWarmupModal").classList.add("open");
+  refreshWhWarmingCount(); // best-effort, non-blocking
+
+  if (whState.minimized) {
+    whState.minimized = false;
+    whRestoreDom();
+    return;
+  }
+
+  whResetDraft();
   whGoToStep(1);
   document.getElementById("whAdvList").innerHTML = `<p class="tk-loading">Loading accounts…</p>`;
   document.getElementById("whStep1Error").textContent = "";
@@ -1476,29 +1529,89 @@ function closeWhWarmupModal() {
   document.getElementById("whWarmupModal").classList.remove("open");
 }
 
-function whGoToStep(n) {
-  whState.step = n;
+// Minimize — hide the modal but keep the full draft (step, accounts, country,
+// spark code). Session only; reopening from Tools resumes it. Mirrors
+// Campaign Creator's minimizeCampaignCreator exactly.
+function minimizeWhWarmup() {
+  if (whState.step !== 1 || whState.selected.size) {
+    whSnapshotDom();
+    whState.minimized = true;
+  }
+  document.getElementById("whWarmupModal").classList.remove("open");
+}
+
+function whResetDraft() {
+  whState.minimized = false;
+  whState.selected.clear();
+  whState.step = 1;
+  whState.countries = [];
+  whState.countriesForAdv = null;
+  whState.selectedCountry = null;
+  whState.spark = "";
+  document.getElementById("whCountryInput").value = "";
+  document.getElementById("whCountryOk").textContent = "";
+  document.getElementById("whSparkInput").value = "";
+}
+
+// Read the spark textarea into state before hiding the modal — everything
+// else on steps 1-2 already lives in whState as the user interacts with it.
+function whSnapshotDom() {
+  whState.spark = document.getElementById("whSparkInput").value;
+}
+
+function whRestoreDom() {
+  const sel = document.getElementById("whBcSelect");
+  if (tiktokState.connections.length) {
+    sel.innerHTML = tiktokState.connections
+      .map((c) => `<option value="${c.id}">${escapeHtml(connBcOptionLabel(c))}</option>`)
+      .join("");
+    if (whState.connectionId) sel.value = whState.connectionId;
+  }
+  renderWhAdvertisers();
+  document.getElementById("whCountryInput").value = whState.selectedCountry?.name || "";
+  document.getElementById("whSparkInput").value = whState.spark;
+  whGoToStepShow(whState.step || 1);
+}
+
+// Same panel-visibility/title work whGoToStep does, but WITHOUT its
+// side-effecting bits (clearing the picked country, re-fetching the country
+// list) — used only to redraw the currently-resumed step, never to advance.
+function whGoToStepShow(n) {
   document.getElementById("whStep1").hidden = n !== 1;
   document.getElementById("whStep2").hidden = n !== 2;
   document.getElementById("whStep3").hidden = n !== 3;
-  if (n === 1) {
-    // Re-picking accounts invalidates the country list (it's per-advertiser).
-    whState.selectedCountry = null;
-    document.getElementById("whCountryOk").textContent = "";
-  }
   document.getElementById("whWarmupTitle").textContent =
     n === 1 ? "WH Warmup — accounts" : n === 2 ? "WH Warmup — settings" : "WH Warmup — results";
   if (n === 2) {
     const count = whState.selected.size;
     document.getElementById("whSelCount").innerHTML = `Creating for <strong>${count}</strong> Approved account${count === 1 ? "" : "s"}.`;
+  }
+}
+
+function whGoToStep(n) {
+  whState.step = n;
+  if (n === 1) {
+    // Only invalidate the picked country if the accounts selection actually
+    // changed the advertiser the country list is scoped to (loadWhCountries
+    // is per-advertiser) — otherwise Back then Next would forget a perfectly
+    // valid pick and force reselecting it for no reason.
+    const repAdv = whRepresentativeAdvId();
+    if (repAdv !== whState.countriesForAdv) {
+      whState.selectedCountry = null;
+      document.getElementById("whCountryOk").textContent = "";
+    }
+  }
+  whGoToStepShow(n);
+  if (n === 2) {
     document.getElementById("whStep2Error").textContent = "";
     document.getElementById("whCreateProgress").textContent = "";
     document.getElementById("whCreateProgress").className = "eng-placeholder";
     const btn = document.getElementById("whCreateBtn");
     btn.disabled = false;
     btn.textContent = "Create WH Warmup";
-    // Country list comes from ONE selected advertiser's own valid TikTok regions.
-    loadWhCountries([...whState.selected][0] || null);
+    // Country list comes from ONE selected advertiser's own valid TikTok
+    // regions — the same one used to decide whether to keep the pick above.
+    loadWhCountries(whRepresentativeAdvId());
   }
 }
 
@@ -1559,7 +1672,11 @@ async function submitWhWarmup() {
     return (errEl.textContent = "Pick a target country from the suggestions.");
   }
   if (!spark) return (errEl.textContent = "Enter a Spark code.");
-  const ids = [...whState.selected];
+  // Ordered per the ad-accounts list (not Set insertion/click order) so the
+  // backend's wh1, wh2, … naming always matches what's shown on screen.
+  const ids = whAdvsForConnection()
+    .filter((a) => whState.selected.has(String(a.advertiser_id)))
+    .map((a) => String(a.advertiser_id));
   if (!ids.length) return whGoToStep(1);
 
   btn.disabled = true;
@@ -1600,6 +1717,244 @@ function renderWhResults(results, warning) {
       : `<p class="tk-empty">No accounts processed.</p>`);
 }
 
+// ---- "WHs Warming Up" — every WH campaign, ad account included, with
+// on/off, status, source and budget, matching Detailed Metrics' own fields
+// (wh-warmup.js's "list" action joins in campaign_operation_status/
+// effective_status from tiktok_campaigns for exactly this). Select-all or
+// per-row, then delete — reuses the same setCampaignStatus/deleteTiktokCampaign
+// writes Detailed Metrics uses, just against this panel's own local cache
+// instead of state.sources.
+
+const whWarmingState = { campaigns: [], selected: new Set() };
+
+function wireWhWarmingUpEvents() {
+  document.getElementById("whWarmingUpBox").addEventListener("click", openWhWarmingUpModal);
+  document.getElementById("closeWhWarmingUpModal").addEventListener("click", closeWhWarmingUpModal);
+  document.getElementById("whWarmingUpModal").addEventListener("click", (e) => {
+    if (e.target.id === "whWarmingUpModal") closeWhWarmingUpModal();
+  });
+  document.getElementById("whWarmingSelectAll").addEventListener("change", (e) => {
+    if (e.target.checked) whWarmingState.campaigns.forEach((c) => whWarmingState.selected.add(String(c.campaign_id)));
+    else whWarmingState.selected.clear();
+    renderWhWarmingList();
+  });
+  document.getElementById("whWarmingDeleteBtn").addEventListener("click", deleteSelectedWhWarming);
+
+  document.getElementById("whWarmingList").addEventListener("click", (e) => {
+    const toggleBtn = e.target.closest("[data-wh-toggle]");
+    if (toggleBtn) {
+      e.stopPropagation();
+      handleWhWarmingToggle(toggleBtn);
+      return;
+    }
+    // Shares the ⋮ menu plumbing with Detailed Metrics (data-row-menu /
+    // openRowMenuFor / closeRowMenu — see the document-level outside-click
+    // guard) so it opens, positions, and closes the same way everywhere.
+    const menuBtn = e.target.closest("[data-row-menu]");
+    if (menuBtn) {
+      e.stopPropagation();
+      toggleWhWarmingMenu(menuBtn);
+    }
+  });
+  document.getElementById("whWarmingList").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[data-wh-select]");
+    if (!cb) return;
+    const id = String(cb.dataset.whSelect);
+    if (cb.checked) whWarmingState.selected.add(id);
+    else whWarmingState.selected.delete(id);
+    syncWhWarmingToolbar();
+  });
+}
+
+async function openWhWarmingUpModal() {
+  document.getElementById("whWarmingUpModal").classList.add("open");
+  document.getElementById("whWarmingError").textContent = "";
+  whWarmingState.selected.clear();
+  await loadWhWarmingList();
+}
+
+function closeWhWarmingUpModal() {
+  document.getElementById("whWarmingUpModal").classList.remove("open");
+}
+
+async function loadWhWarmingList() {
+  const el = document.getElementById("whWarmingList");
+  el.innerHTML = `<p class="tk-loading">Loading WH campaigns…</p>`;
+  try {
+    const res = await listWhWarmup();
+    whWarmingState.campaigns = res.campaigns || [];
+    renderWhWarmingList();
+    updateWhWarmingCount();
+  } catch (err) {
+    el.innerHTML = `<p class="tk-error">Couldn't load WH campaigns: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// Best-effort badge on the entry box — fired when the WH Warmup modal opens,
+// never blocks it.
+async function refreshWhWarmingCount() {
+  try {
+    const res = await listWhWarmup();
+    whWarmingState.campaigns = res.campaigns || [];
+    updateWhWarmingCount();
+  } catch (_) {
+    /* box just shows no count yet */
+  }
+}
+
+function updateWhWarmingCount() {
+  const el = document.getElementById("whWarmingUpCount");
+  if (!el) return;
+  const n = whWarmingState.campaigns.length;
+  el.textContent = n ? `${n} warming up` : "";
+}
+
+function renderWhWarmingList() {
+  const list = whWarmingState.campaigns;
+  const el = document.getElementById("whWarmingList");
+  if (!list.length) {
+    el.innerHTML = `<p class="tk-empty">No WH Warmup campaigns yet.</p>`;
+    syncWhWarmingToolbar();
+    return;
+  }
+  el.innerHTML = `
+    <table class="wh-warming-table">
+      <thead><tr><th></th><th>On/Off</th><th>Status</th><th>Source</th><th class="num">Budget</th><th></th></tr></thead>
+      <tbody>${list.map(whWarmingRowHtml).join("")}</tbody>
+    </table>`;
+  syncWhWarmingToolbar();
+}
+
+function whWarmingRowHtml(c) {
+  const id = String(c.campaign_id);
+  const on = String(c.campaign_operation_status || "").toUpperCase() === "ENABLE";
+  const pending = state.pendingActions.has(`wh:${id}`);
+  const status = c.effective_status
+    ? { label: c.effective_status, tone: c.effective_tone, detail: c.status_detail }
+    : { label: c.cleanup_status === "WAITING_FOR_ACTIVE" ? "In Review" : c.cleanup_status || "—", tone: "neutral", detail: null };
+  const checked = whWarmingState.selected.has(id);
+  return `
+    <tr data-wh-row="${escapeHtml(id)}">
+      <td><input type="checkbox" data-wh-select="${escapeHtml(id)}" ${checked ? "checked" : ""} /></td>
+      <td>${switchHtml({
+        on,
+        pending,
+        attrs: `data-wh-toggle="${on ? "DISABLE" : "ENABLE"}" data-campaign-id="${escapeHtml(id)}"`,
+        title: on ? "Campaign running — click to pause" : "Campaign paused — click to unpause",
+      })}</td>
+      <td>${statusBadge(status)}</td>
+      <td><div class="wh-warming-source"><strong>${escapeHtml(c.campaign_name || id)}</strong><span>${escapeHtml(c.advertiser_name || c.advertiser_id)}</span></div></td>
+      <td class="num">${money(c.daily_budget)}</td>
+      <td><button type="button" class="rowmenu-btn" data-row-menu="wh:${escapeHtml(id)}" aria-label="Campaign actions" title="Campaign actions">⋮</button></td>
+    </tr>`;
+}
+
+function syncWhWarmingToolbar() {
+  const all = whWarmingState.campaigns;
+  const selCb = document.getElementById("whWarmingSelectAll");
+  selCb.checked = all.length > 0 && all.every((c) => whWarmingState.selected.has(String(c.campaign_id)));
+  selCb.disabled = all.length === 0;
+  const delBtn = document.getElementById("whWarmingDeleteBtn");
+  delBtn.disabled = whWarmingState.selected.size === 0;
+  delBtn.textContent = whWarmingState.selected.size ? `Delete selected (${whWarmingState.selected.size})` : "Delete selected";
+}
+
+async function handleWhWarmingToggle(btn) {
+  const id = btn.dataset.campaignId;
+  const targetOp = btn.dataset.whToggle;
+  const key = `wh:${id}`;
+  if (state.pendingActions.has(key)) return;
+  state.pendingActions.add(key);
+  renderWhWarmingList();
+  try {
+    const result = await setCampaignStatus(id, targetOp);
+    const row = whWarmingState.campaigns.find((c) => String(c.campaign_id) === id);
+    if (row) {
+      if (result.campaign_operation_status !== undefined) row.campaign_operation_status = result.campaign_operation_status;
+      if (result.effective_status) row.effective_status = result.effective_status;
+      if (result.effective_tone) row.effective_tone = result.effective_tone;
+      if (result.status_detail !== undefined) row.status_detail = result.status_detail;
+    }
+  } catch (err) {
+    document.getElementById("whWarmingError").textContent = `Update failed: ${err.message}`;
+  } finally {
+    state.pendingActions.delete(key);
+    renderWhWarmingList();
+  }
+}
+
+// Same floating-menu component as Detailed Metrics' ⋮ (openRowMenuFor /
+// rowMenuEl / closeRowMenu) — keyed "wh:<id>" so it can never collide with a
+// real campaign_id there.
+function toggleWhWarmingMenu(btn) {
+  const key = String(btn.dataset.rowMenu || "");
+  const id = key.replace(/^wh:/, "");
+  if (openRowMenuFor === key) {
+    closeRowMenu();
+    return;
+  }
+  closeRowMenu();
+  openRowMenuFor = key;
+  btn.classList.add("active");
+
+  const menu = document.createElement("div");
+  menu.className = "rowmenu";
+  menu.innerHTML = `<button type="button" class="rowmenu-item danger" data-wh-menu-action="delete">Delete campaign</button>`;
+  document.body.appendChild(menu);
+  rowMenuEl = menu;
+
+  const r = btn.getBoundingClientRect();
+  let left = r.right + window.scrollX - menu.offsetWidth;
+  if (left < 8) left = 8;
+  menu.style.top = `${r.bottom + window.scrollY + 4}px`;
+  menu.style.left = `${left}px`;
+
+  menu.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-wh-menu-action]");
+    if (!item) return;
+    closeRowMenu();
+    if (item.dataset.whMenuAction === "delete") deleteOneWhWarming(id);
+  });
+}
+
+async function deleteOneWhWarming(id) {
+  if (!confirm("Delete this WH Warmup campaign from TikTok?")) return;
+  document.getElementById("whWarmingError").textContent = "";
+  try {
+    await deleteTiktokCampaign(id);
+    whWarmingState.campaigns = whWarmingState.campaigns.filter((c) => String(c.campaign_id) !== id);
+    whWarmingState.selected.delete(id);
+    renderWhWarmingList();
+    updateWhWarmingCount();
+  } catch (err) {
+    document.getElementById("whWarmingError").textContent = `Delete failed: ${err.message}`;
+  }
+}
+
+async function deleteSelectedWhWarming() {
+  const ids = [...whWarmingState.selected];
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} WH Warmup campaign${ids.length === 1 ? "" : "s"} from TikTok?`)) return;
+  const btn = document.getElementById("whWarmingDeleteBtn");
+  const errEl = document.getElementById("whWarmingError");
+  errEl.textContent = "";
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await deleteTiktokCampaign(id);
+      whWarmingState.campaigns = whWarmingState.campaigns.filter((c) => String(c.campaign_id) !== id);
+      whWarmingState.selected.delete(id);
+    } catch (err) {
+      failed.push(`${id}: ${err.message}`);
+    }
+  }
+  if (failed.length) errEl.textContent = `Some deletes failed — ${failed.join("; ")}`;
+  renderWhWarmingList();
+  updateWhWarmingCount();
+}
+
 // ============================== CAMPAIGN CREATOR ==============================
 // Template-based launches. Templates hold reusable settings only; per-launch
 // values are collected in the runtime wizard. Creation + registration is 100%
@@ -1635,7 +1990,7 @@ const ccState = {
     ages: new Set(CC_AGE_OPTS.map((o) => o.v)),
     gender: "GENDER_UNLIMITED",
     deviceOs: "ALL",
-    cta: "LEARN_MORE",
+    ctas: new Set(["LEARN_MORE"]), // 1+ — Dynamic CTA when more than one is picked
     text: "",
     cardEnabled: false,
     cardUrl: "",
@@ -1816,8 +2171,47 @@ function wireCampaignCreatorEvents() {
     ccFormIdTimer = setTimeout(() => validateCcFormId(v), 600);
   });
 
-  // CTA options
-  document.getElementById("ccTplCta").innerHTML = CC_CTA_OPTS.map((v) => `<option value="${v}">${ccCtaLabel(v)}</option>`).join("");
+  // CTA multi-select dropdown
+  document.getElementById("ccTplCtaBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleCtaPanel();
+  });
+  document.getElementById("ccTplCtaPanel").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[data-cta]");
+    if (!cb) return;
+    const v = cb.dataset.cta;
+    const set = ccState.tpl.ctas;
+    if (cb.checked) set.add(v);
+    else if (set.size > 1) set.delete(v);
+    else cb.checked = true; // at least one CTA is always required
+    renderTplCtaOptions();
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#ccTplCtaWrap")) toggleCtaPanel(false);
+  });
+}
+
+// CTA dropdown — a compact button showing the current pick(s); opens a
+// checkbox panel so more than one CTA can be selected at once. Selecting more
+// than one turns on TikTok's Dynamic CTA at creation time (see
+// campaign-creator-build.js buildAdCreative / ensureCtaPortfolio) — TikTok
+// shows whichever of the picked CTAs a given viewer is likeliest to tap,
+// instead of every ad using one fixed CTA.
+function renderTplCtaOptions() {
+  const d = ccState.tpl;
+  const btn = document.getElementById("ccTplCtaBtn");
+  const panel = document.getElementById("ccTplCtaPanel");
+  const names = CC_CTA_OPTS.filter((v) => d.ctas.has(v)).map(ccCtaLabel);
+  btn.textContent = names.length ? names.join(", ") : "Select…";
+  panel.innerHTML = CC_CTA_OPTS.map(
+    (v) => `<label><input type="checkbox" data-cta="${v}" ${d.ctas.has(v) ? "checked" : ""} /> ${ccCtaLabel(v)}</label>`
+  ).join("");
+}
+
+function toggleCtaPanel(open) {
+  const panel = document.getElementById("ccTplCtaPanel");
+  if (!panel) return;
+  panel.hidden = open === undefined ? !panel.hidden : !open;
 }
 
 // ---- modal / view plumbing ----
@@ -1916,7 +2310,7 @@ function ccSnapshotDom() {
     d.budget = g("ccTplBudget").value;
     d.gender = g("ccTplGender").value;
     d.deviceOs = g("ccTplDeviceOs").value;
-    d.cta = g("ccTplCta").value;
+    // d.ctas is kept live by the checkbox panel's own change handler — nothing to read here.
     d.text = g("ccTplText").value;
     d.cardEnabled = g("ccTplCard").checked;
     d.cardUrl = g("ccTplCardUrl").value.trim();
@@ -1956,7 +2350,7 @@ function ccRestoreDom() {
     g("ccTplBudget").value = d.budget;
     g("ccTplGender").value = d.gender;
     g("ccTplDeviceOs").value = d.deviceOs;
-    g("ccTplCta").value = d.cta;
+    renderTplCtaOptions();
     g("ccTplText").value = d.text;
     g("ccTplCard").checked = d.cardEnabled;
     g("ccTplCardWrap").hidden = !d.cardEnabled;
@@ -2077,7 +2471,8 @@ function openTplWizard(tpl) {
   d.ages = new Set((c.age_groups && c.age_groups.length ? c.age_groups : CC_AGE_OPTS.map((o) => o.v)));
   d.gender = c.gender || "GENDER_UNLIMITED";
   d.deviceOs = c.device_os || "ALL";
-  d.cta = c.cta || "LEARN_MORE";
+  // ctas (new) wins; cta (single, legacy templates) is the fallback.
+  d.ctas = new Set(Array.isArray(c.ctas) && c.ctas.length ? c.ctas : [c.cta || "LEARN_MORE"]);
   d.text = c.ad_text || "";
   d.cardEnabled = !!(c.interactive_card && c.interactive_card.enabled);
   d.cardUrl = (c.interactive_card && c.interactive_card.image_url) || "";
@@ -2090,7 +2485,7 @@ function openTplWizard(tpl) {
   document.getElementById("ccTplBudget").value = d.budget;
   document.getElementById("ccTplGender").value = d.gender;
   document.getElementById("ccTplDeviceOs").value = d.deviceOs;
-  document.getElementById("ccTplCta").value = d.cta;
+  renderTplCtaOptions();
   document.getElementById("ccTplText").value = d.text;
   document.getElementById("ccTplCard").checked = d.cardEnabled;
   document.getElementById("ccTplCardWrap").hidden = !d.cardEnabled;
@@ -2191,7 +2586,6 @@ function tplGoBack(n) {
 
 async function saveTplWizard() {
   const d = ccState.tpl;
-  d.cta = document.getElementById("ccTplCta").value;
   d.text = document.getElementById("ccTplText").value.trim();
   d.cardEnabled = document.getElementById("ccTplCard").checked;
   d.cardUrl = document.getElementById("ccTplCardUrl").value.trim();
@@ -2207,7 +2601,7 @@ async function saveTplWizard() {
     age_groups: CC_AGE_OPTS.map((o) => o.v).filter((v) => d.ages.has(v)),
     gender: d.gender,
     device_os: d.deviceOs,
-    cta: d.cta,
+    ctas: CC_CTA_OPTS.filter((v) => d.ctas.has(v)),
     ad_text: d.text,
     interactive_card: { enabled: d.cardEnabled, image_url: d.cardUrl },
   };
@@ -3148,9 +3542,10 @@ async function handleAdgroupAction(btn) {
   }
 }
 
-// ---- advertiser account spend-cap edit ----
+// ---- advertiser account spend-cap edit (one account, or the same cap applied
+// to every account behind the current campaign selection) ----
 
-let budgetModalAdvId = null;
+let budgetModalAdvIds = [];
 const BUDGET_MODE_LABEL = {
   UNLIMITED: "Uncapped",
   MONTHLY_BUDGET: "Monthly",
@@ -3158,26 +3553,35 @@ const BUDGET_MODE_LABEL = {
   CUSTOM_BUDGET: "Custom",
 };
 
-function openBudgetModal(advertiserId) {
-  const b = state.budgets[String(advertiserId)];
-  budgetModalAdvId = String(advertiserId);
-  const s = state.sources.find((x) => x.advertiserId === budgetModalAdvId);
-  document.getElementById("budgetModalAcct").textContent =
-    (s && s.advertiserName ? `${s.advertiserName} · ` : "") + `Ad account ${budgetModalAdvId}`;
+function openBudgetModal(advertiserIds) {
+  budgetModalAdvIds = [...new Set((Array.isArray(advertiserIds) ? advertiserIds : [advertiserIds]).map(String).filter(Boolean))];
+  if (!budgetModalAdvIds.length) return;
 
   const cur = document.getElementById("budgetModalCurrent");
-  if (b && b.capped) {
-    cur.innerHTML = `
-      <div><span>Current cap</span><strong>${money(b.cap)}</strong> <em>(${BUDGET_MODE_LABEL[b.budget_mode] || b.budget_mode})</em></div>
-      <div><span>Spent</span><strong>${money(b.spent)}</strong></div>
-      <div><span>Remaining</span><strong>${money(b.remaining)}</strong></div>`;
+  if (budgetModalAdvIds.length === 1) {
+    const advId = budgetModalAdvIds[0];
+    const b = state.budgets[advId];
+    const s = state.sources.find((x) => x.advertiserId === advId);
+    document.getElementById("budgetModalAcct").textContent = (s && s.advertiserName ? `${s.advertiserName} · ` : "") + `Ad account ${advId}`;
+    if (b && b.capped) {
+      cur.innerHTML = `
+        <div><span>Current cap</span><strong>${money(b.cap)}</strong> <em>(${BUDGET_MODE_LABEL[b.budget_mode] || b.budget_mode})</em></div>
+        <div><span>Spent</span><strong>${money(b.spent)}</strong></div>
+        <div><span>Remaining</span><strong>${money(b.remaining)}</strong></div>`;
+    } else {
+      cur.innerHTML = `<div><span>Current</span><strong>Uncapped</strong></div>
+        <div><span>Shared BC balance</span><strong>${b ? money(b.account_balance) : "—"}</strong></div>`;
+    }
+    document.getElementById("budgetModeSelect").value = b && b.capped ? b.budget_mode : "DAILY_BUDGET";
+    document.getElementById("budgetAmountInput").value = b && b.capped ? String(b.cap) : "";
   } else {
-    cur.innerHTML = `<div><span>Current</span><strong>Uncapped</strong></div>
-      <div><span>Shared BC balance</span><strong>${b ? money(b.account_balance) : "—"}</strong></div>`;
+    document.getElementById("budgetModalAcct").textContent = `${budgetModalAdvIds.length} ad accounts`;
+    cur.innerHTML = `<div><span>Accounts</span><strong>${budgetModalAdvIds.length} selected</strong></div>
+      <div class="eng-hint">The cap you set applies to every one of them.</div>`;
+    document.getElementById("budgetModeSelect").value = "DAILY_BUDGET";
+    document.getElementById("budgetAmountInput").value = "";
   }
 
-  document.getElementById("budgetModeSelect").value = b && b.capped ? b.budget_mode : "MONTHLY_BUDGET";
-  document.getElementById("budgetAmountInput").value = b && b.capped ? String(b.cap) : "";
   document.getElementById("budgetModalError").textContent = "";
   syncBudgetAmountVisibility();
   document.getElementById("budgetModal").classList.add("open");
@@ -3185,7 +3589,7 @@ function openBudgetModal(advertiserId) {
 
 function closeBudgetModal() {
   document.getElementById("budgetModal").classList.remove("open");
-  budgetModalAdvId = null;
+  budgetModalAdvIds = [];
 }
 
 function syncBudgetAmountVisibility() {
@@ -3194,8 +3598,8 @@ function syncBudgetAmountVisibility() {
 }
 
 async function submitBudgetEdit() {
-  if (!budgetModalAdvId) return;
-  const advId = budgetModalAdvId;
+  if (!budgetModalAdvIds.length) return;
+  const ids = budgetModalAdvIds;
   const mode = document.getElementById("budgetModeSelect").value;
   const amount = Number(document.getElementById("budgetAmountInput").value);
   const errEl = document.getElementById("budgetModalError");
@@ -3208,39 +3612,33 @@ async function submitBudgetEdit() {
 
   const btn = document.getElementById("confirmBudgetBtn");
   btn.disabled = true;
-  btn.textContent = "Updating…";
-  state.pendingActions.add(`b:${advId}`);
+  btn.textContent = ids.length > 1 ? `Updating ${ids.length}…` : "Updating…";
+  ids.forEach((id) => state.pendingActions.add(`b:${id}`));
   rebuildSources();
 
-  try {
-    const res = await setAdvertiserBudget(advId, mode, mode === "UNLIMITED" ? 0 : amount);
-    if (res.budget) state.budgets[advId] = { ...state.budgets[advId], ...res.budget };
-    closeBudgetModal();
-    setStatus(`Ad account cap updated — ${mode === "UNLIMITED" ? "uncapped" : money(amount) + " " + (BUDGET_MODE_LABEL[mode] || "")}.`);
-  } catch (err) {
-    errEl.textContent = err.message;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Update";
-    state.pendingActions.delete(`b:${advId}`);
-    rebuildSources();
+  const failed = [];
+  for (const advId of ids) {
+    try {
+      const res = await setAdvertiserBudget(advId, mode, mode === "UNLIMITED" ? 0 : amount);
+      if (res.budget) state.budgets[advId] = { ...state.budgets[advId], ...res.budget };
+    } catch (err) {
+      failed.push(`${advId}: ${err.message}`);
+    } finally {
+      state.pendingActions.delete(`b:${advId}`);
+    }
   }
-}
+  btn.disabled = false;
+  btn.textContent = "Update";
+  rebuildSources();
 
-// Real per-source hourly payout, derived from the raw Glitchy entries the
-// function already returns (not baseline-corrected, but genuinely real data).
-// Glitchy's "hour" field is already anchored to EST, so these buckets need
-// no timezone conversion of their own.
-function hourlyPayoutForSource(source) {
-  const buckets = Array(24).fill(0);
-  for (const entry of state.raw) {
-    const stat = entry.Stat || entry.stat || entry;
-    if (!stat || stat.source !== source) continue;
-    const hr = parseInt(stat.hour, 10);
-    if (Number.isFinite(hr) && hr >= 0 && hr < 24) buckets[hr] += Number(stat.payout || 0);
+  if (failed.length) {
+    errEl.textContent = `${failed.length} account${failed.length === 1 ? "" : "s"} failed — ${failed.join("; ")}`;
+    return;
   }
-  const hours = buckets.map((_, h) => `${String(h).padStart(2, "0")}:00`);
-  return { hours, values: buckets.map((v) => Math.round(v * 100) / 100) };
+  closeBudgetModal();
+  setStatus(
+    `${ids.length > 1 ? `${ids.length} ad account caps` : "Ad account cap"} updated — ${mode === "UNLIMITED" ? "uncapped" : money(amount) + " " + (BUDGET_MODE_LABEL[mode] || "")}.`
+  );
 }
 
 // Effective operating status for a SOURCE/campaign row. `status` is
@@ -3290,10 +3688,11 @@ function hourlyPayoutCombined() {
 // stretch the dashboard was closed). Each hour's bar is then just the delta
 // between its filled-in cumulative total and the previous hour's — still
 // clamped at 0 so a counter reset never shows as a negative dip.
-// Future hours stay null. Aggregate only — shown just for "All Sources Combined".
+// Future hours stay null. Aggregate only — the chart always shows the
+// combined total across every source.
 function hourlySpendSeries() {
   const st = state.spendToday;
-  if (!st || st.date !== todayStr() || state.chartSource !== "__all__") return Array(24).fill(null);
+  if (!st || st.date !== todayStr()) return Array(24).fill(null);
 
   const byHour = st.byHour || {};
   const curH = Number.isFinite(st.currentHour) ? st.currentHour : currentEstHour();
@@ -3328,12 +3727,7 @@ function renderChart() {
   const limit = currentEstHour() + 1;
 
   const spendFull = hourlySpendSeries();
-  let earningsFull;
-  if (state.chartSource === "__all__") {
-    earningsFull = hourlyPayoutCombined();
-  } else {
-    earningsFull = hourlyPayoutForSource(state.chartSource).values;
-  }
+  const earningsFull = hourlyPayoutCombined();
 
   const spendBuckets = spendFull.map((v, h) => (h < limit ? v : null));
   const earningsBuckets = earningsFull.map((v, h) => (h < limit ? v : null));
@@ -3429,15 +3823,16 @@ function connBcOptionLabel(c) {
   return c.tiktok_email ? `${primary} — ${c.tiktok_email}` : primary;
 }
 
+// Approved first, Suspended after — but WITHIN each group, keeps whatever
+// order tiktokState.advertisers already arrived in (the backend orders by
+// list_order, i.e. the Business Center's own order), never alphabetical.
+// Array.prototype.sort is stable, so sorting on rank alone preserves that.
+// Shared by the TikTok Ad Accounts modal and Campaign Creator (ccRunAdvs).
 function advsForConnection(connId) {
   return tiktokState.advertisers
     .filter((a) => a.connection_id === connId)
     .slice()
-    .sort(
-      (a, b) =>
-        advApprovedRank(a) - advApprovedRank(b) ||
-        String(a.advertiser_name || a.advertiser_id).localeCompare(String(b.advertiser_name || b.advertiser_id))
-    );
+    .sort((a, b) => advApprovedRank(a) - advApprovedRank(b));
 }
 
 async function renderTiktokAccounts() {

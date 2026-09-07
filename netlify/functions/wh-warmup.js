@@ -172,7 +172,13 @@ async function createBatch(supabase, body) {
   let storeWarning = null;
 
   await withClient(supabase, conn, async (client) => {
-    for (const advId of advertiserIds) {
+    for (let i = 0; i < advertiserIds.length; i++) {
+      const advId = advertiserIds[i];
+      // wh1, wh2, … by POSITION in advertiserIds — the dashboard sends this
+      // list already ordered to match the ad-accounts list (see
+      // js/app.js submitWhWarmup), so this numbering always lines up with
+      // what's shown on screen, independent of which accounts get skipped.
+      const campaignName = `wh${i + 1}`;
       const adv = advById.get(advId);
       const name = adv?.advertiser_name || advId;
       if (!adv) {
@@ -191,6 +197,7 @@ async function createBatch(supabase, body) {
           targetCountry,
           locationId,
           sparkCode,
+          campaignName,
         });
         // Record IMMEDIATELY so a mid-batch failure never leaves an untracked
         // (undeletable-by-us) campaign live on TikTok.
@@ -338,6 +345,9 @@ async function patchRow(supabase, campaignId, patch) {
 // list
 // ---------------------------------------------------------------------------
 
+// Also joins in each campaign's live on/off + status from tiktok_campaigns
+// (the same columns Detailed Metrics reads) so the "WHs Warming Up" panel
+// can show on/off, status, source, budget without a second round trip.
 async function listWarmups(supabase) {
   const { data, error } = await supabase
     .from("wh_warmup_campaigns")
@@ -352,5 +362,23 @@ async function listWarmups(supabase) {
     }
     return json(500, { error: "Supabase read failed", details: sbErr(error) });
   }
-  return json(200, { ok: true, campaigns: data || [] });
+
+  const rows = data || [];
+  if (rows.length) {
+    const ids = rows.map((r) => String(r.campaign_id));
+    const { data: live } = await supabase
+      .from("tiktok_campaigns")
+      .select("campaign_id, campaign_operation_status, effective_status, effective_tone, status_detail")
+      .in("campaign_id", ids);
+    const liveById = new Map((live || []).map((c) => [String(c.campaign_id), c]));
+    for (const r of rows) {
+      const c = liveById.get(String(r.campaign_id));
+      r.campaign_operation_status = c?.campaign_operation_status || null;
+      r.effective_status = c?.effective_status || null;
+      r.effective_tone = c?.effective_tone || null;
+      r.status_detail = c?.status_detail || null;
+    }
+  }
+
+  return json(200, { ok: true, campaigns: rows });
 }

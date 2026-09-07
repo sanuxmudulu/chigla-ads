@@ -96,7 +96,11 @@ function normalizeTemplateConfig(raw) {
 
   const gender = GENDERS.includes(c.gender) ? c.gender : "GENDER_UNLIMITED";
   const deviceOs = DEVICE_OS_VALUES.includes(c.device_os) ? c.device_os : "ALL";
-  const cta = CTA_VALUES.includes(c.cta) ? c.cta : DEFAULT_CTA;
+  // ctas (new, 1+) wins; cta (single, legacy templates saved before Dynamic
+  // CTA support) is the fallback so old templates keep working unchanged.
+  let ctas = Array.isArray(c.ctas) ? c.ctas.filter((v) => CTA_VALUES.includes(v)) : [];
+  ctas = [...new Set(ctas)];
+  if (!ctas.length) ctas = [CTA_VALUES.includes(c.cta) ? c.cta : DEFAULT_CTA];
   const adText = typeof c.ad_text === "string" ? c.ad_text.trim().slice(0, 100) : "";
 
   const cardRaw = c.interactive_card && typeof c.interactive_card === "object" ? c.interactive_card : {};
@@ -118,7 +122,7 @@ function normalizeTemplateConfig(raw) {
       age_groups: ages,
       gender,
       device_os: deviceOs,
-      cta,
+      ctas,
       ad_text: adText,
       interactive_card: card,
     },
@@ -731,14 +735,73 @@ function buildAdgroupPayload({ advertiserId, campaignId, type, config, scheduleU
   return p;
 }
 
-function buildAdCreative({ type, config, identity, sparkItemId, pageId, cardId, adFormat }) {
+// One or more CTAs picked on the template -> the field(s) ad_create actually
+// wants. A single CTA is the plain `call_to_action` text as before. More than
+// one turns on TikTok's Dynamic CTA: a `creative_portfolio_create` (type CTA)
+// bundling every picked CTA's recommended asset_ids, whose resulting
+// creative_portfolio_id becomes `call_to_action_id` — TikTok then shows
+// whichever of the picked CTAs a given viewer is likeliest to tap, instead of
+// the ad being locked to one fixed CTA. Best-effort: any failure here (a rare
+// TikTok-side error on the portfolio call) falls back to the first picked
+// CTA as a plain call_to_action rather than blocking campaign creation.
+// Verified live 2026-09-07 against creative_cta_recommend_get / portfolio/create.
+async function ensureCtaField(client, advId, type, ctas, warnings) {
+  const list = Array.isArray(ctas) && ctas.length ? ctas : [DEFAULT_CTA];
+  if (list.length === 1) return { call_to_action: list[0] };
+
+  try {
+    const rec = await mcpCall(client, "creative_cta_recommend_get", {
+      advertiser_id: advId,
+      new_version: true,
+      objective_type: type === "SALES" ? "WEB_CONVERSIONS" : "LEAD_GENERATION",
+      promotion_type: type === "SALES" ? "WEBSITE" : "LEAD_GENERATION",
+      placements: ["PLACEMENT_TIKTOK"],
+    });
+    const byText = new Map(
+      (rec?.recommend_assets || []).map((a) => [String(a.asset_content || "").trim().toLowerCase(), a.asset_ids])
+    );
+    const portfolioContent = list
+      .map((v) => {
+        const label = ccCtaLabelForLookup(v);
+        const assetIds = byText.get(label.toLowerCase());
+        return assetIds ? { asset_content: label, asset_ids: assetIds } : null;
+      })
+      .filter(Boolean);
+    if (portfolioContent.length < 2) throw new Error("fewer than 2 of the picked CTAs were recognized by TikTok");
+
+    const portfolio = await mcpCall(client, "creative_portfolio_create", {
+      advertiser_id: advId,
+      creative_portfolio_type: "CTA",
+      portfolio_content: portfolioContent,
+    });
+    const portfolioId = String(portfolio?.creative_portfolio_id || "");
+    if (!portfolioId) throw new Error("no creative_portfolio_id returned");
+    return { call_to_action_id: portfolioId };
+  } catch (err) {
+    warnings.push(`Dynamic CTA (${list.length} CTAs) not applied (${err.message}) — used "${ccCtaLabelForLookup(list[0])}" only.`);
+    return { call_to_action: list[0] };
+  }
+}
+
+// TikTok's CTA enum tokens (LEARN_MORE) vs. the display text
+// creative_cta_recommend_get matches on ("Learn more") — same
+// underscore-to-title-case rule as the dashboard's own ccCtaLabel (js/app.js),
+// duplicated here since this runs server-side.
+function ccCtaLabelForLookup(v) {
+  return String(v)
+    .split("_")
+    .map((w) => w[0] + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function buildAdCreative({ type, config, identity, sparkItemId, pageId, cardId, adFormat, ctaField }) {
   const creative = {
     ad_name: "ad1", // always the first ad of a fresh campaign — duplicateForRow names the rest ad2, ad3, ...
     ad_format: adFormat, // SINGLE_VIDEO | CAROUSEL_ADS
     identity_type: identity.identity_type,
     identity_id: identity.identity_id,
     tiktok_item_id: String(sparkItemId), // Spark Ads Pull
-    call_to_action: config.cta || DEFAULT_CTA,
+    ...ctaField,
     operation_status: "ENABLE",
   };
   if (identity.identity_type === "BC_AUTH_TT" && identity.identity_authorized_bc_id) {
@@ -856,6 +919,10 @@ async function createOneCampaign({
     }
   }
 
+  // Resolve once per campaign (not per ad-format retry below) — a single CTA
+  // stays a plain call_to_action; 2+ builds a Dynamic CTA portfolio.
+  const ctaField = await ensureCtaField(client, advId, type, config.ctas, warnings);
+
   const scheduleLocal = scheduleDate
     ? zonedClockToUtc(scheduleDate, scheduleHour, scheduleMinute, tz)
     : nextLocalClockUtc(scheduleHour, scheduleMinute, tz);
@@ -906,6 +973,7 @@ async function createOneCampaign({
         pageId,
         cardId: withCard ? cardId : null,
         adFormat: fmt,
+        ctaField,
       });
 
     const tryAd = async (fmt, withCard) =>

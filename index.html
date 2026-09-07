@@ -84,9 +84,6 @@
   <section class="chart-section card">
     <div class="chart-header">
       <h2><span class="pulse-dot"></span>Live Performance</h2>
-      <select id="chartSourceSelect">
-        <option value="__all__">All Sources Combined</option>
-      </select>
     </div>
     <canvas id="mainChart" height="90"></canvas>
   </section>
@@ -101,12 +98,14 @@
         </div>
         <div class="detail-bc-balance" id="detailBcBalance" hidden></div>
         <button class="icon-btn primary" id="openDupeModalBtn">Dupe</button>
+        <button class="icon-btn" id="detailBulkActionsBtn" data-row-menu="bulk" aria-label="Campaign actions" title="Campaign actions">⋮</button>
       </div>
     </div>
     <div class="table-wrap">
       <table id="sourcesTable">
         <thead>
           <tr>
+            <th class="col-select" title="Select">Select</th>
             <th>On/Off</th>
             <th>Status</th>
             <th class="col-source">Source</th>
@@ -119,7 +118,6 @@
             <th>EPC</th>
             <th>ROAS</th>
             <th>Budget</th>
-            <th class="col-action" aria-label="Actions"></th>
           </tr>
         </thead>
         <tbody id="sourcesBody"></tbody>
@@ -273,7 +271,10 @@
   <div class="modal modal-lg wh-modal">
     <div class="modal-header">
       <h3 id="whWarmupTitle">WH Warmup</h3>
-      <button id="closeWhWarmupModal">✕</button>
+      <div class="cc-header-btns">
+        <button id="whMinimizeModal" title="Minimize — keeps your draft">–</button>
+        <button id="closeWhWarmupModal" title="Minimize">✕</button>
+      </div>
     </div>
 
     <!-- STEP 1 — BC / advertiser selection -->
@@ -283,6 +284,10 @@
         <select id="whBcSelect"></select>
       </div>
       <div id="whSummary" class="tk-summary"></div>
+      <button type="button" class="wh-warming-box" id="whWarmingUpBox">
+        <span>WHs Warming Up</span>
+        <span class="wh-warming-count" id="whWarmingUpCount"></span>
+      </button>
       <div class="wh-selectall">
         <label><input type="checkbox" id="whSelectAll" /> Select all Approved accounts</label>
       </div>
@@ -301,7 +306,7 @@
       <div class="wh-form-section">
         <div class="wh-form-title">Campaign</div>
         <div class="wh-kv"><span>Objective</span><strong>Traffic</strong></div>
-        <div class="wh-kv"><span>Campaign name</span><strong>Traffic#### <em>(random, per account)</em></strong></div>
+        <div class="wh-kv"><span>Campaign name</span><strong>wh1, wh2, … <em>(by account order)</em></strong></div>
         <div class="wh-kv"><span>CBO</span><strong>On · Daily</strong></div>
         <div class="wh-kv"><span>Daily budget</span><strong id="whBudgetNote">lowest valid CBO daily budget</strong></div>
       </div>
@@ -347,6 +352,22 @@
         <button class="icon-btn primary" id="whDoneBtn">Done</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ============ WHs WARMING UP MODAL ============ -->
+<div class="modal-backdrop" id="whWarmingUpModal">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h3>WHs Warming Up</h3>
+      <button id="closeWhWarmingUpModal">✕</button>
+    </div>
+    <div class="wh-warming-toolbar">
+      <label><input type="checkbox" id="whWarmingSelectAll" /> Select all</label>
+      <button class="icon-btn danger" id="whWarmingDeleteBtn" disabled>Delete selected</button>
+    </div>
+    <div class="modal-error" id="whWarmingError"></div>
+    <div id="whWarmingList" class="tk-wrap"><p class="tk-loading">Loading WH campaigns…</p></div>
   </div>
 </div>
 
@@ -491,8 +512,11 @@
 
       <!-- Step 3 — Ad -->
       <div class="cc-step" id="ccTplStep3" hidden>
-        <label class="budget-field-label" for="ccTplCta">Call to action</label>
-        <select id="ccTplCta"></select>
+        <label class="budget-field-label" for="ccTplCtaBtn">Call to action <span class="eng-hint">(pick more than one for Dynamic CTA)</span></label>
+        <div class="cc-cta-select" id="ccTplCtaWrap">
+          <button type="button" class="cc-cta-btn" id="ccTplCtaBtn"></button>
+          <div class="cc-cta-panel" id="ccTplCtaPanel" hidden></div>
+        </div>
 
         <label class="budget-field-label" for="ccTplText">Ad text <span class="eng-hint">(optional — max 100 chars)</span></label>
         <textarea id="ccTplText" rows="2" maxlength="100" placeholder="Ad caption / text"></textarea>

@@ -396,6 +396,10 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
   const now = new Date().toISOString();
   const seen = new Set();
 
+  // auth_advertiser_get's own list order is the best available proxy for "the
+  // order this account appears in the Business Center" — advertiser_info_get
+  // (queried in chunks right above) does not promise to preserve that order,
+  // so list_order is captured from `ids`, not from iteration order below.
   const rows = info.map((a) => {
     const id = String(a.advertiser_id);
     seen.add(id);
@@ -411,6 +415,7 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
       status: a.status || null,
       role: a.role || null,
       country: a.country || null,
+      list_order: ids.indexOf(id),
       updated_at: now,
     };
   });
@@ -422,14 +427,22 @@ async function discoverAndStoreAdvertisers({ supabase, client, connectionId }) {
       connection_id: connectionId,
       advertiser_id: id,
       advertiser_name: nameFromAuth.get(id) || null,
+      list_order: ids.indexOf(id),
       updated_at: now,
     });
   }
 
   if (rows.length) {
-    const { error } = await supabase
+    let { error } = await supabase
       .from("tiktok_advertisers")
       .upsert(rows, { onConflict: "connection_id,advertiser_id" });
+    if (error && /list_order/.test(error.message || "")) {
+      // Not migrated yet (supabase/tiktok_advertiser_order.sql) — retry without
+      // it so discovery still works; ordering just falls back to alphabetical
+      // until the migration runs.
+      const bare = rows.map(({ list_order, ...r }) => r);
+      ({ error } = await supabase.from("tiktok_advertisers").upsert(bare, { onConflict: "connection_id,advertiser_id" }));
+    }
     if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
   }
 

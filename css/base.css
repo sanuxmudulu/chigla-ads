@@ -83,6 +83,26 @@ select, input[type="text"], input[type="password"] {
 select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 select { cursor: pointer; }
 
+/* ---- CTA multi-select dropdown (Campaign Creator templates) ---- */
+.cc-cta-select { position: relative; }
+.cc-cta-btn {
+  width: 100%; text-align: left; cursor: pointer;
+  background: var(--bg-2); border: 1px solid var(--border); color: var(--text-0);
+  padding: 8px 12px; border-radius: var(--radius-sm); font-family: var(--font-body); font-size: 13px;
+}
+.cc-cta-btn:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); outline: none; }
+.cc-cta-panel {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 50;
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  max-height: 220px; overflow-y: auto; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.cc-cta-panel label {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 13px;
+  color: var(--text-0); cursor: pointer;
+}
+.cc-cta-panel label:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.cc-cta-panel input[type="checkbox"] { cursor: pointer; }
+
 .icon-btn {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -111,6 +131,7 @@ select { cursor: pointer; }
 }
 .icon-btn.danger:hover { box-shadow: 0 0 22px color-mix(in srgb, var(--danger) 50%, transparent); }
 .icon-btn.primary { background: var(--accent); color: var(--bg-0); border-color: var(--accent); }
+.icon-btn.active { border-color: var(--accent); color: var(--accent); }
 .icon-btn.primary:hover { color: var(--bg-0); box-shadow: var(--glow-strong); }
 
 @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
@@ -255,7 +276,7 @@ tbody tr.source-row.profit-positive:hover { background: color-mix(in srgb, var(-
 tbody tr.source-row.profit-negative:hover { background: color-mix(in srgb, var(--loss) 11%, transparent); }
 td { padding: 11px 12px; color: var(--text-0); white-space: nowrap; }
 td.num { font-family: var(--font-tabular); font-variant-numeric: tabular-nums; }
-#sourcesTable thead th:first-child, #sourcesTable td.toggle-cell { text-align: center; width: 58px; padding-left: 8px; padding-right: 8px; }
+#sourcesTable td.toggle-cell { text-align: center; width: 58px; padding-left: 8px; padding-right: 8px; }
 .adgroups-table th:first-child { text-align: center; }
 td.positive { color: var(--profit); }
 td.negative { color: var(--loss); }
@@ -288,10 +309,13 @@ td.negative { color: var(--loss); }
 .bud-left.muted { color: var(--text-1); font-weight: 600; }
 .bud-sub { font-size: 11px; font-weight: 600; color: var(--text-1); }
 
-/* ---- far-right ⋮ campaign action menu ---- */
-#sourcesTable th.col-action, #sourcesTable td.row-action-cell {
-  width: 34px; padding-left: 2px; padding-right: 6px; text-align: center;
+/* ---- leftmost Select column ---- */
+#sourcesTable th.col-select, #sourcesTable td.select-cell {
+  width: 40px; padding-left: 10px; padding-right: 4px; text-align: center;
 }
+.row-select { width: 15px; height: 15px; cursor: pointer; margin: 0; }
+
+/* ---- ⋮ campaign actions menu (Detailed Metrics header + WH Warming Up rows) ---- */
 .rowmenu-btn {
   border: none; background: transparent; color: var(--text-2); cursor: pointer;
   font-size: 17px; line-height: 1; padding: 4px 6px; border-radius: 6px;
@@ -734,6 +758,30 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .wh-result-row.bad .wh-r-status { color: var(--loss); }
 .wh-result-row.warn .wh-r-status { color: #ffb020; }
 .wh-result-row .wh-r-detail { color: var(--text-2); font-size: 11px; }
+
+/* ---- "WHs Warming Up" entry box (WH Warmup step 1) + its list modal ---- */
+.wh-warming-box {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  margin: 10px 0; padding: 10px 14px; background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text-0); font-size: 13px; font-weight: 600;
+  cursor: pointer; font-family: var(--font-body);
+}
+.wh-warming-box:hover { border-color: var(--accent); }
+.wh-warming-count { color: var(--text-2); font-weight: 600; font-size: 12px; }
+.wh-warming-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.wh-warming-toolbar label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-1); cursor: pointer; }
+.wh-warming-toolbar input { width: auto; margin: 0; }
+.wh-warming-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.wh-warming-table th {
+  text-align: left; font-weight: 600; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-2); padding: 6px 10px; border-bottom: 1px solid var(--border);
+}
+.wh-warming-table td { padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); vertical-align: middle; }
+.wh-warming-table tr:last-child td { border-bottom: none; }
+.wh-warming-source { display: flex; flex-direction: column; gap: 2px; }
+.wh-warming-source strong { color: var(--text-0); font-weight: 600; }
+.wh-warming-source span { color: var(--text-2); font-size: 11px; }
+.wh-warming-table td.num { text-align: right; }
 
 /* ---------------- Detailed Metrics: STATUS column ---------------- */
 .status-badge {

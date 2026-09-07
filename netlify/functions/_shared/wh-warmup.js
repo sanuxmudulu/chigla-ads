@@ -361,8 +361,9 @@ async function resolveSparkCode(client, advertiserId, rawCode) {
 // the error as `.rolledBackCampaignId`.
 // ---------------------------------------------------------------------------
 
-async function createWarmupForAdvertiser({ client, advertiserId, currency, targetCountry, locationId, sparkCode }) {
+async function createWarmupForAdvertiser({ client, advertiserId, currency, targetCountry, locationId, sparkCode, campaignName }) {
   const names = whNames();
+  if (campaignName) names.campaign = campaignName; // wh1, wh2, … — see wh-warmup.js createBatch
   const budget = whDailyBudget(currency);
 
   // Read-only resolutions FIRST — a bad country/Spark code creates nothing.

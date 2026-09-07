@@ -44,6 +44,23 @@ async function readConnections(supabase) {
 
 const ADVERTISER_COLUMNS =
   "connection_id, advertiser_id, advertiser_name, bc_id, bc_name, currency, timezone, display_timezone, status, role, country, tracked, updated_at";
+const ADVERTISER_COLUMNS_ORDERED = `${ADVERTISER_COLUMNS}, list_order`;
+
+// Ordered by list_order (the position TikTok's own auth_advertiser_get
+// returned it in — the closest available proxy for "BC order"), nulls last,
+// alphabetical as the tiebreak. Falls back to plain alphabetical if
+// supabase/tiktok_advertiser_order.sql hasn't been run yet.
+async function readAdvertisers(supabase) {
+  let res = await supabase
+    .from("tiktok_advertisers")
+    .select(ADVERTISER_COLUMNS_ORDERED)
+    .order("list_order", { ascending: true, nullsFirst: false })
+    .order("advertiser_name", { ascending: true });
+  if (res.error && /list_order/.test(res.error.message || "")) {
+    res = await supabase.from("tiktok_advertisers").select(ADVERTISER_COLUMNS).order("advertiser_name", { ascending: true });
+  }
+  return res;
+}
 
 exports.handler = async function (event) {
   try {
@@ -52,7 +69,7 @@ exports.handler = async function (event) {
     if (event.httpMethod === "GET") {
       const [connectionsRes, advertisersRes] = await Promise.all([
         readConnections(supabase),
-        supabase.from("tiktok_advertisers").select(ADVERTISER_COLUMNS).order("advertiser_name", { ascending: true }),
+        readAdvertisers(supabase),
       ]);
       if (connectionsRes.error) return json(500, { error: "Supabase read failed", details: sbErr(connectionsRes.error) });
       if (advertisersRes.error) return json(500, { error: "Supabase read failed", details: sbErr(advertisersRes.error) });
