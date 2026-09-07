@@ -444,13 +444,19 @@ function wireEvents() {
     const id = String(cb.dataset.selectCampaign);
     if (cb.checked) state.selectedCampaigns.add(id);
     else state.selectedCampaigns.delete(id);
+    syncDetailActionsButton();
   });
-  // Double-click any select checkbox -> select every campaign in the table.
+  // Double-click any select checkbox: if every campaign is already selected,
+  // deselect all; otherwise select all. So double-click -> select all, tweak
+  // the selection by hand, double-click again -> back to select-all, double-
+  // click once more -> deselect all. It only ever clears everything when
+  // everything is already checked.
   document.getElementById("sourcesBody").addEventListener("dblclick", (e) => {
     if (!e.target.closest("[data-select-campaign]")) return;
-    state.sources.forEach((s) => {
-      if (s.hasTiktok && s.campaignId) state.selectedCampaigns.add(String(s.campaignId));
-    });
+    const allIds = state.sources.filter((s) => s.hasTiktok && s.campaignId).map((s) => String(s.campaignId));
+    const allSelected = allIds.length > 0 && allIds.every((id) => state.selectedCampaigns.has(id));
+    if (allSelected) state.selectedCampaigns.clear();
+    else allIds.forEach((id) => state.selectedCampaigns.add(id));
     renderTable();
   });
   document.getElementById("detailBulkActionsBtn").addEventListener("click", (e) => {
@@ -584,6 +590,7 @@ function rebuildSources(opts = {}) {
   const tiktokByName = new Map();
   for (const c of state.tiktokCampaigns) {
     if (!c || !c.campaign_name) continue;
+    if (c.is_wh_warmup) continue; // WH Warmup campaigns never belong in Detailed Metrics — no matter their status
     if (bcFilter !== "all" && String(c.bc_id || "") !== String(bcFilter)) continue;
     tiktokByName.set(c.campaign_name, c);
   }
@@ -660,7 +667,6 @@ function rebuildSources(opts = {}) {
       budget,
       tiktokPostUrl: tk ? tk.tiktok_post_url || null : null,
       engagementStatus: tk ? tk.engagement_status || "PENDING" : null,
-      isWhWarmup: tk ? !!tk.is_wh_warmup : false,
     };
   });
 
@@ -765,6 +771,20 @@ function renderTable(newConversionSources) {
       requestAnimationFrame(() => renderAdGroupsPanel(s));
     }
   });
+
+  syncDetailActionsButton();
+}
+
+// Greys out the header ⋮ campaign-actions button whenever nothing is
+// selected — clicking it then does nothing (native disabled behavior), which
+// is a much clearer signal than the click silently falling through to a
+// status-bar message that's easy to miss.
+function syncDetailActionsButton() {
+  const btn = document.getElementById("detailBulkActionsBtn");
+  if (!btn) return;
+  const n = state.selectedCampaigns.size;
+  btn.disabled = n === 0;
+  btn.title = n > 0 ? `Campaign actions (${n} selected)` : "Select a campaign first";
 }
 
 // Compact ON/OFF switch for the campaign row. ON = campaign ENABLE, OFF =
@@ -857,11 +877,13 @@ function toggleDetailActionsMenu(btn) {
   // template picker) — there's no single-campaign UI to generalize to many,
   // so it stays a single-selection action; Edit budget and Delete both have
   // well-defined bulk behavior and stay enabled for any selection size.
-  const anyWh = selected.some((s) => s.isWhWarmup);
+  // (WH Warmup campaigns never reach this list at all — they're excluded
+  // from Detailed Metrics entirely — so there's no engagement exclusion to
+  // account for here anymore.)
   const addCommentsItem =
-    selected.length === 1 && !anyWh
+    selected.length === 1
       ? `<button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>`
-      : `<button type="button" class="rowmenu-item" disabled title="${anyWh ? "WH Warmup campaigns don't use engagement" : "Select exactly one campaign to add comments"}">Add comments</button>`;
+      : `<button type="button" class="rowmenu-item" disabled title="Select exactly one campaign to add comments">Add comments</button>`;
 
   const menu = document.createElement("div");
   menu.className = "rowmenu";
@@ -1349,6 +1371,9 @@ function wireWhWarmupEvents() {
     else approved.forEach((a) => whState.selected.delete(String(a.advertiser_id)));
     renderWhAdvertisers();
   });
+  // Static — lives outside whAdvList, so re-rendering the list below it never
+  // touches (or steals focus from) this input.
+  document.getElementById("whAdvSearch").addEventListener("input", renderWhAdvertisers);
   document.getElementById("whAdvList").addEventListener("change", (e) => {
     const cb = e.target.closest('input[type="checkbox"][data-wh-adv]');
     if (!cb) return;
@@ -1551,6 +1576,7 @@ function whResetDraft() {
   document.getElementById("whCountryInput").value = "";
   document.getElementById("whCountryOk").textContent = "";
   document.getElementById("whSparkInput").value = "";
+  document.getElementById("whAdvSearch").value = "";
 }
 
 // Read the spark textarea into state before hiding the modal — everything
@@ -1623,10 +1649,15 @@ function renderWhAdvertisers() {
     <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
     <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
 
+  // Search box lives outside this container (static markup) so re-rendering
+  // the rows never steals its focus/cursor.
+  const query = document.getElementById("whAdvSearch")?.value || "";
+  const shown = filterAdvsByQuery(advs, query);
+
   const wrap = document.getElementById("whAdvList");
-  wrap.innerHTML = advs.length
-    ? advs.map((a) => whAdvRow(a)).join("")
-    : `<p class="tk-empty">No advertiser accounts under this Business Center.</p>`;
+  wrap.innerHTML = shown.length
+    ? shown.map((a) => whAdvRow(a)).join("")
+    : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts under this Business Center."}</p>`;
 
   syncWhSelectAll();
   updateWhNextButton();
@@ -1819,7 +1850,7 @@ function renderWhWarmingList() {
   }
   el.innerHTML = `
     <table class="wh-warming-table">
-      <thead><tr><th></th><th>On/Off</th><th>Status</th><th>Source</th><th class="num">Budget</th><th></th></tr></thead>
+      <thead><tr><th></th><th>On/Off</th><th>Status</th><th>Source</th><th></th></tr></thead>
       <tbody>${list.map(whWarmingRowHtml).join("")}</tbody>
     </table>`;
   syncWhWarmingToolbar();
@@ -1844,7 +1875,6 @@ function whWarmingRowHtml(c) {
       })}</td>
       <td>${statusBadge(status)}</td>
       <td><div class="wh-warming-source"><strong>${escapeHtml(c.campaign_name || id)}</strong><span>${escapeHtml(c.advertiser_name || c.advertiser_id)}</span></div></td>
-      <td class="num">${money(c.daily_budget)}</td>
       <td><button type="button" class="rowmenu-btn" data-row-menu="wh:${escapeHtml(id)}" aria-label="Campaign actions" title="Campaign actions">⋮</button></td>
     </tr>`;
 }
@@ -2111,6 +2141,9 @@ function wireCampaignCreatorEvents() {
     else approved.forEach((a) => ccState.run.selected.delete(String(a.advertiser_id)));
     renderCcRunAdvertisers();
   });
+  // Static — lives outside ccRunAdvList, so re-rendering the list below it
+  // never touches (or steals focus from) this input.
+  document.getElementById("ccRunAdvSearch").addEventListener("input", renderCcRunAdvertisers);
   document.getElementById("ccRunAdvList").addEventListener("change", (e) => {
     const cb = e.target.closest('input[type="checkbox"][data-cc-adv]');
     if (!cb) return;
@@ -2650,6 +2683,7 @@ function openRunWizard(tpl) {
   document.getElementById("ccRunFormId").value = "";
   document.getElementById("ccRunFormIdStatus").textContent = "";
   document.getElementById("ccRunTzBlocks").innerHTML = "";
+  document.getElementById("ccRunAdvSearch").value = "";
   // r.submitting is false here (ccResetRunDraft(), called just above, resets
   // it) — sync the Create button/progress line to that now, so a fresh run
   // never inherits a completed prior run's "Creating…"/disabled button.
@@ -2676,9 +2710,13 @@ function renderCcRunAdvertisers() {
     <span class="tk-sum-item"><strong>${advs.length}</strong> account${advs.length === 1 ? "" : "s"}</span>
     <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
     <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
+  // Search box lives outside this container (static markup) so re-rendering
+  // the rows never steals its focus/cursor.
+  const query = document.getElementById("ccRunAdvSearch")?.value || "";
+  const shown = filterAdvsByQuery(advs, query);
   const wrap = document.getElementById("ccRunAdvList");
-  wrap.innerHTML = advs.length
-    ? advs.map((a) => {
+  wrap.innerHTML = shown.length
+    ? shown.map((a) => {
         const ok = advIsApproved(a);
         const id = String(a.advertiser_id);
         const meta = [id, a.currency || null, a.display_timezone || a.timezone || null].filter(Boolean).join(" · ");
@@ -2688,7 +2726,7 @@ function renderCcRunAdvertisers() {
           <span class="tk-adv-status ${ok ? "ok" : "warn"}">${ok ? "Approved" : "Suspended"}</span>
         </label>`;
       }).join("")
-    : `<p class="tk-empty">No advertiser accounts under this Business Center.</p>`;
+    : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts under this Business Center."}</p>`;
   syncCcRunSelectAll();
   document.getElementById("ccRunNext1").disabled = ccState.run.selected.size === 0;
 }
@@ -3763,6 +3801,7 @@ const tiktokState = { connections: [], advertisers: [], selectedConnectionId: nu
 let tiktokPwHandler = null;
 
 function openAccountsModal() {
+  document.getElementById("tiktokAdvSearch").value = "";
   document.getElementById("accountsModal").classList.add("open");
 }
 function closeAccountsModal() {
@@ -3776,6 +3815,9 @@ function wireTiktokEvents() {
     tiktokState.selectedConnectionId = e.target.value;
     renderSelectedConnection();
   });
+  // Static — lives outside tiktokConnectionsWrap, so re-rendering the list
+  // below it never touches (or steals focus from) this input.
+  document.getElementById("tiktokAdvSearch").addEventListener("input", renderSelectedConnection);
 
   // Connection-management only: network toggle + disconnect. Account tracking
   // selection was removed (Detailed Metrics now scopes itself off Campaign
@@ -3811,6 +3853,15 @@ function advApprovedRank(a) {
 }
 function advStatusLabel(a) {
   return advIsApproved(a) ? "Approved" : "Suspended";
+}
+
+// Dynamic name search shared by the 3 ad-account lists (TikTok Ads, WH
+// Warmup, Campaign Creator). Never touches which accounts "select all"
+// selects — it only narrows which rows are shown.
+function filterAdvsByQuery(advs, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return advs;
+  return advs.filter((a) => String(a.advertiser_name || a.advertiser_id || "").toLowerCase().includes(q));
 }
 
 // A connection's Business Center identity for display. Real BC name from
@@ -3890,9 +3941,13 @@ function renderSelectedConnection() {
     <span class="tk-sum-item ok"><strong>${approved}</strong> Approved</span>
     <span class="tk-sum-item warn"><strong>${advs.length - approved}</strong> Suspended</span>`;
 
-  const rows = advs.length
-    ? advs.map((a) => tiktokAdvRow(a)).join("")
-    : `<p class="tk-empty">No advertiser accounts found for this connection.</p>`;
+  // Search box lives outside this container (static markup) so re-rendering
+  // never steals its focus/cursor.
+  const query = document.getElementById("tiktokAdvSearch")?.value || "";
+  const shownAdvs = filterAdvsByQuery(advs, query);
+  const rows = shownAdvs.length
+    ? shownAdvs.map((a) => tiktokAdvRow(a)).join("")
+    : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts found for this connection."}</p>`;
 
   const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
   const saving = tiktokState.savingNetwork === c.id;

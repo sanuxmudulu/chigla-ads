@@ -98,7 +98,7 @@
         </div>
         <div class="detail-bc-balance" id="detailBcBalance" hidden></div>
         <button class="icon-btn primary" id="openDupeModalBtn">Dupe</button>
-        <button class="icon-btn" id="detailBulkActionsBtn" data-row-menu="bulk" aria-label="Campaign actions" title="Campaign actions">⋮</button>
+        <button class="icon-btn" id="detailBulkActionsBtn" data-row-menu="bulk" aria-label="Campaign actions" title="Select a campaign first" disabled>⋮</button>
       </div>
     </div>
     <div class="table-wrap">
@@ -193,6 +193,10 @@
       <select id="tiktokBcSelect"></select>
     </div>
     <div id="tiktokSummary" class="tk-summary"></div>
+    <div class="tk-adv-search">
+      <svg class="tk-adv-search-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input type="text" id="tiktokAdvSearch" placeholder="Search accounts…" autocomplete="off" />
+    </div>
     <div id="tiktokConnectionsWrap" class="tk-wrap"></div>
     <div class="modal-actions tk-modal-actions" style="margin-top:16px;">
       <button class="icon-btn" id="tiktokConnectBtn">Connect New BC</button>
@@ -290,6 +294,10 @@
       </button>
       <div class="wh-selectall">
         <label><input type="checkbox" id="whSelectAll" /> Select all Approved accounts</label>
+      </div>
+      <div class="tk-adv-search">
+        <svg class="tk-adv-search-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" id="whAdvSearch" placeholder="Search accounts…" autocomplete="off" />
       </div>
       <div id="whAdvList" class="tk-wrap wh-adv-list"></div>
       <div class="modal-error" id="whStep1Error"></div>
@@ -553,6 +561,10 @@
         </div>
         <div id="ccRunSummary" class="tk-summary"></div>
         <div class="wh-selectall"><label><input type="checkbox" id="ccRunSelectAll" /> Select all Approved accounts</label></div>
+        <div class="tk-adv-search">
+          <svg class="tk-adv-search-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="ccRunAdvSearch" placeholder="Search accounts…" autocomplete="off" />
+        </div>
         <div id="ccRunAdvList" class="tk-wrap wh-adv-list"></div>
         <div class="modal-error" id="ccRunErr1"></div>
         <div class="modal-actions">

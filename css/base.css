@@ -101,7 +101,10 @@ select { cursor: pointer; }
   color: var(--text-0); cursor: pointer;
 }
 .cc-cta-panel label:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.cc-cta-panel input[type="checkbox"] { cursor: pointer; }
+/* Overrides the generic ".modal input { width:100%; margin-bottom:14px }"
+   meant for text fields — without this, the checkbox stretches to fill the
+   row (matching the pattern already used for .tk-adv / .cc-inline inputs). */
+.cc-cta-panel input[type="checkbox"] { width: auto; margin: 0; flex-shrink: 0; cursor: pointer; accent-color: var(--accent); }
 
 .icon-btn {
   background: var(--bg-2);
@@ -806,6 +809,11 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 
 .tk-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; font-size: 12px; color: var(--text-2); }
 .tk-summary:empty { display: none; }
+
+/* ---- dynamic ad-account name search (TikTok Ads / WH Warmup / Campaign Creator) ---- */
+.tk-adv-search { position: relative; }
+.tk-adv-search input { padding-left: 32px; }
+.tk-adv-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-2); pointer-events: none; }
 .tk-sum-item strong { color: var(--text-0); font-size: 13px; }
 .tk-sum-item.ok strong { color: var(--profit); }
 .tk-sum-item.warn strong { color: var(--loss); }

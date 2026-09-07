@@ -9,7 +9,10 @@
 //        -> poll every WH campaign still in WAITING_FOR_ACTIVE / DELETE_PENDING;
 //           delete from TikTok the moment it is genuinely Active. Idempotent.
 //
-//   "list"     (no body)   -> WH campaigns + their cleanup status (monitoring UI)
+//   "list"     (no body)   -> WH campaigns still WAITING_FOR_ACTIVE / DELETE_PENDING
+//        (the "WHs Warming Up" panel) — DELETED/FAILED rows drop off the list
+//        the moment "cleanup" retires them, even though the row itself is
+//        kept in the table.
 //
 //   "countries" { connection_id, advertiser_id }
 //        -> valid country-level TikTok target locations for that advertiser
@@ -345,15 +348,22 @@ async function patchRow(supabase, campaignId, patch) {
 // list
 // ---------------------------------------------------------------------------
 
+// Only rows still actively being warmed/cleaned up — the "WHs Warming Up"
+// panel is a live worklist, not a history. A row leaves it the moment
+// cleanupOneWarmup marks it DELETED (genuinely deleted once Active) or
+// FAILED (e.g. the ad account got suspended and it can never be deleted) —
+// both cases mean "nothing left to watch here" from the panel's point of
+// view, even though the row itself stays in the table for the audit trail.
 // Also joins in each campaign's live on/off + status from tiktok_campaigns
-// (the same columns Detailed Metrics reads) so the "WHs Warming Up" panel
-// can show on/off, status, source, budget without a second round trip.
+// (the same columns Detailed Metrics reads) so the panel can show on/off and
+// status without a second round trip.
 async function listWarmups(supabase) {
   const { data, error } = await supabase
     .from("wh_warmup_campaigns")
     .select(
       "campaign_id, advertiser_id, advertiser_name, campaign_name, target_country, daily_budget, currency, cleanup_status, cleanup_attempts, cleanup_error, became_active_at, deleted_at, created_at"
     )
+    .in("cleanup_status", ["WAITING_FOR_ACTIVE", "DELETE_PENDING"])
     .order("created_at", { ascending: false })
     .limit(200);
   if (error) {
