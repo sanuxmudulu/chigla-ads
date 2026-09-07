@@ -489,6 +489,19 @@ export async function fetchWhCountries(connectionId, advertiserId) {
   return readTiktokResponse(res, "Couldn't load countries");
 }
 
+// Union of country-level TikTok target locations across every approved
+// advertiser on every connection — used by Campaign Creator templates, which
+// aren't tied to one ad account/BC and so must not be limited to what a single
+// account can currently target. { countries: [{ location_id, name, code }] }
+export async function fetchTemplateCountries() {
+  const res = await fetch("/.netlify/functions/wh-warmup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "template_countries" }),
+  });
+  return readTiktokResponse(res, "Couldn't load countries");
+}
+
 // Poll + auto-delete WH campaigns that have reached Active. Idempotent; called
 // on the existing ~60s refresh. Never throws for the caller's purposes.
 export async function cleanupWhWarmup() {

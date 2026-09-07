@@ -15,6 +15,13 @@
 //        -> valid country-level TikTok target locations for that advertiser
 //           ({ countries: [{ location_id, name, code }] }); drives the autocomplete
 //
+//   "template_countries"  (no body)
+//        -> union of country-level TikTok locations across every approved
+//           advertiser on every connection. Campaign Creator templates aren't
+//           tied to one ad account, so this is deliberately NOT limited to
+//           what any single account can currently target (see
+//           _shared/wh-warmup.js#listAllCountryRegions). Cached in-memory.
+//
 // No admin password (same posture as the other tiktok-* write actions — every
 // write is scoped server-side to advertiser accounts under the given connection).
 // All MCP calls run here; no tokens are ever returned to the browser.
@@ -27,7 +34,7 @@ const {
   connectMcp,
   json,
 } = require("./_shared/tiktok-mcp");
-const { createWarmupForAdvertiser, cleanupOneWarmup, listCountryRegions } = require("./_shared/wh-warmup");
+const { createWarmupForAdvertiser, cleanupOneWarmup, listCountryRegions, listAllCountryRegions } = require("./_shared/wh-warmup");
 
 async function withClient(supabase, connection, fn) {
   const { serverUrl, redirectUrl } = resolveConfig();
@@ -58,6 +65,7 @@ exports.handler = async function (event) {
     if (body.action === "cleanup") return cleanupBatch(supabase);
     if (body.action === "list") return listWarmups(supabase);
     if (body.action === "countries") return countriesFor(supabase, body);
+    if (body.action === "template_countries") return templateCountries(supabase);
 
     return json(400, { error: `Unknown action: ${body.action}` });
   } catch (err) {
@@ -85,6 +93,48 @@ async function countriesFor(supabase, body) {
   } catch (err) {
     return json(502, { error: "Couldn't load TikTok countries", details: err.message });
   }
+}
+
+// In-process cache — sweeping every connection's advertisers is slow (one
+// tool_region_get per account, sequential to respect TikTok's rate limiter).
+// Eligibility barely changes day to day, so a warm Lambda/Vercel instance
+// should not re-sweep on every "New Template" click. 15 min TTL.
+let _templateCountriesCache = null; // { at, countries }
+const TEMPLATE_COUNTRIES_TTL_MS = 15 * 60 * 1000;
+
+async function templateCountries(supabase) {
+  if (_templateCountriesCache && Date.now() - _templateCountriesCache.at < TEMPLATE_COUNTRIES_TTL_MS) {
+    return json(200, { ok: true, countries: _templateCountriesCache.countries, cached: true });
+  }
+
+  const { data: connections, error: connErr } = await supabase.from("tiktok_connections").select("*");
+  if (connErr) return json(500, { error: "Supabase read failed", details: sbErr(connErr) });
+  if (!connections || !connections.length) return json(200, { ok: true, countries: [] });
+
+  const deadline = Date.now() + 8000; // stay well under Netlify's/Vercel's sync function timeout
+  const byId = new Map();
+  for (const conn of connections) {
+    if (Date.now() > deadline) break;
+    const { data: advRows } = await supabase
+      .from("tiktok_advertisers")
+      .select("advertiser_id, status")
+      .eq("connection_id", conn.id);
+    const advIds = (advRows || []).filter(advApproved).map((a) => String(a.advertiser_id));
+    if (!advIds.length) continue;
+
+    try {
+      await withClient(supabase, conn, async (client) => {
+        const list = await listAllCountryRegions(client, advIds, { deadlineMs: deadline });
+        for (const c of list) if (!byId.has(c.location_id)) byId.set(c.location_id, c);
+      });
+    } catch (err) {
+      console.error(`[wh-warmup] template_countries connection ${conn.id} failed: ${err.message}`);
+    }
+  }
+
+  const countries = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+  _templateCountriesCache = { at: Date.now(), countries };
+  return json(200, { ok: true, countries });
 }
 
 async function createBatch(supabase, body) {

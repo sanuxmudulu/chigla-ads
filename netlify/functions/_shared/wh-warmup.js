@@ -60,6 +60,26 @@ function startTimeNow() {
 
 const norm = (s) => String(s || "").trim().toLowerCase();
 
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const _isRateLimit = (msg) => /rate limit|too many request|429|qps|frequenc|please try again/i.test(String(msg || ""));
+
+// mcpCall + backoff retry on TikTok's rate limiter. Only retries rate-limit
+// errors; everything else throws immediately. Needed here because
+// listAllCountryRegions below fires this same call once per advertiser in a row.
+async function mcpCallThrottled(client, name, args, tries = 4) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await mcpCall(client, name, args);
+    } catch (err) {
+      lastErr = err;
+      if (!_isRateLimit(err.message)) throw err;
+      await _sleep(Math.min(1200 * 2 ** i, 6000) + Math.floor(Math.random() * 300));
+    }
+  }
+  throw lastErr;
+}
+
 // ---------------------------------------------------------------------------
 // Country -> TikTok location_id  (Traffic / Website / TikTok placement)
 // ---------------------------------------------------------------------------
@@ -68,7 +88,7 @@ const norm = (s) => String(s || "").trim().toLowerCase();
 // Website / TikTok placement). -> [{ location_id, name, code }] sorted by name.
 // Used both by the WH settings-screen autocomplete and by resolveCountryLocationId.
 async function listCountryRegions(client, advertiserId) {
-  const d = await mcpCall(client, "tool_region_get", {
+  const d = await mcpCallThrottled(client, "tool_region_get", {
     advertiser_id: String(advertiserId),
     placements: ["PLACEMENT_TIKTOK"],
     objective_type: "TRAFFIC",
@@ -96,6 +116,33 @@ async function listCountryRegions(client, advertiserId) {
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+// Union of country-level regions across MULTIPLE advertisers. TikTok gates
+// newly-available countries (e.g. US) per AD ACCOUNT, not per Business Center —
+// two accounts in the same BC can see very different country lists. Campaign
+// Creator templates aren't tied to one ad account (you pick the account at
+// launch time), so the template location picker must not be limited to
+// whatever ONE account currently happens to be eligible for. This samples up
+// to 8 approved advertisers and unions what each can see; a country only
+// disappears here if none of them can target it. One account erroring never
+// blocks the rest. `deadlineMs` (Date.now()-based) bails out early and returns
+// whatever's been collected so far, so a slow/rate-limited sweep degrades to a
+// partial list instead of timing out the whole request.
+async function listAllCountryRegions(client, advertiserIds, { deadlineMs } = {}) {
+  const ids = [...new Set((advertiserIds || []).map(String).filter(Boolean))].slice(0, 8);
+  const byId = new Map();
+  for (const advId of ids) {
+    if (deadlineMs && Date.now() > deadlineMs) break;
+    let list;
+    try {
+      list = await listCountryRegions(client, advId);
+    } catch (_) {
+      continue;
+    }
+    for (const c of list) if (!byId.has(c.location_id)) byId.set(c.location_id, c);
+  }
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function resolveCountryLocationId(client, advertiserId, countryName) {
@@ -563,6 +610,7 @@ module.exports = {
   whDailyBudget,
   whNames,
   listCountryRegions,
+  listAllCountryRegions,
   resolveCountryLocationId,
   resolveSparkCode,
   createWarmupForAdvertiser,

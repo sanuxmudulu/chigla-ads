@@ -26,6 +26,7 @@ import {
   createWhWarmup,
   cleanupWhWarmup,
   fetchWhCountries,
+  fetchTemplateCountries,
   processCampaignCreatorDuplication,
   listCampaignTemplates,
   saveCampaignTemplate,
@@ -2120,18 +2121,19 @@ function renderTplLocChips() {
 async function loadTplCountries() {
   const d = ccState.tpl;
   const hint = document.getElementById("ccTplLocHint");
-  const conn = tiktokState.connections[0];
-  const adv = conn ? advsForConnection(conn.id).find((a) => advIsApproved(a)) : null;
-  if (!conn || !adv) {
-    hint.textContent = "Connect a TikTok Business Center with an Approved account to load the location list.";
+  if (!tiktokState.connections.length) {
+    hint.textContent = "Connect a TikTok Business Center to load the location list.";
     return;
   }
+  // Templates aren't tied to one ad account — the account is picked later, at
+  // launch. So this pulls the union of every country any Approved account can
+  // target (across every connected BC), not just what one account allows.
   hint.textContent = "Loading TikTok location list…";
   d.countriesLoading = true;
   try {
-    const data = await fetchWhCountries(conn.id, adv.advertiser_id);
+    const data = await fetchTemplateCountries();
     d.countries = data.countries || [];
-    hint.textContent = d.countries.length ? "" : "TikTok returned no locations for this account.";
+    hint.textContent = d.countries.length ? "" : "TikTok returned no locations for any connected account.";
   } catch (err) {
     hint.textContent = `Couldn't load locations: ${err.message}`;
   } finally {
