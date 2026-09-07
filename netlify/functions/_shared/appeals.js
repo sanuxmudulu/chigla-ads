@@ -77,17 +77,56 @@ function matchReason(raw) {
     .trim();
   if (!s) return null;
 
+  // NOTE: TikTok's ad_review_info_get / adgroup_review_info_get reject_info
+  // does NOT include the short category headline shown in Ads Manager (e.g.
+  // "Misleading Opportunities") — only a longer boilerplate policy
+  // explanation. Verified live 2026-09-07 (ad2, 3 reject_info entries):
+  //   "...may violate TikTok's Advertising Policies by featuring or
+  //     promoting adult products or services. This could include products or
+  //     services such as pornographic material or media, pornographic or
+  //     sexual services, sexual products such as sex toys, sex accessories
+  //     or sexual performance products..."          -> adult_content_services
+  //   "...may violate TikTok's advertising policies by promoting misleading
+  //     employment or money-making opportunities. This could include
+  //     unclear descriptions of the job or opportunity being promoted,
+  //     misleading language on qualification requirements, or instructions
+  //     for users to communicate off-platform."      -> misleading_opportunities
+  //   "...may violate TikTok's advertising policies by promoting prohibited
+  //     products or services in the targeted locations. For more policy
+  //     details, please refer to 'TikTok Advertising Policies - Industry
+  //     Entry'..."                                   -> gambling_and_games
+  //     (TikTok's generic "Industry Entry" wrapper text for a
+  //     location-restricted industry; matched to gambling_and_games because
+  //     that's the one category whose appeal text (REASON_MIDDLE) has no
+  //     specific claim to rebut — so even if this generic wrapper is
+  //     occasionally used for a different restricted industry, the appeal
+  //     text sent never asserts anything false.)
+  // Each pattern below is keyword-based (not one exact contiguous phrase)
+  // specifically so minor wording variants from TikTok don't silently fall
+  // back to UNSUPPORTED the way one earlier attempt already did.
+
   if (/sensitive personal information/.test(s)) return "sensitive_personal_information";
-  if (/personal information/.test(s) && /(photo|post|image|sensitive)/.test(s))
+  if (/personal information/.test(s) && /(photo|post|image|sensitive|collect|request)/.test(s))
     return "sensitive_personal_information";
 
+  if (/adult (products?|content) (or|and) services/.test(s)) return "adult_content_services";
   if (/adult content/.test(s) || /adult services?/.test(s)) return "adult_content_services";
+  if (/pornographic|sex toys?|sex accessories|sexual (product|service|performance|material)/.test(s))
+    return "adult_content_services";
+  if (/dating (app|application|platform)/.test(s) && /(promot|service)/.test(s)) return "adult_content_services";
 
   if (/financial misrepresentation/.test(s)) return "financial_misrepresentation";
+  if (/misrepresent/.test(s) && /(financ|invest|earn|income)/.test(s)) return "financial_misrepresentation";
 
   if (/misleading opportunit(y|ies)/.test(s)) return "misleading_opportunities";
+  if (/misleading employment/.test(s) || /money making opportunit(y|ies)/.test(s)) return "misleading_opportunities";
+  if (/(unclear|misleading).{0,40}(opportunit|job|employment|earnings?|qualification)/.test(s))
+    return "misleading_opportunities";
 
   if (/gambling and games/.test(s) || /\bgambling\b/.test(s)) return "gambling_and_games";
+  if (/pay to play games?/.test(s) && /(prize|reward|real world value)/.test(s)) return "gambling_and_games";
+  if (/prohibited products or services in the targeted locations/.test(s) && /industry entry/.test(s))
+    return "gambling_and_games";
 
   return null;
 }
