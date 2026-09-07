@@ -2305,11 +2305,30 @@ function syncCcRunSelectAll() {
   cb.disabled = approved.length === 0;
 }
 
+// Campaign names from a base that already carries its own starting number
+// (e.g. "ad1" -> ad1, ad2, ad3…; "ad136" -> ad136, ad137, ad138…) so a batch
+// can pick up exactly where a previous one left off. A base with no trailing
+// digits (e.g. "ad") falls back to the original base+1, base+2… behavior.
+// Mirrors campaignNamesFromBase in netlify/functions/campaign-creator-run.js —
+// this copy drives the live preview/review UI; the exact list it computes is
+// also what gets sent as `names` at submit time, so preview == reality.
+function ccCampaignNames(base, count) {
+  const b = String(base || "").trim();
+  const m = /^(.*?)(\d+)$/.exec(b);
+  if (m) {
+    const prefix = m[1];
+    const start = parseInt(m[2], 10);
+    return Array.from({ length: count }, (_, i) => `${prefix}${start + i}`);
+  }
+  return Array.from({ length: count }, (_, i) => `${b}${i + 1}`);
+}
+
 function renderCcNamePreview() {
   const advs = ccSelectedAdvs();
   const base = ccState.run.base.trim();
+  const names = base ? ccCampaignNames(base, advs.length) : [];
   document.getElementById("ccRunNamePreview").innerHTML = advs
-    .map((a, i) => `<div class="row"><span>${escapeHtml(a.advertiser_name || a.advertiser_id)}</span><strong>${base ? escapeHtml(base + (i + 1)) : "—"}</strong></div>`)
+    .map((a, i) => `<div class="row"><span>${escapeHtml(a.advertiser_name || a.advertiser_id)}</span><strong>${names[i] ? escapeHtml(names[i]) : "—"}</strong></div>`)
     .join("");
 }
 
@@ -2599,6 +2618,7 @@ function renderCcReview() {
   const r = ccState.run;
   const advs = ccSelectedAdvs();
   const base = r.base.trim();
+  const names = ccCampaignNames(base, advs.length);
   const sc = r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const lc = r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const isLead = r.template.campaign_type === "LEAD_GENERATION";
@@ -2620,7 +2640,7 @@ function renderCcReview() {
         const tz = ccAdvTz(a);
         const page = !isLead ? `<div class="row"><span>Instant Page</span><strong>${escapeHtml(pageByAdv.get(id) || "newest (auto)")}</strong></div>` : "";
         return `<div class="rev-acct">${escapeHtml(a.advertiser_name || id)}</div>
-          <div class="row"><span>Campaign</span><strong>${escapeHtml(base + (i + 1))}</strong></div>
+          <div class="row"><span>Campaign</span><strong>${escapeHtml(names[i])}</strong></div>
           <div class="row"><span>Start</span><strong>${escapeHtml(schedText(tz))} <em>(${escapeHtml(tz)})</em></strong></div>
           <div class="row"><span>Spark code</span><strong>#${i + 1} · ${escapeHtml((sc[i] || "").slice(0, 10))}…</strong></div>
           <div class="row"><span>Post link</span><strong>${escapeHtml((lc[i] || "").replace(/^https:\/\/(www\.)?/, "").slice(0, 44))}</strong></div>
@@ -2636,6 +2656,15 @@ function renderCcReview() {
 // start of every run — never the button's own `disabled` DOM property, which is
 // static/persistent state that previously went stale across runs and caused
 // this exact handler to silently no-op on a real click (see ccSyncCreateUi).
+// One create request creates campaigns sequentially server-side (~9s each —
+// TikTok campaign -> ad group -> Spark ad, in series) and the serverless
+// function has a hard ~60s wall-clock limit, so a single request safely fits
+// about 6 accounts. A batch bigger than that is split into consecutive
+// requests of this size — this is the ONLY thing that caps how many accounts
+// fit per request; the total batch size has no cap, it just takes
+// proportionally longer (more requests) for larger batches.
+const CC_CREATE_CHUNK_SIZE = 6;
+
 async function submitCampaignCreator() {
   const r = ccState.run;
   console.log("[cc] create clicked", { submitting: r.submitting });
@@ -2647,23 +2676,57 @@ async function submitCampaignCreator() {
   ccSyncCreateUi(); // -> button disabled + "Creating…"
   const prog = document.getElementById("ccRunProgress");
   const advs = ccSelectedAdvs();
-  prog.className = "eng-placeholder busy";
-  prog.textContent = `Creating ${advs.length} campaign${advs.length === 1 ? "" : "s"}… this can take a minute.`;
+  const total = advs.length;
+  const sparkAll = r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const linksAll = r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const namesAll = ccCampaignNames(r.base.trim(), total);
+  const chunkCount = Math.ceil(total / CC_CREATE_CHUNK_SIZE);
+  const allResults = [];
+
   try {
-    console.log("[cc] create request started");
-    const res = await runCampaignCreator({
-      template_id: r.template.id,
-      campaign_type: r.template.campaign_type,
-      connection_id: r.connectionId,
-      advertiser_ids: advs.map((a) => String(a.advertiser_id)),
-      base_name: r.base.trim(),
-      schedules: r.schedules,
-      spark_codes: r.spark.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-      post_links: r.links.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-      form_id: r.formId || undefined,
-    });
+    for (let c = 0; c < chunkCount; c++) {
+      const start = c * CC_CREATE_CHUNK_SIZE;
+      const end = Math.min(start + CC_CREATE_CHUNK_SIZE, total);
+      const chunkAdvs = advs.slice(start, end);
+
+      prog.className = "eng-placeholder busy";
+      prog.textContent = chunkCount > 1
+        ? `Creating ${total} campaigns… batch ${c + 1}/${chunkCount} (${allResults.filter((x) => x.status === "Created").length} done so far).`
+        : `Creating ${total} campaign${total === 1 ? "" : "s"}… this can take a minute.`;
+
+      console.log(`[cc] create request started (batch ${c + 1}/${chunkCount}, ${chunkAdvs.length} accounts)`);
+      try {
+        const res = await runCampaignCreator({
+          template_id: r.template.id,
+          campaign_type: r.template.campaign_type,
+          connection_id: r.connectionId,
+          advertiser_ids: chunkAdvs.map((a) => String(a.advertiser_id)),
+          base_name: r.base.trim(),
+          names: namesAll.slice(start, end),
+          schedules: r.schedules,
+          spark_codes: sparkAll.slice(start, end),
+          post_links: linksAll.slice(start, end),
+          form_id: r.formId || undefined,
+        });
+        allResults.push(...(res.results || []));
+      } catch (chunkErr) {
+        // One batch failing outright (network error, etc.) never stops the
+        // rest — the remaining batches still run, this one's accounts are
+        // just recorded as failed.
+        console.log(`[cc] batch ${c + 1}/${chunkCount} request failed:`, chunkErr.message);
+        chunkAdvs.forEach((a, i) => {
+          allResults.push({
+            advertiser_id: String(a.advertiser_id),
+            advertiser_name: a.advertiser_name || String(a.advertiser_id),
+            campaign_name: namesAll[start + i],
+            status: "Failed",
+            error: chunkErr.message,
+          });
+        });
+      }
+    }
     console.log("[cc] create request finished");
-    renderCcResults(res.results || []);
+    renderCcResults(allResults);
     runGoStepShow(7);
     ccSteps("ccRunSteps", 6);
     ccState.run.step = 7;

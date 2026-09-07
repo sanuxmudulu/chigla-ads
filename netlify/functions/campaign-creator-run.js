@@ -12,10 +12,16 @@
 //        -> { ok, page_id, name, checks:[{advertiser_id,advertiser_name,ok,error?}] }
 //
 //   "create"  { template_id?, campaign_type, config?, connection_id, advertiser_ids:[...],
-//               base_name, spark_codes:[...], post_links:[...], form_id?,
+//               base_name, names?:[...], spark_codes:[...], post_links:[...], form_id?,
 //               schedules:{ "<IANA tz>": { date:"YYYY-MM-DD", hour, minute } }   (per tz group;
 //                 legacy: schedule:{hour,minute}) }
 //        -> identity is always Auto (each Spark code's own authorized identity).
+//        -> campaign names: `names` (one per advertiser_id) wins when given —
+//           the dashboard sends this so a batch split into several requests
+//           (see js/app.js submitCampaignCreator; one request per ~6 accounts
+//           to stay under the serverless function time limit) still numbers
+//           continuously. Otherwise derived from base_name's own trailing
+//           number, e.g. "ad136" -> ad136, ad137, ad138…
 //        -> creates ONE campaign per advertiser, registers each successful one for
 //           the existing duplication + auto-appeal lifecycle, stores its post URL.
 //           Partial failure tolerant. -> { results:[{advertiser_id,advertiser_name,
@@ -282,6 +288,20 @@ function splitLines(v) {
     .filter(Boolean);
 }
 
+// Campaign names from a base that already carries its own starting number
+// (e.g. "ad1" -> ad1, ad2, ad3…; "ad136" -> ad136, ad137, ad138…) so a batch
+// can pick up exactly where a previous one left off. A base with no trailing
+// digits (e.g. "ad") falls back to the original base+1, base+2… behavior.
+function campaignNamesFromBase(base, count) {
+  const m = /^(.*?)(\d+)$/.exec(base);
+  if (m) {
+    const prefix = m[1];
+    const start = parseInt(m[2], 10);
+    return Array.from({ length: count }, (_, i) => `${prefix}${start + i}`);
+  }
+  return Array.from({ length: count }, (_, i) => `${base}${i + 1}`);
+}
+
 async function createBatch(supabase, body) {
   const connectionId = body.connection_id;
   const type = String(body.campaign_type || "").toUpperCase();
@@ -299,6 +319,11 @@ async function createBatch(supabase, body) {
   const identityArgConst = { auto: true };
   const formId = body.form_id ? String(body.form_id).trim() : "";      // BC / account form page_id (primary)
   const formName = body.form_name ? String(body.form_name).trim() : ""; // name fallback (account-owned forms)
+  // Explicit per-account names (the dashboard sends these when a batch is
+  // split into multiple requests, so numbering stays continuous across
+  // chunks — see js/app.js submitCampaignCreator). Falls back to deriving
+  // names from base_name for any other/older caller.
+  const explicitNames = Array.isArray(body.names) ? body.names.map((s) => String(s).trim()) : null;
   // Sales: no conversion-event selection — optimization_goal CONVERT +
   // optimization_event BUTTON are resolved automatically (see instantPageConversion).
 
@@ -326,6 +351,9 @@ async function createBatch(supabase, body) {
     schedByTz.__default__ = { date: null, hour: legacyHour, minute: legacyMinute };
   }
 
+  if (explicitNames && explicitNames.length !== advertiserIds.length) {
+    return json(400, { error: `names (${explicitNames.length}) must match selected accounts (${advertiserIds.length}).` });
+  }
   if (sparkCodes.length !== advertiserIds.length) {
     return json(400, { error: `Spark codes (${sparkCodes.length}) must match selected accounts (${advertiserIds.length}).` });
   }
@@ -369,8 +397,9 @@ async function createBatch(supabase, body) {
   const { conn, byId } = loaded;
   const network = normalizeNetwork(conn.affiliate_network);
 
-  // Campaign names (deterministic: base + 1-based index).
-  const names = advertiserIds.map((_, i) => `${base}${i + 1}`);
+  // Campaign names — explicit list when provided (chunked batches), otherwise
+  // derived from base_name's own trailing number (see campaignNamesFromBase).
+  const names = explicitNames || campaignNamesFromBase(base, advertiserIds.length);
   for (const nm of names) {
     if (nm.length > 512) return json(400, { error: `Campaign name too long: "${nm}"` });
   }
@@ -408,7 +437,7 @@ async function createBatch(supabase, body) {
       const advName = adv?.advertiser_name || advId;
 
       if (Date.now() > deadline) {
-        results.push({ advertiser_id: advId, advertiser_name: advName, campaign_name: name, status: "Skipped", error: "Batch too large for one run — create the rest with fewer accounts." });
+        results.push({ advertiser_id: advId, advertiser_name: advName, campaign_name: name, status: "Skipped", error: "This request ran out of time — the dashboard should have sent it in a smaller batch; retry to create the rest." });
         continue;
       }
       if (!adv) {
