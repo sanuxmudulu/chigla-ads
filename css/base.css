@@ -1027,3 +1027,59 @@ select.tracker-type-select.tracker-type-slides {
   background: color-mix(in srgb, var(--profit) 13%, transparent);
   box-shadow: inset 0 0 0 1px var(--win-gold), inset 0 0 18px color-mix(in srgb, var(--win-gold) 20%, transparent);
 }
+
+/* ============================================================
+   MOBILE POLISH — touch targets, spacing, and placement only.
+   Everything here lives inside a max-width query, so nothing
+   above (desktop/tablet layout, logic, structure) is touched.
+   Wide tables (Detailed Metrics, Tracker, ad-group sub-rows)
+   already scroll horizontally via .table-wrap/.tracker-table-wrap
+   {overflow-x:auto} — left as-is on purpose, not rebuilt as cards.
+   ============================================================ */
+@media (max-width: 640px) {
+  /* iOS Safari auto-zooms the page when a focused input/select is
+     under 16px — bumping to 16px here (mobile only) stops that
+     without changing how anything reads on desktop. */
+  select, input[type="text"], input[type="password"], input[type="number"],
+  .cc-cta-btn, .tracker-input {
+    font-size: 16px;
+  }
+
+  /* Bigger, easier-to-hit tap targets. Sizes only — no repositioning. */
+  input[type="checkbox"] { width: 18px; height: 18px; }
+  .icon-btn.icon-only { width: 40px; height: 40px; }
+  .icon-btn.icon-only svg { width: 18px; height: 18px; }
+  .tk-switch { --w: 40px; --h: 24px; }
+  .modal-header button, .drawer-header button {
+    padding: 8px; margin: -8px; /* enlarges the hit area without shifting the icon's visual position */
+    line-height: 1;
+  }
+
+  /* Tighter topbar — three stacked rows (nav, date, refresh) is
+     already the existing ≤980px behavior; this just reclaims some
+     of the padding/gaps that mattered less on a tablet-width screen. */
+  .topbar { padding: 10px 14px; row-gap: 6px; }
+  .brand { font-size: 16px; }
+
+  /* Panels: a bit less padding so narrow phones keep more usable
+     width for actual content (numbers, labels, controls). */
+  .card, .kpi-card { padding: 14px 16px; }
+  .modal { padding: 18px; }
+  .modal.modal-lg, .tracker-modal { padding: 16px; }
+
+  /* Action buttons in a modal: side-by-side small buttons are hard
+     to hit precisely on a phone — stack them full-width instead,
+     keeping the existing Cancel-then-confirm/danger reading order
+     (never reversed — a destructive action like "Delete Campaign"
+     should not end up the easier one to tap by accident). */
+  .modal-actions { flex-direction: column; gap: 8px; }
+  .modal-actions .icon-btn { width: 100%; text-align: center; }
+
+  /* Tools drawer nav — a little more breathing room per row for
+     thumbs, same content/order/behavior. */
+  .tools-item { padding: 14px 12px; }
+}
+@media (max-width: 400px) {
+  .modal, .modal.modal-lg, .tracker-modal { padding: 14px; }
+  .kpi-card { padding: 12px 14px; }
+}
