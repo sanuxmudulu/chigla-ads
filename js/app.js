@@ -39,6 +39,12 @@ import {
   runCampaignCreator,
   listCampaignCreatorCampaigns,
   runManualDupe,
+  trackerList,
+  trackerUpdateTest,
+  trackerDeleteTest,
+  trackerCreateWinner,
+  trackerUpdateWinner,
+  trackerDeleteWinner,
 } from "./api.js";
 import { initTheme } from "./theme.js";
 import { createMainChart } from "./charts.js";
@@ -133,6 +139,14 @@ const state = {
   baseEarningsTotal: 0,
   expandedSources: new Set(),
   selectedCampaigns: new Set(), // campaign_ids checked in the Select column
+  tracker: {
+    unlocked: false, // password verified this session
+    password: null, // cached after the first successful call — never persisted
+    tab: "tests", // "tests" | "winners"
+    offerFilter: "all", // "all" | "CPI" | "SWEEPS"
+    tests: [],
+    winners: [],
+  },
 };
 
 let lastUpdatedAt = null;
@@ -368,6 +382,9 @@ function wireEvents() {
   });
   document.getElementById("calPrevMonth").addEventListener("click", () => shiftCalendarMonth(-1));
   document.getElementById("calNextMonth").addEventListener("click", () => shiftCalendarMonth(1));
+
+  document.getElementById("toolsTrackerBtn").addEventListener("click", openTrackerModal);
+  wireTrackerEvents();
 
   document.getElementById("detailBcSelect").addEventListener("change", (e) => {
     state.detailBcFilter = e.target.value;
@@ -4370,4 +4387,312 @@ function renderDetailedCalendar(daily) {
 
     grid.appendChild(cell);
   });
+}
+
+// ============================== TRACKER (Tests + Winners) ==============================
+// Tests rows are auto-populated server-side by the daily tracker-run.js cron —
+// this module only ever renders them + saves the user-entered fields (offer /
+// hook / notes). Winners rows are 100% manual (added, edited, deleted here).
+// Password-gated on open, same admin password as TikTok connect/disconnect.
+
+const TRACKER_RESULT_LABEL = { DEAD: "Dead", BREAK_EVEN: "Break Even", WINNER: "Winner" };
+const TRACKER_RESULT_ROW_CLASS = { DEAD: "tracker-row-dead", BREAK_EVEN: "tracker-row-breakeven", WINNER: "tracker-row-winner" };
+const TRACKER_RESULT_BADGE_TONE = { DEAD: "neutral", BREAK_EVEN: "warn", WINNER: "good" };
+
+let trackerDeleteTarget = null; // { kind: "test" | "winner", id }
+
+// Ensures a cached, verified password before every Tracker call. Any 401
+// (wrong / stale password) clears the cache so the very next call re-prompts.
+async function trackerAuthedCall(apiFn, ...args) {
+  if (!state.tracker.password) {
+    const pw = await askTiktokPassword({ title: "Tracker", hint: "Enter the dashboard password to open the Tracker." });
+    if (!pw) {
+      const err = new Error("Password required.");
+      throw err;
+    }
+    state.tracker.password = pw;
+  }
+  try {
+    return await apiFn(state.tracker.password, ...args);
+  } catch (err) {
+    if (err.status === 401) {
+      state.tracker.password = null;
+      state.tracker.unlocked = false;
+    }
+    throw err;
+  }
+}
+
+function applyTrackerTabUI(tab) {
+  document.querySelectorAll("#trackerTabs .tracker-tab").forEach((b) => b.classList.toggle("active", b.dataset.trackerTab === tab));
+  document.getElementById("trackerTestsWrap").hidden = tab !== "tests";
+  document.getElementById("trackerWinnersWrap").hidden = tab !== "winners";
+  document.getElementById("trackerAddWinnerBtn").hidden = tab !== "winners";
+}
+
+function setTrackerTab(tab) {
+  state.tracker.tab = tab;
+  applyTrackerTabUI(tab);
+  renderTrackerActive();
+}
+
+function setTrackerOfferFilter(v) {
+  state.tracker.offerFilter = v;
+  document.querySelectorAll("#trackerOfferFilter .tracker-filter-btn").forEach((b) => b.classList.toggle("active", b.dataset.trackerOffer === v));
+  renderTrackerActive();
+}
+
+function renderTrackerActive() {
+  if (state.tracker.tab === "tests") renderTrackerTests();
+  else renderTrackerWinners();
+}
+
+async function openTrackerModal() {
+  document.getElementById("trackerModal").classList.add("open");
+  document.getElementById("trackerError").textContent = "";
+  applyTrackerTabUI(state.tracker.tab);
+  await loadTrackerData();
+}
+
+function closeTrackerModal() {
+  document.getElementById("trackerModal").classList.remove("open");
+}
+
+async function loadTrackerData() {
+  const errEl = document.getElementById("trackerError");
+  errEl.textContent = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const data = await trackerAuthedCall(trackerList);
+      state.tracker.tests = data.tests || [];
+      state.tracker.winners = data.winners || [];
+      state.tracker.unlocked = true;
+      renderTrackerActive();
+      return;
+    } catch (err) {
+      if (err.status === 401 && attempt === 0) continue; // password was cleared — loop re-prompts once
+      errEl.textContent = err.message || "Couldn't load the Tracker.";
+      if (!state.tracker.password) closeTrackerModal();
+      return;
+    }
+  }
+}
+
+function trackerFilteredTests() {
+  const f = state.tracker.offerFilter;
+  if (f === "all") return state.tracker.tests;
+  return state.tracker.tests.filter((r) => String(r.offer || "").toUpperCase() === f);
+}
+
+function trackerFilteredWinners() {
+  const f = state.tracker.offerFilter;
+  if (f === "all") return state.tracker.winners;
+  return state.tracker.winners.filter((r) => String(r.offer || "").toUpperCase() === f);
+}
+
+function renderTrackerTests() {
+  const wrap = document.getElementById("trackerTestsWrap");
+  const rows = trackerFilteredTests();
+  if (!rows.length) {
+    wrap.innerHTML = `<p class="tracker-empty">No tested ads yet. Ads launched through Campaign Creator show up here automatically once their test day ends.</p>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <table class="tracker-table">
+      <thead>
+        <tr>
+          <th>SN</th><th>Offer</th><th>Type</th><th>Hook</th>
+          <th class="num">CPA</th><th class="num">CPNC</th><th class="num">EPC</th><th class="num">ROAS</th>
+          <th>Result</th><th>Notes</th><th></th>
+        </tr>
+      </thead>
+      <tbody>${rows.map(trackerTestRowHtml).join("")}</tbody>
+    </table>`;
+}
+
+function trackerTestRowHtml(r) {
+  const rowClass = TRACKER_RESULT_ROW_CLASS[r.result] || "";
+  const typeClass = r.type === "VIDEOS" ? "tracker-type-videos" : "tracker-type-slides";
+  const tone = TRACKER_RESULT_BADGE_TONE[r.result] || "neutral";
+  return `
+    <tr class="tracker-row ${rowClass}" data-tracker-test-id="${escapeHtml(r.id)}">
+      <td class="tracker-sn" title="${escapeHtml(r.sn)}">${escapeHtml(r.sn)}</td>
+      <td>
+        <select class="tracker-input" data-tracker-field="offer">
+          <option value="" ${!r.offer ? "selected" : ""}>—</option>
+          <option value="CPI" ${r.offer === "CPI" ? "selected" : ""}>CPI</option>
+          <option value="SWEEPS" ${r.offer === "SWEEPS" ? "selected" : ""}>Sweeps</option>
+        </select>
+      </td>
+      <td class="${typeClass}">${r.type === "VIDEOS" ? "Videos" : "Slides"}</td>
+      <td><input type="text" class="tracker-input" data-tracker-field="hook" value="${escapeHtml(r.hook || "")}" placeholder="Hook…" /></td>
+      <td class="num">${money(r.cpa)}</td>
+      <td class="num">${money(r.cpnc)}</td>
+      <td class="num">${money(r.epc)}</td>
+      <td class="num roas-cell" style="color:${roasColor(r.roas)}">${(Number(r.roas) || 0).toFixed(2)}x</td>
+      <td><span class="status-badge ${tone}">${TRACKER_RESULT_LABEL[r.result] || r.result}</span></td>
+      <td><input type="text" class="tracker-input" data-tracker-field="notes" value="${escapeHtml(r.notes || "")}" placeholder="Notes…" /></td>
+      <td><button type="button" class="tracker-del-btn" data-tracker-del="test">Delete</button></td>
+    </tr>`;
+}
+
+function renderTrackerWinners() {
+  const wrap = document.getElementById("trackerWinnersWrap");
+  const rows = trackerFilteredWinners();
+  if (!rows.length) {
+    wrap.innerHTML = `<p class="tracker-empty">No winners saved yet. Use “+ Add Row” to log one.</p>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <table class="tracker-table">
+      <thead>
+        <tr>
+          <th>SN</th><th>Offer</th><th>Type</th><th>Hook</th>
+          <th class="num">Total Spend</th><th class="num">Total Revenue</th><th class="num">ROAS</th><th>Notes</th><th></th>
+        </tr>
+      </thead>
+      <tbody>${rows.map((r, i) => trackerWinnerRowHtml(r, i + 1)).join("")}</tbody>
+    </table>`;
+}
+
+function trackerWinnerRowHtml(r, sn) {
+  const spend = Number(r.total_spend) || 0;
+  const revenue = Number(r.total_revenue) || 0;
+  const roas = ratio(revenue, spend);
+  const typeClass = r.type === "VIDEOS" ? "tracker-type-videos" : r.type === "SLIDES" ? "tracker-type-slides" : "";
+  return `
+    <tr data-tracker-winner-id="${escapeHtml(r.id)}">
+      <td>${sn}</td>
+      <td>
+        <select class="tracker-input" data-tracker-field="offer">
+          <option value="" ${!r.offer ? "selected" : ""}>—</option>
+          <option value="CPI" ${r.offer === "CPI" ? "selected" : ""}>CPI</option>
+          <option value="SWEEPS" ${r.offer === "SWEEPS" ? "selected" : ""}>Sweeps</option>
+        </select>
+      </td>
+      <td>
+        <select class="tracker-input tracker-type-select ${typeClass}" data-tracker-field="type">
+          <option value="" ${!r.type ? "selected" : ""}>—</option>
+          <option value="SLIDES" ${r.type === "SLIDES" ? "selected" : ""}>Slides</option>
+          <option value="VIDEOS" ${r.type === "VIDEOS" ? "selected" : ""}>Videos</option>
+        </select>
+      </td>
+      <td><input type="text" class="tracker-input" data-tracker-field="hook" value="${escapeHtml(r.hook || "")}" placeholder="Hook…" /></td>
+      <td class="num"><input type="number" min="0" step="0.01" class="tracker-input tracker-num" data-tracker-field="total_spend" value="${spend}" /></td>
+      <td class="num"><input type="number" min="0" step="0.01" class="tracker-input tracker-num" data-tracker-field="total_revenue" value="${revenue}" /></td>
+      <td class="num roas-cell" style="color:${roasColor(roas)}">${roas.toFixed(2)}x</td>
+      <td><input type="text" class="tracker-input" data-tracker-field="notes" value="${escapeHtml(r.notes || "")}" placeholder="Notes…" /></td>
+      <td><button type="button" class="tracker-del-btn" data-tracker-del="winner">Delete</button></td>
+    </tr>`;
+}
+
+async function saveTrackerTestField(id, field, rawValue) {
+  const patch = { [field]: rawValue === "" ? null : rawValue };
+  try {
+    const { test } = await trackerAuthedCall(trackerUpdateTest, id, patch);
+    const idx = state.tracker.tests.findIndex((r) => r.id === id);
+    if (idx !== -1) state.tracker.tests[idx] = test;
+    renderTrackerActive();
+  } catch (err) {
+    document.getElementById("trackerError").textContent = err.message || "Couldn't save.";
+    renderTrackerActive(); // revert the field to the last-known-good value
+  }
+}
+
+async function saveTrackerWinnerField(id, field, rawValue) {
+  const isNum = field === "total_spend" || field === "total_revenue";
+  const value = isNum ? Number(rawValue) || 0 : rawValue === "" ? null : rawValue;
+  try {
+    const { winner } = await trackerAuthedCall(trackerUpdateWinner, id, { [field]: value });
+    const idx = state.tracker.winners.findIndex((r) => r.id === id);
+    if (idx !== -1) state.tracker.winners[idx] = winner;
+    renderTrackerActive();
+  } catch (err) {
+    document.getElementById("trackerError").textContent = err.message || "Couldn't save.";
+    renderTrackerActive();
+  }
+}
+
+function trackerFieldChangeHandler(e) {
+  const el = e.target.closest("[data-tracker-field]");
+  if (!el) return;
+  const field = el.dataset.trackerField;
+  const testRow = el.closest("[data-tracker-test-id]");
+  const winnerRow = el.closest("[data-tracker-winner-id]");
+  if (testRow) saveTrackerTestField(testRow.dataset.trackerTestId, field, el.value);
+  else if (winnerRow) saveTrackerWinnerField(winnerRow.dataset.trackerWinnerId, field, el.value);
+}
+
+async function addTrackerWinnerRow() {
+  try {
+    const { winner } = await trackerAuthedCall(trackerCreateWinner);
+    state.tracker.winners.push(winner);
+    renderTrackerActive();
+  } catch (err) {
+    document.getElementById("trackerError").textContent = err.message || "Couldn't add the row.";
+  }
+}
+
+function trackerDeleteClickHandler(e) {
+  const btn = e.target.closest("[data-tracker-del]");
+  if (!btn) return;
+  const row = btn.closest("[data-tracker-test-id],[data-tracker-winner-id]");
+  const id = row && (row.dataset.trackerTestId || row.dataset.trackerWinnerId);
+  if (!id) return;
+  trackerDeleteTarget = { kind: btn.dataset.trackerDel, id };
+  document.getElementById("trackerDeleteModal").classList.add("open");
+}
+
+function closeTrackerDeleteModal() {
+  document.getElementById("trackerDeleteModal").classList.remove("open");
+  trackerDeleteTarget = null;
+}
+
+async function confirmTrackerDelete() {
+  if (!trackerDeleteTarget) return closeTrackerDeleteModal();
+  const { kind, id } = trackerDeleteTarget;
+  try {
+    if (kind === "test") {
+      await trackerAuthedCall(trackerDeleteTest, id);
+      state.tracker.tests = state.tracker.tests.filter((r) => r.id !== id);
+    } else {
+      await trackerAuthedCall(trackerDeleteWinner, id);
+      state.tracker.winners = state.tracker.winners.filter((r) => r.id !== id);
+    }
+    closeTrackerDeleteModal();
+    renderTrackerActive();
+  } catch (err) {
+    trackerDeleteTarget = null;
+    document.getElementById("trackerDeleteModal").classList.remove("open");
+    document.getElementById("trackerError").textContent = err.message || "Couldn't delete.";
+  }
+}
+
+function wireTrackerEvents() {
+  document.getElementById("closeTrackerModal").addEventListener("click", closeTrackerModal);
+  document.getElementById("trackerModal").addEventListener("click", (e) => {
+    if (e.target.id === "trackerModal") closeTrackerModal();
+  });
+
+  document.getElementById("trackerTabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-tracker-tab]");
+    if (btn) setTrackerTab(btn.dataset.trackerTab);
+  });
+  document.getElementById("trackerOfferFilter").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-tracker-offer]");
+    if (btn) setTrackerOfferFilter(btn.dataset.trackerOffer);
+  });
+  document.getElementById("trackerAddWinnerBtn").addEventListener("click", addTrackerWinnerRow);
+
+  document.getElementById("trackerTestsWrap").addEventListener("change", trackerFieldChangeHandler);
+  document.getElementById("trackerTestsWrap").addEventListener("click", trackerDeleteClickHandler);
+  document.getElementById("trackerWinnersWrap").addEventListener("change", trackerFieldChangeHandler);
+  document.getElementById("trackerWinnersWrap").addEventListener("click", trackerDeleteClickHandler);
+
+  document.getElementById("closeTrackerDeleteModal").addEventListener("click", closeTrackerDeleteModal);
+  document.getElementById("cancelTrackerDeleteBtn").addEventListener("click", closeTrackerDeleteModal);
+  document.getElementById("trackerDeleteModal").addEventListener("click", (e) => {
+    if (e.target.id === "trackerDeleteModal") closeTrackerDeleteModal();
+  });
+  document.getElementById("confirmTrackerDeleteBtn").addEventListener("click", confirmTrackerDelete);
 }

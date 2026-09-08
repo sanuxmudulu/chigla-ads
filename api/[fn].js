@@ -26,6 +26,8 @@ const HANDLERS = {
   "campaign-creator": () => require("../netlify/functions/campaign-creator.js"),
   "campaign-creator-templates": () => require("../netlify/functions/campaign-creator-templates.js"),
   "campaign-creator-run": () => require("../netlify/functions/campaign-creator-run.js"),
+  "tracker": () => require("../netlify/functions/tracker.js"),
+  "tracker-run": () => require("../netlify/functions/tracker-run.js"),
 };
 
 module.exports = async (req, res) => {

@@ -945,3 +945,85 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .cc-tzblock-fields label { display: flex; align-items: center; gap: 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); font-weight: 600; }
 .cc-tzblock-fields input[type="date"] { width: auto; }
 .cc-tzblock-fields select { width: auto; min-width: 64px; }
+
+/* ============================== TRACKER ============================== */
+.tracker-modal { width: 1080px; max-width: 96vw; }
+
+.tracker-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+
+.tracker-tabs, .tracker-offer-filter {
+  display: flex; gap: 4px; background: var(--bg-1); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 3px;
+}
+.tracker-tab, .tracker-filter-btn {
+  background: none; border: none; color: var(--text-2); font-size: 12px; font-weight: 600;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; transition: all 0.15s var(--ease);
+  font-family: inherit;
+}
+.tracker-tab:hover, .tracker-filter-btn:hover { color: var(--text-0); }
+.tracker-tab.active, .tracker-filter-btn.active { background: var(--accent); color: var(--bg-0); }
+
+.tracker-add-winner-btn { margin-left: auto; }
+
+.tracker-table-wrap { overflow-x: auto; }
+.tracker-table { width: 100%; min-width: 900px; border-collapse: collapse; font-size: 12.5px; }
+.tracker-table th {
+  text-align: left; font-weight: 600; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-2); padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.tracker-table th.num, .tracker-table td.num { text-align: right; }
+.tracker-table td { padding: 7px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); vertical-align: middle; }
+.tracker-table tr:last-child td { border-bottom: none; }
+.tracker-table tr.tracker-row, .tracker-table tbody tr { transition: background 0.15s var(--ease); }
+.tracker-table tbody tr:hover { background: var(--bg-2); }
+
+.tracker-sn { font-weight: 700; color: var(--text-0); white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+
+.tracker-input {
+  width: 100%; min-width: 84px; background: var(--bg-1); border: 1px solid var(--border);
+  color: var(--text-0); font-size: 12px; padding: 5px 7px; border-radius: 6px; font-family: inherit;
+}
+.tracker-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); outline: none; }
+.tracker-table td:has(input.tracker-input) { min-width: 130px; }
+.tracker-num { width: 92px; min-width: 92px; text-align: right; }
+
+.tracker-del-btn {
+  background: none; border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger);
+  font-size: 11px; font-weight: 600; padding: 5px 10px; border-radius: var(--radius-sm);
+  cursor: pointer; white-space: nowrap; transition: background 0.15s var(--ease);
+}
+.tracker-del-btn:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
+
+.tracker-empty { color: var(--text-2); font-size: 13px; padding: 24px 4px; text-align: center; }
+
+/* Type cell — same reddish/bluish coding on both Tests (plain cell) and
+   Winners (a select, since it's manually chosen there). */
+td.tracker-type-videos { color: var(--accent-2); font-weight: 700; }
+td.tracker-type-slides { color: var(--loss); font-weight: 700; }
+select.tracker-type-select.tracker-type-videos {
+  color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 55%, transparent);
+  background: color-mix(in srgb, var(--accent-2) 10%, var(--bg-1));
+}
+select.tracker-type-select.tracker-type-slides {
+  color: var(--loss); border-color: color-mix(in srgb, var(--loss) 55%, transparent);
+  background: color-mix(in srgb, var(--loss) 10%, var(--bg-1));
+}
+
+/* Result row tints — Dead: neutral/muted, Break Even: warm amber, Winner:
+   green tint + the same gold border treatment as a hot-ROAS Detailed Metrics row. */
+.tracker-table tr.tracker-row-dead { background: color-mix(in srgb, var(--text-2) 6%, transparent); }
+.tracker-table tr.tracker-row-dead:hover { background: color-mix(in srgb, var(--text-2) 10%, transparent); }
+
+.tracker-table tr.tracker-row-breakeven { background: color-mix(in srgb, #ffb020 8%, transparent); }
+.tracker-table tr.tracker-row-breakeven:hover { background: color-mix(in srgb, #ffb020 13%, transparent); }
+
+.tracker-table tr.tracker-row-winner {
+  background: color-mix(in srgb, var(--profit) 8%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--win-gold) 78%, transparent),
+    inset 0 0 14px color-mix(in srgb, var(--win-gold) 14%, transparent);
+}
+.tracker-table tr.tracker-row-winner:hover {
+  background: color-mix(in srgb, var(--profit) 13%, transparent);
+  box-shadow: inset 0 0 0 1px var(--win-gold), inset 0 0 18px color-mix(in srgb, var(--win-gold) 20%, transparent);
+}

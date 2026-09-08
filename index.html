@@ -164,6 +164,13 @@
       <span>Campaign Creator</span>
     </button>
 
+    <button class="tools-item" id="toolsTrackerBtn">
+      <span class="tools-item-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+      </span>
+      <span>Tracker</span>
+    </button>
+
     <div class="tools-expandable" id="toolsThemesGroup">
       <button class="tools-item tools-expand-toggle" id="toolsThemesToggle">
         <span class="tools-item-icon">
@@ -246,6 +253,48 @@
     <div class="modal-actions">
       <button class="icon-btn" id="cancelDeleteCampaignBtn">Cancel</button>
       <button class="icon-btn danger" id="confirmDeleteCampaignBtn">Delete Campaign</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TRACKER MODAL ============ -->
+<div class="modal-backdrop" id="trackerModal">
+  <div class="modal modal-lg tracker-modal">
+    <div class="modal-header">
+      <h3>Tracker</h3>
+      <button id="closeTrackerModal">✕</button>
+    </div>
+
+    <div class="tracker-toolbar">
+      <div class="tracker-tabs" id="trackerTabs">
+        <button type="button" class="tracker-tab active" data-tracker-tab="tests">Tests</button>
+        <button type="button" class="tracker-tab" data-tracker-tab="winners">Winners</button>
+      </div>
+      <div class="tracker-offer-filter" id="trackerOfferFilter">
+        <button type="button" class="tracker-filter-btn active" data-tracker-offer="all">All</button>
+        <button type="button" class="tracker-filter-btn" data-tracker-offer="CPI">CPI</button>
+        <button type="button" class="tracker-filter-btn" data-tracker-offer="SWEEPS">Sweeps</button>
+      </div>
+      <button type="button" class="icon-btn primary tracker-add-winner-btn" id="trackerAddWinnerBtn" hidden>+ Add Row</button>
+    </div>
+
+    <div class="modal-error" id="trackerError"></div>
+    <div id="trackerTestsWrap" class="tracker-table-wrap"></div>
+    <div id="trackerWinnersWrap" class="tracker-table-wrap" hidden></div>
+  </div>
+</div>
+
+<!-- ============ TRACKER DELETE CONFIRM MODAL ============ -->
+<div class="modal-backdrop" id="trackerDeleteModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Confirm deletion?</h3>
+      <button id="closeTrackerDeleteModal">✕</button>
+    </div>
+    <p>Can't be undone.</p>
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelTrackerDeleteBtn">Cancel</button>
+      <button class="icon-btn danger" id="confirmTrackerDeleteBtn">Confirm</button>
     </div>
   </div>
 </div>

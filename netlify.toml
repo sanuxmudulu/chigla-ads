@@ -17,6 +17,13 @@
 [functions."cleanup"]
   schedule = "20 5 * * *"
 
+# Tracker auto-populate (~00:30 America/New_York, just after cleanup). Targets
+# YESTERDAY's already-closed NY date via TikTok's/Glitchy's own historical
+# report APIs, so exact-minute timing doesn't matter. Same job runs on Vercel
+# via vercel.json "crons". See netlify/functions/tracker-run.js.
+[functions."tracker-run"]
+  schedule = "30 5 * * *"
+
 # NOTE: Campaign Creator duplication has NO scheduler (2026-09-05, by design —
 # duplication is manual, triggered only by the dashboard's "Dupe" button). A
 # */5 cron here previously mirrored one in vercel.json, but Vercel's Hobby

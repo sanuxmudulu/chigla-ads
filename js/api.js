@@ -522,6 +522,61 @@ export async function listWhWarmup() {
   return readTiktokResponse(res, "Couldn't load WH Warmup campaigns"); // { campaigns: [...] }
 }
 
+// ---------------- Tracker (Tests + Winners) ----------------
+// Password-gated on every action (the user asked the tool itself to be gated
+// on open, not just on write). All TikTok/Glitchy calls for the auto-populated
+// numbers happen server-side on the daily cron — this endpoint only ever
+// reads/writes Supabase.
+
+export async function trackerList(password) {
+  const res = await fetch("/.netlify/functions/tracker", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "list", password }),
+  });
+  return readTiktokResponse(res, "Couldn't load the Tracker"); // { tests: [...], winners: [...] }
+}
+export async function trackerUpdateTest(password, id, patch) {
+  const res = await fetch("/.netlify/functions/tracker", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "update_test", password, id, patch }),
+  });
+  return readTiktokResponse(res, "Couldn't save"); // { test }
+}
+export async function trackerDeleteTest(password, id) {
+  const res = await fetch("/.netlify/functions/tracker", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete_test", password, id }),
+  });
+  return readTiktokResponse(res, "Couldn't delete the row");
+}
+export async function trackerCreateWinner(password) {
+  const res = await fetch("/.netlify/functions/tracker", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "create_winner", password }),
+  });
+  return readTiktokResponse(res, "Couldn't add the row"); // { winner }
+}
+export async function trackerUpdateWinner(password, id, patch) {
+  const res = await fetch("/.netlify/functions/tracker", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "update_winner", password, id, patch }),
+  });
+  return readTiktokResponse(res, "Couldn't save"); // { winner }
+}
+export async function trackerDeleteWinner(password, id) {
+  const res = await fetch("/.netlify/functions/tracker", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete_winner", password, id }),
+  });
+  return readTiktokResponse(res, "Couldn't delete the row");
+}
+
 // ---------------- Theme persistence ----------------
 
 export function loadTheme(defaultTheme) {
