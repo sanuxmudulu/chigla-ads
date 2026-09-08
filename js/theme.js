@@ -1,7 +1,7 @@
 import { loadTheme, saveTheme } from "./api.js";
 
-const DEFAULT_THEME = "terminal";
-const THEMES = ["terminal", "vice", "bullion"];
+const DEFAULT_THEME = "kuzan";
+const THEMES = ["kuzan", "vice"];
 
 export function initTheme(onChange) {
   const theme = THEMES.includes(loadTheme(DEFAULT_THEME)) ? loadTheme(DEFAULT_THEME) : DEFAULT_THEME;

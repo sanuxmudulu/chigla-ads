@@ -1,9 +1,9 @@
 /* ============================================================
    THEME DEFINITIONS
    Two full personalities, not just recolors. Each theme sets
-   its own palette, type pairing, and ambient motion layer.
-   Applied via [data-theme] on <html>. Persisted in localStorage
-   by js/theme.js.
+   its own palette, type pairing, and ambient motion/background
+   layer. Applied via [data-theme] on <html>. Persisted in
+   localStorage by js/theme.js.
    ============================================================ */
 
 :root {
@@ -15,34 +15,37 @@
 }
 
 /* ---------------------------------------------------------- */
-/* TERMINAL — black / neon green, trading-terminal feel        */
+/* KUZAN — icy glassmorphism, the main theme. Frosted glass    */
+/* panels over a fixed cold-blue background layer.             */
 /* ---------------------------------------------------------- */
-[data-theme="terminal"] {
-  --bg-0: #050706;
-  --bg-1: #0a0f0c;
-  --bg-2: #0f1613;
-  --bg-elevated: #121a16;
-  --text-0: #d9ffe4;
-  --text-1: #8fd9a8;
-  --text-2: #4d7a5c;
-  --accent: #00ff7f;
-  --accent-soft: #00ff7f33;
-  --accent-2: #00d9ff;
-  --profit: #00ff7f;
-  --loss: #ff4d5e;
-  --gold: #00ff7f;
-  --danger: #ff3b4e;
-  --border: rgba(0, 255, 127, 0.16);
-  --border-strong: rgba(0, 255, 127, 0.4);
-  --shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
-  --glow: 0 0 18px rgba(0, 255, 127, 0.45);
-  --glow-strong: 0 0 28px rgba(0, 255, 127, 0.7);
-  --font-heading: 'JetBrains Mono', 'Consolas', monospace;
-  --font-body: 'JetBrains Mono', 'Consolas', monospace;
-  --font-tabular: 'JetBrains Mono', monospace;
-  --letter-spacing-heading: 0.04em;
-  --card-bg: linear-gradient(180deg, rgba(15, 22, 19, 0.9), rgba(8, 12, 10, 0.9));
-  --scrollbar: #123420;
+[data-theme="kuzan"] {
+  --bg-0: #081936;
+  --bg-1: #0D1D37;
+  --bg-2: #172F53;
+  --bg-elevated: #214873;
+  --text-0: #EAF6FF;
+  --text-1: #B7CAE3;
+  --text-2: #7F96B8;
+  --accent: #3A77CC;
+  --accent-soft: #3A77CC33;
+  --accent-2: #67E8F9;
+  --profit: #39E6B4;
+  --loss: #FF5C7A;
+  --gold: #F4C35D;
+  --warn: #F4C35D;
+  --danger: #FF5C7A;
+  --border: rgba(94, 151, 210, 0.24);
+  --border-strong: rgba(83, 157, 222, 0.55);
+  --border-hover: #8DADD2;
+  --shadow: 0 12px 44px rgba(3, 9, 22, 0.65);
+  --glow: 0 0 20px rgba(83, 157, 222, 0.4);
+  --glow-strong: 0 0 34px rgba(103, 232, 249, 0.5);
+  --font-heading: 'Rajdhani', 'Inter', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-tabular: 'Inter', sans-serif;
+  --letter-spacing-heading: 0.03em;
+  --card-bg: linear-gradient(135deg, rgba(10, 25, 54, 0.60), rgba(23, 47, 83, 0.72));
+  --scrollbar: #274772;
 }
 
 /* ---------------------------------------------------------- */
@@ -62,6 +65,7 @@
   --profit: #05ffa1;
   --loss: #ff3d6e;
   --gold: #ff2d95;
+  --warn: #ffb020;
   --danger: #ff00c8;
   --border: rgba(255, 45, 149, 0.22);
   --border-strong: rgba(255, 45, 149, 0.5);
@@ -76,90 +80,28 @@
   --scrollbar: #3a1a66;
 }
 
-/* ---------------------------------------------------------- */
-/* BULLION — shiny black / metallic gold, premium terminal      */
-/* ---------------------------------------------------------- */
-[data-theme="bullion"] {
-  --bg-0: #0a0806;
-  --bg-1: #120e09;
-  --bg-2: #191207;
-  --bg-elevated: #1f1609;
-  --text-0: #f5e8c8;
-  --text-1: #d8b878;
-  --text-2: #8f7850;
-  --accent: #e8c46a;
-  --accent-soft: #e8c46a2b;
-  --accent-2: #f5d78a;
-  --profit: #6fe8a0;
-  --loss: #ff6b6b;
-  --gold: #e8c46a;
-  --danger: #d13a4e;
-  --border: rgba(232, 196, 106, 0.18);
-  --border-strong: rgba(232, 196, 106, 0.42);
-  --shadow: 0 10px 36px rgba(0, 0, 0, 0.65);
-  --glow: 0 0 20px rgba(232, 196, 106, 0.35);
-  --glow-strong: 0 0 36px rgba(232, 196, 106, 0.6);
-  --font-heading: 'Rajdhani', 'Inter', sans-serif;
-  --font-body: 'Inter', sans-serif;
-  --font-tabular: 'Inter', sans-serif;
-  --letter-spacing-heading: 0.03em;
-  --card-bg: linear-gradient(165deg, rgba(31, 22, 9, 0.92), rgba(10, 8, 6, 0.95));
-  --scrollbar: #4a3a1c;
-  --gold-foil: linear-gradient(115deg, #7a5f28 0%, #e8c46a 20%, #fff6dd 36%, #caa356 52%, #8a6a2e 66%, #f5d78a 82%, #b8934a 100%);
-}
-
-[data-theme="bullion"] .brand {
-  background: var(--gold-foil);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  text-shadow: none;
-  filter: drop-shadow(0 0 10px rgba(232, 196, 106, 0.35));
-}
-
-[data-theme="bullion"] .kpi-icon {
-  background: radial-gradient(circle at 32% 26%, #fff6dd 0%, #e8c46a 32%, #a97c33 68%, #6b4e1f 100%);
-  border-color: rgba(232, 196, 106, 0.55);
-  box-shadow: 0 0 0 5px rgba(232, 196, 106, 0.10), 0 0 26px rgba(232, 196, 106, 0.45), inset 0 0 8px rgba(255, 255, 255, 0.3);
-  color: #2a1c08;
-}
-
-[data-theme="bullion"] .card,
-[data-theme="bullion"] .kpi-card {
-  border-color: var(--border);
-  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-
 /* ============================================================
-   AMBIENT BACKGROUND LAYERS — one signature motion per theme.
-   All exist in the DOM; only the active theme's is shown.
+   AMBIENT BACKGROUND LAYERS — one signature background per
+   theme. Both exist in the DOM; only the active theme's is
+   shown. position:fixed (from .ambient below) keeps it pinned
+   to the viewport, so it never moves while content scrolls.
    ============================================================ */
 .ambient { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; display: none; }
 
-/* Terminal: scanlines + slow flicker + faint falling glyphs glow */
-.ambient-terminal {
-  background:
-    repeating-linear-gradient(
-      to bottom,
-      rgba(0, 255, 127, 0.035) 0px,
-      rgba(0, 255, 127, 0.035) 1px,
-      transparent 1px,
-      transparent 3px
-    );
-  animation: scanlineDrift 9s linear infinite, flicker 6s ease-in-out infinite;
+/* Kuzan: the icy Kuzan GIF, full-bleed, fixed, with a cold navy
+   overlay gradient so foreground text stays readable without
+   losing the blue/icy atmosphere. See README note in this repo
+   for the expected file path: assets/themes/kuzan-bg.gif.
+   Missing file degrades gracefully to just the gradient. */
+.ambient-kuzan {
+  background-image:
+    linear-gradient(165deg, rgba(8, 25, 54, 0.58) 0%, rgba(13, 29, 55, 0.32) 45%, rgba(23, 47, 83, 0.58) 100%),
+    url('../assets/themes/kuzan-bg.gif');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
 }
-[data-theme="terminal"] .ambient-terminal { display: block; }
-
-@keyframes scanlineDrift {
-  0% { background-position: 0 0; }
-  100% { background-position: 0 120px; }
-}
-@keyframes flicker {
-  0%, 96%, 100% { opacity: 1; }
-  97% { opacity: 0.85; }
-  98% { opacity: 1; }
-  99% { opacity: 0.9; }
-}
+[data-theme="kuzan"] .ambient-kuzan { display: block; }
 
 /* Vice: synthwave grid horizon + glowing sun */
 .ambient-vice {
@@ -203,16 +145,53 @@
   50% { opacity: 0.8; transform: translateX(-50%) scale(1.04); }
 }
 
-/* Bullion: warm ambient gold lighting, no motion gimmicks — just a slow glow breathe */
-.ambient-bullion {
-  background:
-    radial-gradient(circle at 50% -8%, rgba(232, 196, 106, 0.16), transparent 55%),
-    radial-gradient(circle at 88% 92%, rgba(232, 196, 106, 0.08), transparent 45%),
-    radial-gradient(circle at 6% 85%, rgba(232, 196, 106, 0.05), transparent 40%);
-  animation: bullionGlow 8s ease-in-out infinite;
+/* ============================================================
+   KUZAN GLASS PANELS — the frosted-glass treatment. Scoped to
+   the theme (not baked into base.css) so it never affects Vice.
+   Blur only on real panel-sized surfaces, never on small inline
+   controls where it would just waste GPU for no visible effect.
+   ============================================================ */
+[data-theme="kuzan"] .card,
+[data-theme="kuzan"] .kpi-card,
+[data-theme="kuzan"] .modal,
+[data-theme="kuzan"] .tools-drawer,
+[data-theme="kuzan"] .tracker-table-wrap,
+[data-theme="kuzan"] .adgroups-wrap,
+[data-theme="kuzan"] .cc-cta-panel {
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
 }
-[data-theme="bullion"] .ambient-bullion { display: block; }
-@keyframes bullionGlow {
-  0%, 100% { opacity: 0.85; }
-  50% { opacity: 1; }
+
+[data-theme="kuzan"] .card,
+[data-theme="kuzan"] .kpi-card,
+[data-theme="kuzan"] .modal {
+  box-shadow:
+    var(--shadow),
+    inset 0 0 0 1px rgba(83, 157, 222, 0.12),
+    inset 0 1px 0 rgba(234, 246, 255, 0.08);
 }
+[data-theme="kuzan"] .card:hover,
+[data-theme="kuzan"] .kpi-card:hover {
+  border-color: var(--border-hover);
+}
+
+[data-theme="kuzan"] .modal,
+[data-theme="kuzan"] .tools-drawer {
+  background: linear-gradient(160deg, rgba(13, 29, 55, 0.78), rgba(23, 47, 83, 0.85));
+}
+[data-theme="kuzan"] .modal { border-color: var(--border-strong); }
+
+[data-theme="kuzan"] .topbar {
+  background: linear-gradient(120deg, rgba(8, 25, 54, 0.82), rgba(13, 29, 55, 0.88));
+}
+
+[data-theme="kuzan"] select,
+[data-theme="kuzan"] input[type="text"],
+[data-theme="kuzan"] input[type="password"],
+[data-theme="kuzan"] input[type="number"],
+[data-theme="kuzan"] .cc-cta-btn,
+[data-theme="kuzan"] .tracker-input,
+[data-theme="kuzan"] .icon-btn {
+  background: rgba(23, 47, 83, 0.55);
+}
+[data-theme="kuzan"] .icon-btn:hover { border-color: var(--border-hover); color: var(--accent-2); }

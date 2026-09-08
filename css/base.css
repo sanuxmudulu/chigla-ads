@@ -253,7 +253,7 @@ select { cursor: pointer; }
 .bcbal-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: #f4f6f8; font-weight: 700; }
 .bcbal-value { font-size: 15px; font-weight: 700; color: var(--profit); }
 .bcbal-value.ok { color: var(--profit); }
-.bcbal-value.warn { color: #ffb020; }
+.bcbal-value.warn { color: var(--warn); }
 .bcbal-value.bad { color: var(--loss); }
 
 .chart-section canvas { max-height: 320px; }
@@ -307,7 +307,7 @@ td.negative { color: var(--loss); }
   font-family: var(--font-tabular); font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12.5px;
 }
 .bud-left.ok { color: var(--profit); }
-.bud-left.warn { color: #ffb020; }
+.bud-left.warn { color: var(--warn); }
 .bud-left.bad { color: var(--loss); }
 .bud-left.muted { color: var(--text-1); font-weight: 600; }
 .bud-sub { font-size: 11px; font-weight: 600; color: var(--text-1); }
@@ -387,7 +387,7 @@ tr.new-conversion { animation: rowGlow 2.4s ease-out; }
 }
 
 /* ---- profitable-row winner highlight (ROAS ≥ 2 border · ≥ 3 animated glow) ---- */
-:root { --win-gold: #e8c46a; --win-gold-bright: #f7e3a6; }
+:root { --win-gold: #F4C35D; --win-gold-bright: #FF9F43; }
 tr.source-row.roas-gold {
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--win-gold) 78%, transparent),
@@ -701,7 +701,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
   background: var(--bg-2); border: 1px solid var(--border); color: var(--text-1);
 }
 .ec-auto-row.ok { color: var(--profit); border-color: color-mix(in srgb, var(--profit) 40%, var(--border)); }
-.ec-auto-row.warn { color: #ffb020; }
+.ec-auto-row.warn { color: var(--warn); }
 .ec-auto-row.bad { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 40%, var(--border)); }
 .ec-tpl-row {
   display: flex; align-items: center; gap: 6px; padding: 6px 8px;
@@ -781,7 +781,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .wh-result-row .wh-r-status { font-weight: 700; white-space: nowrap; }
 .wh-result-row.ok .wh-r-status { color: var(--profit); }
 .wh-result-row.bad .wh-r-status { color: var(--loss); }
-.wh-result-row.warn .wh-r-status { color: #ffb020; }
+.wh-result-row.warn .wh-r-status { color: var(--warn); }
 .wh-result-row .wh-r-detail { color: var(--text-2); font-size: 11px; }
 
 /* ---- "WHs Warming Up" entry box (WH Warmup step 1) + its list modal ---- */
@@ -815,7 +815,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
   color: var(--text-2); white-space: nowrap;
 }
 .status-badge.good { color: var(--profit); border-color: color-mix(in srgb, var(--profit) 55%, transparent); background: color-mix(in srgb, var(--profit) 10%, transparent); }
-.status-badge.warn { color: #ffb020; border-color: color-mix(in srgb, #ffb020 55%, transparent); background: color-mix(in srgb, #ffb020 10%, transparent); }
+.status-badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .status-badge.bad { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 55%, transparent); background: color-mix(in srgb, var(--loss) 10%, transparent); }
 .status-badge.neutral { color: var(--text-1); }
 .status-badge.none { color: var(--text-2); opacity: 0.6; border-style: dashed; }
@@ -923,7 +923,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .cc-namemap .row, .cc-tzlist .row, .cc-review .row { display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
 .cc-namemap .row span, .cc-tzlist .row span, .cc-review .row span { color: var(--text-2); }
 .cc-namemap .row strong, .cc-tzlist .row strong, .cc-review .row strong { color: var(--text-1); text-align: right; word-break: break-all; }
-.cc-notes .note { font-size: 11px; color: #ffb020; }
+.cc-notes .note { font-size: 11px; color: var(--warn); }
 .cc-notes .note.bad { color: var(--loss); }
 .cc-time { display: flex; align-items: center; gap: 8px; }
 .cc-time select { width: auto; min-width: 74px; }
@@ -1014,8 +1014,8 @@ select.tracker-type-select.tracker-type-slides {
 .tracker-table tr.tracker-row-dead { background: color-mix(in srgb, var(--text-2) 6%, transparent); }
 .tracker-table tr.tracker-row-dead:hover { background: color-mix(in srgb, var(--text-2) 10%, transparent); }
 
-.tracker-table tr.tracker-row-breakeven { background: color-mix(in srgb, #ffb020 8%, transparent); }
-.tracker-table tr.tracker-row-breakeven:hover { background: color-mix(in srgb, #ffb020 13%, transparent); }
+.tracker-table tr.tracker-row-breakeven { background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.tracker-table tr.tracker-row-breakeven:hover { background: color-mix(in srgb, var(--warn) 13%, transparent); }
 
 .tracker-table tr.tracker-row-winner {
   background: color-mix(in srgb, var(--profit) 8%, transparent);
