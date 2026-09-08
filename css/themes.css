@@ -88,20 +88,25 @@
    ============================================================ */
 .ambient { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; display: none; }
 
-/* Kuzan: the icy Kuzan GIF, full-bleed, fixed, with a cold navy
-   overlay gradient so foreground text stays readable without
-   losing the blue/icy atmosphere. See README note in this repo
-   for the expected file path: assets/themes/kuzan-bg.gif.
-   Missing file degrades gracefully to just the gradient. */
+/* Kuzan: the icy Kuzan background video, full-bleed, fixed, with
+   a cold navy overlay gradient (::after, painted above the video)
+   so foreground text stays readable without losing the blue/icy
+   atmosphere. Expected file: assets/themes/kuzan-bg.mp4. Missing
+   file just shows the gradient — the <video> has no poster/bg. */
 .ambient-kuzan {
-  background-image:
-    linear-gradient(165deg, rgba(8, 25, 54, 0.58) 0%, rgba(13, 29, 55, 0.32) 45%, rgba(23, 47, 83, 0.58) 100%),
-    url('../assets/themes/kuzan-bg.gif');
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
+  background: #081936; /* flash-of-empty-video fallback, matches --bg-0 */
 }
 [data-theme="kuzan"] .ambient-kuzan { display: block; }
+.ambient-kuzan-video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+.ambient-kuzan::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(165deg, rgba(8, 25, 54, 0.58) 0%, rgba(13, 29, 55, 0.32) 45%, rgba(23, 47, 83, 0.58) 100%);
+}
 
 /* Vice: synthwave grid horizon + glowing sun */
 .ambient-vice {
