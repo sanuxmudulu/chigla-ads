@@ -575,6 +575,58 @@ function reviewState(review) {
 //   6. whole campaign manually paused
 //   7. all ad groups individually paused (campaign itself not paused)
 // A few manually-paused ad groups never hide an "Active" row.
+// ---------------------------------------------------------------------------
+// Campaign Creator campaigns under a live automatic appeal show a clearer
+// label/tone than TikTok's raw status — this is the ONE place that decides
+// that relabeling. Every code path that surfaces OR persists a campaign's
+// effective_status must go through this, or they disagree with each other:
+// a previous version applied this only inside the "list" GET handler, so any
+// OTHER path that refreshed the same campaign (expanding its ad groups,
+// toggling it on/off, the appeal-processing tick) wrote/returned TikTok's
+// raw status instead — the dashboard would flip to the raw label the moment
+// that path ran, then flip back once "list" was re-fetched. Never masks a
+// campaign that is genuinely Active/serving right now.
+// ---------------------------------------------------------------------------
+function applyAppealOverlay(campaignRow, appealState) {
+  const st = appealState;
+  if (!st || st === "NONE" || campaignRow.effective_status === "Active") return campaignRow;
+  if (st === "APPEAL_UNDER_REVIEW" || st === "APPEAL_SUBMITTING") {
+    return {
+      ...campaignRow,
+      effective_status: "Appeal Under Review",
+      effective_tone: "warn",
+      status_detail: "Automatic appeal submitted — awaiting TikTok's decision",
+    };
+  }
+  if (st === "APPEAL_REJECTED") {
+    return {
+      ...campaignRow,
+      effective_status: "Appeal Rejected",
+      effective_tone: "bad",
+      status_detail: "TikTok rejected the automatic appeal",
+    };
+  }
+  return campaignRow; // REJECTED / UNSUPPORTED / APPEAL_APPROVED keep TikTok's own label
+}
+
+// Async version for callers that don't already have appeal_state in hand
+// (adgroups / set_campaign_status / set_adgroup_status all look it up by
+// campaign_id). Best-effort: any failure — table not migrated yet, no
+// matching row — just means "no appeal tracking for this campaign", so the
+// row is returned unchanged rather than blocking the caller.
+async function applyAppealOverlayByCampaignId(supabase, campaignId, campaignRow) {
+  try {
+    const { data } = await supabase
+      .from("campaign_creator_campaigns")
+      .select("appeal_state")
+      .eq("campaign_id", String(campaignId))
+      .maybeSingle();
+    return applyAppealOverlay(campaignRow, data?.appeal_state || null);
+  } catch (_) {
+    return campaignRow;
+  }
+}
+
 function deriveEffectiveStatus({ advertiserStatus, campaign, adGroups, reviewByAdGroupId }) {
   const campSecondary = campaign?.secondary_status || "";
   if (!accountHealthy(advertiserStatus) || accountLooksPunished(campSecondary)) {
@@ -1457,6 +1509,8 @@ module.exports = {
   autoProcessReadyEngagements,
   withoutTemporaryCampaigns,
   deriveEffectiveStatus,
+  applyAppealOverlay,
+  applyAppealOverlayByCampaignId,
   deriveAdGroupStatus,
   loadCampaignMetricsForAdvertiser,
   loadCampaignDetail,

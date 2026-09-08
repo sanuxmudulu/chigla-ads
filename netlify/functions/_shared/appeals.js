@@ -308,11 +308,19 @@ function appealStatusIsSomeAppeal(raw) {
 // ---------------------------------------------------------------------------
 // Orchestrator — called once per WAITING_FOR_ACTIVE row per ~60s cycle.
 //
-// Returns { blockDuplication, detail }:
+// Returns { blockDuplication, detail, appealState }:
 //   blockDuplication true  -> caller must NOT run the 20x duplication this tick
 //                             (rejected / appeal under review / appeal rejected)
 //   detail                 -> the loadCampaignDetail result (reused by the
 //                             caller for status persistence + duplicateForRow)
+//   appealState             -> the row's CURRENT appeal_state as of the end of
+//                             this call — i.e. reflecting whatever this very
+//                             call just wrote, not the value it started with.
+//                             The caller needs this (not row.appeal_state,
+//                             which is stale the instant this function writes
+//                             a new value) to overlay the right label onto
+//                             `detail` before persisting/returning it — see
+//                             applyAppealOverlay in _shared/tiktok-mcp.js.
 // ---------------------------------------------------------------------------
 
 async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
@@ -320,16 +328,20 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
   const campaignId = String(row.campaign_id);
   const adgroupId = String(row.initial_adgroup_id || "");
   const state = row.appeal_state || "NONE";
+  let currentState = state; // tracks whatever `persist` below most recently wrote
   const now = () => new Date().toISOString();
   const log = (msg) => console.log(`[appeals] ${campaignId} — ${msg}`);
-  const persist = (patch) => patchAppeal(supabase, campaignId, { ...patch, appeal_updated_at: now() });
+  const persist = (patch) => {
+    if (patch.appeal_state) currentState = patch.appeal_state;
+    return patchAppeal(supabase, campaignId, { ...patch, appeal_updated_at: now() });
+  };
 
   // Terminal appeal states — no more MCP work, just tell the caller whether to
   // hold duplication.
-  if (state === "APPEAL_APPROVED") return { blockDuplication: false, detail: null };
-  if (state === "APPEAL_REJECTED") return { blockDuplication: true, detail: null };
-  if (state === "UNSUPPORTED") return { blockDuplication: true, detail: null };
-  if (!adgroupId) return { blockDuplication: false, detail: null };
+  if (state === "APPEAL_APPROVED") return { blockDuplication: false, detail: null, appealState: state };
+  if (state === "APPEAL_REJECTED") return { blockDuplication: true, detail: null, appealState: state };
+  if (state === "UNSUPPORTED") return { blockDuplication: true, detail: null, appealState: state };
+  if (!adgroupId) return { blockDuplication: false, detail: null, appealState: state };
 
   // Current live state of the campaign / initial ad group.
   let detail;
@@ -342,7 +354,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
       timezone: null,
     });
   } catch (_) {
-    return { blockDuplication: false, detail: null }; // let duplicateForRow surface it
+    return { blockDuplication: false, detail: null, appealState: state }; // let duplicateForRow surface it
   }
   const ag = (detail.adGroups || []).find((g) => String(g.adgroup_id) === adgroupId);
   const label = String((ag ? ag.status_label : detail.effective_status) || "").toLowerCase();
@@ -353,12 +365,12 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
       await persist({ appeal_state: "APPEAL_APPROVED" });
       log("appeal approved / campaign active");
     }
-    return { blockDuplication: false, detail };
+    return { blockDuplication: false, detail, appealState: currentState };
   }
 
   // ---- advertiser suspended / punished — not an appeal case ----
   if (label.includes("suspend") || label.includes("punish") || label.includes("account")) {
-    return { blockDuplication: false, detail };
+    return { blockDuplication: false, detail, appealState: currentState };
   }
 
   // ---- an appeal is already in flight: poll TikTok's decision ----
@@ -368,33 +380,33 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
     if (appealStatusApproved(appealStatus)) {
       await persist({ appeal_state: "APPEAL_APPROVED" });
       log(`appeal approved (appeal_status=${appealStatus})`);
-      return { blockDuplication: false, detail };
+      return { blockDuplication: false, detail, appealState: currentState };
     }
     if (appealStatusRejected(appealStatus)) {
       await persist({ appeal_state: "APPEAL_REJECTED" });
       log(`appeal rejected by TikTok (appeal_status=${appealStatus})`);
-      return { blockDuplication: true, detail };
+      return { blockDuplication: true, detail, appealState: currentState };
     }
-    return { blockDuplication: true, detail }; // still pending
+    return { blockDuplication: true, detail, appealState: currentState }; // still pending
   }
 
   // ---- state is NONE or REJECTED ----
   const rejectedNow = label === "rejected" || detail.effective_status === "Rejected";
   if (!rejectedNow) {
-    return { blockDuplication: true, detail }; // pending / in review — wait, don't appeal
+    return { blockDuplication: true, detail, appealState: currentState }; // pending / in review — wait, don't appeal
   }
 
   // Hard idempotency latch — one successful automatic appeal per lifecycle, ever.
-  if (row.appeal_attempted) return { blockDuplication: true, detail };
+  if (row.appeal_attempted) return { blockDuplication: true, detail, appealState: currentState };
 
   // Belt for the duplication processor's 3-day give-up: never appeal an old row.
   if (row.created_at && Date.now() - Date.parse(row.created_at) > GIVE_UP_AFTER_MS) {
-    return { blockDuplication: true, detail };
+    return { blockDuplication: true, detail, appealState: currentState };
   }
 
   // Technical-retry cap already hit — stay Rejected, stop calling adgroup_appeal.
   if (Number(row.appeal_attempts || 0) >= APPEAL_TECH_RETRY_CAP) {
-    return { blockDuplication: true, detail };
+    return { blockDuplication: true, detail, appealState: currentState };
   }
 
   // ---- fetch AD-LEVEL rejection reasons (source of truth) ----
@@ -437,7 +449,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
       appeal_adgroup_id: adgroupId,
       appeal_error: `${reason} | raw ${rawDump}`.slice(0, 1500),
     });
-    return { blockDuplication: true, detail };
+    return { blockDuplication: true, detail, appealState: currentState };
   }
 
   const { categories, unknown } = classifyReasons(rawReasons);
@@ -467,7 +479,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
       appeal_ad_id: appealAdId,
       appeal_error: `Unsupported rejection reason: ${(unknown.length ? unknown : rawReasons).join(" | ")}`,
     });
-    return { blockDuplication: true, detail };
+    return { blockDuplication: true, detail, appealState: currentState };
   }
 
   // ---- claim the appeal (idempotent) then submit exactly ONE ----
@@ -482,8 +494,9 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
     .neq("appeal_state", "APPEAL_SUBMITTING")
     .select("campaign_id");
   if (claim.error || !(claim.data && claim.data.length)) {
-    return { blockDuplication: true, detail }; // another invocation owns it this tick
+    return { blockDuplication: true, detail, appealState: currentState }; // another invocation owns it this tick
   }
+  currentState = "APPEAL_SUBMITTING";
 
   const appealText = buildAppealText(categories);
   await persist({
@@ -512,7 +525,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
         appeal_error: null,
       });
       log(`adgroup_appeal errored but appeal_status=${as} — treating as submitted`);
-      return { blockDuplication: true, detail };
+      return { blockDuplication: true, detail, appealState: currentState };
     }
     // Genuine technical failure — DO NOT mark Appeal Rejected. Retry next tick.
     const attempts = Number(row.appeal_attempts || 0) + 1;
@@ -522,7 +535,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
       appeal_error: `Appeal request failed (attempt ${attempts}/${APPEAL_TECH_RETRY_CAP}): ${err.message}`,
     });
     log(`appeal technical failure (attempt ${attempts}/${APPEAL_TECH_RETRY_CAP}): ${err.message}`);
-    return { blockDuplication: true, detail };
+    return { blockDuplication: true, detail, appealState: currentState };
   }
 
   await persist({
@@ -532,7 +545,7 @@ async function handleAutoAppeal({ supabase, client, row, advertiserStatus }) {
     appeal_error: null,
   });
   log("appeal accepted / submitted — now Appeal Under Review");
-  return { blockDuplication: true, detail };
+  return { blockDuplication: true, detail, appealState: currentState };
 }
 
 // Best-effort persist. A missing column just means the migration

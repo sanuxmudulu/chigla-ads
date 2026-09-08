@@ -60,6 +60,7 @@ const {
   SupabaseOAuthProvider,
   connectMcp,
   loadCampaignDetail,
+  applyAppealOverlay,
   json,
 } = require("./_shared/tiktok-mcp");
 const { duplicateForRow, registerForDuplication, DUPES_PER_CYCLE } = require("./_shared/campaign-creator.js");
@@ -293,7 +294,8 @@ async function processDuplication(supabase) {
                 campaignId: r.campaign_id,
                 timezone: null,
               });
-              await persistTiktokCampaignStatus(supabase, r.campaign_id, detail);
+              const overlaid = applyAppealOverlay(detail, r.appeal_state);
+              await persistTiktokCampaignStatus(supabase, r.campaign_id, overlaid);
             } catch (err) {
               console.error(`[campaign-creator] ${r.campaign_id} — status refresh failed: ${err.message}`);
             }
@@ -318,12 +320,18 @@ async function processDuplication(supabase) {
               });
             } catch (err) {
               console.error(`[appeals] ${r.campaign_id} — orchestrator failed: ${err.message}`);
-              appeal = { blockDuplication: true, detail: null };
+              appeal = { blockDuplication: true, detail: null, appealState: r.appeal_state || "NONE" };
             }
             preloadedDetail = appeal.detail || null;
             // Keep the Detailed Metrics status current for creator campaigns
-            // (the 60s "metrics" tick doesn't re-derive status).
-            if (preloadedDetail) await persistTiktokCampaignStatus(supabase, r.campaign_id, preloadedDetail);
+            // (the 60s "metrics" tick doesn't re-derive status). Overlay with
+            // appeal.appealState (the state as of the END of this call, which
+            // handleAutoAppeal may have just changed) — never r.appeal_state,
+            // which is stale the instant this tick writes a new value.
+            if (preloadedDetail) {
+              const overlaid = applyAppealOverlay(preloadedDetail, appeal.appealState);
+              await persistTiktokCampaignStatus(supabase, r.campaign_id, overlaid);
+            }
             if (appeal.blockDuplication) {
               await patchRow(supabase, r.campaign_id, { updated_at: new Date().toISOString() });
               tally.pending += 1;

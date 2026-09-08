@@ -1,18 +1,22 @@
 // POST /.netlify/functions/wh-warmup   { action, ... }
 //
 //   "create"  { connection_id, advertiser_ids: [...], target_country, spark_code }
-//        -> for EACH advertiser independently: create a Traffic-CBO warmup
-//           campaign + ad group + Spark ad. One account failing never stops the
-//           batch. Returns per-account results.
+//        -> for EACH advertiser independently: FIRST sets a $5/day account-
+//           level safety cap (whAccountSafetyCap — skips creating the
+//           campaign for that account if this fails), THEN creates the
+//           Traffic-CBO warmup campaign + ad group + Spark ad. One account
+//           failing never stops the batch. Returns per-account results.
 //
 //   "cleanup"  (no body)
-//        -> poll every WH campaign still in WAITING_FOR_ACTIVE / DELETE_PENDING;
-//           delete from TikTok the moment it is genuinely Active. Idempotent.
+//        -> poll every WH campaign still in WAITING_FOR_ACTIVE / PAUSE_PENDING /
+//           DELETE_PENDING. Once genuinely Active: PAUSE first (retried every
+//           cycle, uncapped — the money-safety guarantee), then delete.
+//           Idempotent.
 //
-//   "list"     (no body)   -> WH campaigns still WAITING_FOR_ACTIVE / DELETE_PENDING
-//        (the "WHs Warming Up" panel) — DELETED/FAILED rows drop off the list
-//        the moment "cleanup" retires them, even though the row itself is
-//        kept in the table.
+//   "list"     (no body)   -> WH campaigns still WAITING_FOR_ACTIVE /
+//        PAUSE_PENDING / DELETE_PENDING (the "WHs Warming Up" panel) —
+//        DELETED/FAILED rows drop off the list the moment "cleanup" retires
+//        them, even though the row itself is kept in the table.
 //
 //   "countries" { connection_id, advertiser_id }
 //        -> valid country-level TikTok target locations for that advertiser
@@ -35,9 +39,16 @@ const {
   resolveConfig,
   SupabaseOAuthProvider,
   connectMcp,
+  setAdvertiserBudget,
   json,
 } = require("./_shared/tiktok-mcp");
-const { createWarmupForAdvertiser, cleanupOneWarmup, listCountryRegions, listAllCountryRegions } = require("./_shared/wh-warmup");
+const {
+  createWarmupForAdvertiser,
+  cleanupOneWarmup,
+  listCountryRegions,
+  listAllCountryRegions,
+  whAccountSafetyCap,
+} = require("./_shared/wh-warmup");
 
 async function withClient(supabase, connection, fn) {
   const { serverUrl, redirectUrl } = resolveConfig();
@@ -192,6 +203,31 @@ async function createBatch(supabase, body) {
         results.push({ advertiser_id: advId, advertiser_name: name, status: "Skipped", error: "Account is Suspended." });
         continue;
       }
+
+      // Safety cap FIRST, before anything is created: a $5/day account-level
+      // cap means even a warmup campaign someone forgets to pause can burn at
+      // most that much. If this fails, the WH campaign is deliberately NOT
+      // created for this account — an uncapped warmup campaign defeats the
+      // whole point.
+      const safetyCap = whAccountSafetyCap();
+      try {
+        await setAdvertiserBudget({
+          client,
+          bcId: adv.bc_id || conn.bc_id || null,
+          advertiserId: advId,
+          budgetMode: "DAILY_BUDGET",
+          budget: safetyCap,
+        });
+      } catch (err) {
+        results.push({
+          advertiser_id: advId,
+          advertiser_name: name,
+          status: "Failed",
+          error: `Couldn't set the $${safetyCap}/day safety cap — WH campaign NOT created (${err.message}).`,
+        });
+        continue;
+      }
+
       try {
         const r = await createWarmupForAdvertiser({
           client,
@@ -265,7 +301,7 @@ async function cleanupBatch(supabase) {
   const { data: rows, error } = await supabase
     .from("wh_warmup_campaigns")
     .select("*")
-    .in("cleanup_status", ["WAITING_FOR_ACTIVE", "DELETE_PENDING"]);
+    .in("cleanup_status", ["WAITING_FOR_ACTIVE", "PAUSE_PENDING", "DELETE_PENDING"]);
   if (error) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, checked: 0, deleted: 0, failed: 0, pending: 0, unmigrated: true });
@@ -363,7 +399,7 @@ async function listWarmups(supabase) {
     .select(
       "campaign_id, advertiser_id, advertiser_name, campaign_name, target_country, daily_budget, currency, cleanup_status, cleanup_attempts, cleanup_error, became_active_at, deleted_at, created_at"
     )
-    .in("cleanup_status", ["WAITING_FOR_ACTIVE", "DELETE_PENDING"])
+    .in("cleanup_status", ["WAITING_FOR_ACTIVE", "PAUSE_PENDING", "DELETE_PENDING"])
     .order("created_at", { ascending: false })
     .limit(200);
   if (error) {

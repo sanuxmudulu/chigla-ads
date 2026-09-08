@@ -404,6 +404,13 @@ function wireEvents() {
   });
   document.getElementById("confirmDeleteCampaignBtn").addEventListener("click", confirmDeleteCampaign);
 
+  // ---- rejection reason modal ----
+  document.getElementById("closeRejectionReasonModal").addEventListener("click", closeRejectionReasonModal);
+  document.getElementById("closeRejectionReasonBtn2").addEventListener("click", closeRejectionReasonModal);
+  document.getElementById("rejectionReasonModal").addEventListener("click", (e) => {
+    if (e.target.id === "rejectionReasonModal") closeRejectionReasonModal();
+  });
+
   // ---- engagement: Add comments modal (foundation) ----
   document.getElementById("closeEngagementCommentsModal").addEventListener("click", closeEngagementCommentsModal);
   document.getElementById("cancelEngagementCommentsBtn").addEventListener("click", closeEngagementCommentsModal);
@@ -432,6 +439,13 @@ function wireEvents() {
     if (agBtn) {
       e.stopPropagation();
       handleAdgroupAction(agBtn);
+      return;
+    }
+    // "Rejection reason" button inside an expanded row.
+    const rrBtn = e.target.closest("[data-rejection-reason]");
+    if (rrBtn) {
+      e.stopPropagation();
+      openRejectionReasonModal(rrBtn.dataset.rejectionReason);
       return;
     }
     const row = e.target.closest("tr.source-row");
@@ -3457,7 +3471,14 @@ async function renderAdGroupsPanel(s, { force } = {}) {
   panel.innerHTML = `<div class="adgroups-wrap">${acct}<div class="adgroups-loading">Loading ad groups…</div></div>`;
   try {
     const res = await fetchCampaignAdGroups(s.campaignId);
-    state.adGroupsByCampaign[s.campaignId] = { loadedAt: Date.now(), rows: res.adgroups || [] };
+    state.adGroupsByCampaign[s.campaignId] = {
+      loadedAt: Date.now(),
+      rows: res.adgroups || [],
+      appealState: res.appeal_state || "NONE",
+      appealReasons: res.appeal_reasons || null,
+      appealRawReasons: res.appeal_raw_reasons || null,
+      appealAdgroupId: res.appeal_adgroup_id || null,
+    };
     applyCampaignStatusResult(res); // keep the row status in sync with the live read
     const s2 = state.sources.find((x) => x.campaignId === s.campaignId) || s;
     const panel2 = panelEl(s.campaignId);
@@ -3469,33 +3490,64 @@ async function renderAdGroupsPanel(s, { force } = {}) {
   }
 }
 
+// Appeal states for which a rejection actually happened and a reason exists
+// worth showing — button disappears once the appeal is approved (or there was
+// never an appeal at all).
+const REJECTION_REASON_VISIBLE_STATES = new Set([
+  "REJECTED",
+  "APPEAL_SUBMITTING",
+  "APPEAL_UNDER_REVIEW",
+  "APPEAL_REJECTED",
+  "UNSUPPORTED",
+]);
+
+const APPEAL_REASON_TITLES = {
+  sensitive_personal_information: "Sensitive Personal Information",
+  adult_content_services: "Adult Content / Services",
+  financial_misrepresentation: "Financial Misrepresentation",
+  misleading_opportunities: "Misleading Opportunities",
+  gambling_and_games: "Gambling and Games",
+};
+
 function paintAdGroups(panel, s, rows) {
   const acct = adAccountLabelHtml(s);
   if (!rows.length) {
     panel.innerHTML = `<div class="adgroups-wrap">${acct}<div class="adgroups-empty">This campaign has no ad groups.</div></div>`;
     return;
   }
+  const cached = state.adGroupsByCampaign[s.campaignId] || {};
   panel.innerHTML = `
     <div class="adgroups-wrap">
       ${acct}
       <table class="adgroups-table">
         <colgroup>
-          <col style="width:40px" /><col style="width:118px" /><col style="width:210px" /><col style="width:96px" /><col style="width:96px" />
+          <col style="width:40px" /><col style="width:118px" /><col style="width:210px" /><col style="width:96px" /><col style="width:96px" /><col style="width:170px" />
         </colgroup>
         <thead>
-          <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th></tr>
+          <tr><th>On/Off</th><th>Status</th><th>Ad group</th><th class="num">Spend</th><th class="num">CPA</th><th></th></tr>
         </thead>
         <tbody>
-          ${rows.map((g) => adGroupRowHtml(s.campaignId, g)).join("")}
+          ${rows.map((g) => adGroupRowHtml(s.campaignId, g, cached)).join("")}
         </tbody>
       </table>
     </div>`;
 }
 
-function adGroupRowHtml(campaignId, g) {
+function adGroupRowHtml(campaignId, g, appealInfo) {
   const on = String(g.operation_status || "").toUpperCase() === "ENABLE";
   const pending = state.pendingActions.has(`g:${g.adgroup_id}`);
   const tone = ["good", "warn", "bad", "neutral"].includes(g.status_tone) ? g.status_tone : "neutral";
+  const ai = appealInfo || {};
+  const showReasonBtn =
+    REJECTION_REASON_VISIBLE_STATES.has(ai.appealState) &&
+    (!ai.appealAdgroupId || String(ai.appealAdgroupId) === String(g.adgroup_id));
+  let reasonCell = "";
+  if (showReasonBtn) {
+    const payload = { reasons: ai.appealReasons || [], raw: ai.appealRawReasons || [] };
+    reasonCell = `<button type="button" class="rejection-reason-btn" data-rejection-reason='${escapeHtml(
+      JSON.stringify(payload)
+    )}'>Rejection reason</button>`;
+  }
   return `
     <tr data-adgroup-row="${escapeHtml(g.adgroup_id)}">
       <td class="toggle-cell">${switchHtml({
@@ -3508,7 +3560,30 @@ function adGroupRowHtml(campaignId, g) {
       <td class="ag-name-cell"><span class="ag-name">${escapeHtml(g.adgroup_name || g.adgroup_id)}</span></td>
       <td class="num">${money(g.spend)}</td>
       <td class="num">${money(g.cpa)}</td>
+      <td class="ag-reason-cell">${reasonCell}</td>
     </tr>`;
+}
+
+function openRejectionReasonModal(payloadJson) {
+  let payload;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch (_) {
+    payload = { reasons: [], raw: [] };
+  }
+  const reasons = Array.isArray(payload.reasons) ? payload.reasons : [];
+  const raw = Array.isArray(payload.raw) ? payload.raw : [];
+  document.getElementById("rrTitles").innerHTML = reasons.length
+    ? reasons.map((id) => `<span class="rr-title-chip">${escapeHtml(APPEAL_REASON_TITLES[id] || id)}</span>`).join("")
+    : `<span class="rr-title-chip rr-title-chip--unknown">Uncategorized</span>`;
+  document.getElementById("rrRawList").innerHTML = raw.length
+    ? raw.map((r) => `<li>${escapeHtml(r)}</li>`).join("")
+    : `<li>No exact rejection text was returned by TikTok yet.</li>`;
+  document.getElementById("rejectionReasonModal").classList.add("open");
+}
+
+function closeRejectionReasonModal() {
+  document.getElementById("rejectionReasonModal").classList.remove("open");
 }
 
 // Merge a { campaign_id, campaign_operation_status, effective_status, ... }
@@ -3523,7 +3598,14 @@ function applyCampaignStatusResult(res) {
     if (res.status_detail !== undefined) tk.status_detail = res.status_detail;
   }
   if (Array.isArray(res.adgroups)) {
-    state.adGroupsByCampaign[String(res.campaign_id)] = { loadedAt: Date.now(), rows: res.adgroups };
+    state.adGroupsByCampaign[String(res.campaign_id)] = {
+      loadedAt: Date.now(),
+      rows: res.adgroups,
+      appealState: res.appeal_state || "NONE",
+      appealReasons: res.appeal_reasons || null,
+      appealRawReasons: res.appeal_raw_reasons || null,
+      appealAdgroupId: res.appeal_adgroup_id || null,
+    };
   }
   rebuildSources();
   // rebuildSources -> renderTable rebuilds rows; re-open panels that were expanded.

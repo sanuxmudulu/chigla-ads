@@ -49,6 +49,8 @@ const {
   setAdvertiserBudget,
   markEngagementReadyIfActive,
   withoutTemporaryCampaigns,
+  applyAppealOverlay,
+  applyAppealOverlayByCampaignId,
   json,
 } = require("./_shared/tiktok-mcp");
 const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
@@ -120,27 +122,7 @@ async function readCampaigns(supabase) {
         .select("campaign_id, appeal_state")
         .neq("appeal_state", "NONE");
       const stByCampaign = new Map((ap || []).map((r) => [String(r.campaign_id), r.appeal_state]));
-      res.data = (res.data || []).map((c) => {
-        const st = stByCampaign.get(String(c.campaign_id));
-        if (!st || c.effective_status === "Active") return c;
-        if (st === "APPEAL_UNDER_REVIEW" || st === "APPEAL_SUBMITTING") {
-          return {
-            ...c,
-            effective_status: "Appeal Under Review",
-            effective_tone: "warn",
-            status_detail: "Automatic appeal submitted — awaiting TikTok's decision",
-          };
-        }
-        if (st === "APPEAL_REJECTED") {
-          return {
-            ...c,
-            effective_status: "Appeal Rejected",
-            effective_tone: "bad",
-            status_detail: "TikTok rejected the automatic appeal",
-          };
-        }
-        return c; // REJECTED / UNSUPPORTED keep the normal "Rejected" label
-      });
+      res.data = (res.data || []).map((c) => applyAppealOverlay(c, stByCampaign.get(String(c.campaign_id))));
     } catch (_) {
       /* appeal columns not migrated — leave statuses untouched */
     }
@@ -276,15 +258,18 @@ exports.handler = async function (event) {
           timezone: tz,
         })
       );
-      await persistCampaignStatus(supabase, r.campaign.campaign_id, detail);
+      const overlaid = await applyAppealOverlayByCampaignId(supabase, r.campaign.campaign_id, detail);
+      await persistCampaignStatus(supabase, r.campaign.campaign_id, overlaid);
+      const appealInfo = await fetchAppealInfo(supabase, r.campaign.campaign_id);
       return json(200, {
         ok: true,
         campaign_id: String(r.campaign.campaign_id),
-        campaign_operation_status: detail.campaign_operation_status,
-        effective_status: detail.effective_status,
-        effective_tone: detail.effective_tone,
-        status_detail: detail.status_detail,
-        adgroups: detail.adGroups,
+        campaign_operation_status: overlaid.campaign_operation_status,
+        effective_status: overlaid.effective_status,
+        effective_tone: overlaid.effective_tone,
+        status_detail: overlaid.status_detail,
+        adgroups: overlaid.adGroups,
+        ...appealInfo,
       });
     }
 
@@ -422,15 +407,18 @@ exports.handler = async function (event) {
           timezone: tz,
         });
       });
-      await persistCampaignStatus(supabase, r.campaign.campaign_id, detail);
+      const overlaid = await applyAppealOverlayByCampaignId(supabase, r.campaign.campaign_id, detail);
+      await persistCampaignStatus(supabase, r.campaign.campaign_id, overlaid);
+      const appealInfo = await fetchAppealInfo(supabase, r.campaign.campaign_id);
       return json(200, {
         ok: true,
         campaign_id: String(r.campaign.campaign_id),
-        campaign_operation_status: detail.campaign_operation_status,
-        effective_status: detail.effective_status,
-        effective_tone: detail.effective_tone,
-        status_detail: detail.status_detail,
-        adgroups: detail.adGroups,
+        campaign_operation_status: overlaid.campaign_operation_status,
+        effective_status: overlaid.effective_status,
+        effective_tone: overlaid.effective_tone,
+        status_detail: overlaid.status_detail,
+        adgroups: overlaid.adGroups,
+        ...appealInfo,
       });
     }
 
@@ -463,16 +451,19 @@ exports.handler = async function (event) {
         });
         return { detail };
       });
-      await persistCampaignStatus(supabase, r.campaign.campaign_id, out.detail);
+      const overlaid = await applyAppealOverlayByCampaignId(supabase, r.campaign.campaign_id, out.detail);
+      await persistCampaignStatus(supabase, r.campaign.campaign_id, overlaid);
+      const appealInfo = await fetchAppealInfo(supabase, r.campaign.campaign_id);
       return json(200, {
         ok: true,
         campaign_id: String(r.campaign.campaign_id),
         adgroup_id: String(body.adgroup_id),
-        campaign_operation_status: out.detail.campaign_operation_status,
-        effective_status: out.detail.effective_status,
-        effective_tone: out.detail.effective_tone,
-        status_detail: out.detail.status_detail,
-        adgroups: out.detail.adGroups,
+        campaign_operation_status: overlaid.campaign_operation_status,
+        effective_status: overlaid.effective_status,
+        effective_tone: overlaid.effective_tone,
+        status_detail: overlaid.status_detail,
+        adgroups: overlaid.adGroups,
+        ...appealInfo,
       });
     }
 
@@ -1180,6 +1171,23 @@ async function persistCampaignStatus(supabase, campaignId, detail) {
       updated_at: new Date().toISOString(),
     })
     .eq("campaign_id", String(campaignId));
+}
+
+// "Rejection reason" button: the exact reasons the automatic-appeal pipeline
+// recorded for this campaign's initial ad (raw TikTok text + our category
+// titles) — no-op (returns nulls) for campaigns never processed by it.
+async function fetchAppealInfo(supabase, campaignId) {
+  const { data } = await supabase
+    .from("campaign_creator_campaigns")
+    .select("appeal_state, appeal_reasons, appeal_raw_reasons, appeal_adgroup_id")
+    .eq("campaign_id", String(campaignId))
+    .maybeSingle();
+  return {
+    appeal_state: data?.appeal_state || "NONE",
+    appeal_reasons: data?.appeal_reasons || null,
+    appeal_raw_reasons: data?.appeal_raw_reasons || null,
+    appeal_adgroup_id: data?.appeal_adgroup_id || null,
+  };
 }
 
 // Re-discovery for scoped advertisers (see scopedAdvertisers — tracked, or has

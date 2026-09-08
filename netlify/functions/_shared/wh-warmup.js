@@ -4,7 +4,7 @@
 // tiktok-mcp.js helpers; adds nothing to the normal campaign pipeline except a
 // filter so WH campaign_ids never enter tiktok_campaigns.
 
-const { mcpCall, loadCampaignDetail, deleteCampaign } = require("./tiktok-mcp");
+const { mcpCall, loadCampaignDetail, deleteCampaign, setCampaignStatus } = require("./tiktok-mcp");
 
 // ---------------------------------------------------------------------------
 // Config
@@ -17,6 +17,18 @@ const { mcpCall, loadCampaignDetail, deleteCampaign } = require("./tiktok-mcp");
 function whDailyBudget(_currency) {
   const v = Number(process.env.WH_WARMUP_DAILY_BUDGET);
   return Number.isFinite(v) && v > 0 ? v : 50;
+}
+
+// USD $5/day account-level spend cap set on the AD ACCOUNT (not the campaign)
+// before its warmup campaign is created — a hard ceiling on how much that
+// account can spend in a day, independent of the campaign's own $50 CBO
+// budget above. TikTok throttles delivery once an account hits its cap
+// regardless of what any campaign underneath is nominally budgeted for, so
+// this is what actually limits the damage if a warmup campaign is ever left
+// running unpaused. Override with WH_WARMUP_ACCOUNT_CAP for a different value.
+function whAccountSafetyCap() {
+  const v = Number(process.env.WH_WARMUP_ACCOUNT_CAP);
+  return Number.isFinite(v) && v > 0 ? v : 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,9 +503,14 @@ async function createWarmupForAdvertiser({ client, advertiserId, currency, targe
 }
 
 // ---------------------------------------------------------------------------
-// Cleanup — check one WH campaign's live status, delete it once genuinely Active.
-// Idempotent: DELETED / FAILED rows are terminal and never passed here.
-// Returns { status, patch } — patch is the fields to write back on the row.
+// Cleanup — check one WH campaign's live status. Once genuinely Active:
+// PAUSE first, THEN delete — never the other way around. This is the money-
+// safety guarantee: if delete never succeeds (TikTok error, retry cap,
+// whatever), the campaign is still paused and cannot spend another cent.
+// Pause itself is retried EVERY cycle with no cap and no give-up (re-issued
+// even if already paused — harmless, and closes the door on anything that
+// might have re-enabled it). Idempotent: DELETED / FAILED rows are terminal
+// and never passed here. Returns { status, patch } — patch is written back.
 // ---------------------------------------------------------------------------
 
 const CLEANUP_ATTEMPT_CAP = 5;
@@ -573,13 +590,29 @@ async function cleanupOneWarmup({ client, row, advertiserStatus, timezone }) {
     return { status: "WAITING_FOR_ACTIVE", patch: { updated_at: now } };
   }
 
-  // It is genuinely Active — delete it.
-  const patch = {
-    cleanup_status: "DELETE_PENDING",
-    updated_at: now,
-  };
-  if (!row.became_active_at) patch.became_active_at = now;
+  // It is genuinely Active. Step 1: PAUSE — retried every cycle, uncapped,
+  // never skipped even if a previous cycle already paused it (idempotent on
+  // TikTok's side, and re-asserting it every pass is exactly the guarantee
+  // this exists for).
+  const becameActivePatch = row.became_active_at ? {} : { became_active_at: now };
+  try {
+    await setCampaignStatus({ client, advertiserId: advId, campaignId, operationStatus: "DISABLE" });
+  } catch (err) {
+    return {
+      status: "PAUSE_PENDING",
+      patch: {
+        cleanup_status: "PAUSE_PENDING",
+        cleanup_error: `Pause failed, retrying every cycle: ${err.message || "unknown error"}`,
+        updated_at: now,
+        ...becameActivePatch,
+      },
+    };
+  }
 
+  // Step 2: now that it's paused (so it can't spend either way), delete it.
+  // Unlike pause, this DOES eventually give up — that's fine, since the
+  // account is already safe by this point.
+  const patch = { cleanup_status: "DELETE_PENDING", updated_at: now, ...becameActivePatch };
   const advHealthy = advHealthyEarly;
 
   try {
@@ -600,8 +633,8 @@ async function cleanupOneWarmup({ client, row, advertiserStatus, timezone }) {
         cleanup_status: giveUp ? "FAILED" : "DELETE_PENDING",
         cleanup_attempts: attempts,
         cleanup_error: giveUp
-          ? `${msg} — giving up (${advHealthy ? `${attempts} attempts` : "advertiser account suspended"}).`
-          : msg,
+          ? `Paused successfully, but delete permanently failed: ${msg} (${advHealthy ? `${attempts} attempts` : "advertiser account suspended"}). It is PAUSED and not spending — delete it manually in TikTok when convenient.`
+          : `Paused; delete retry: ${msg}`,
       },
     };
   }
@@ -609,6 +642,7 @@ async function cleanupOneWarmup({ client, row, advertiserStatus, timezone }) {
 
 module.exports = {
   whDailyBudget,
+  whAccountSafetyCap,
   whNames,
   listCountryRegions,
   listAllCountryRegions,
