@@ -589,7 +589,13 @@ function reviewState(review) {
 // ---------------------------------------------------------------------------
 function applyAppealOverlay(campaignRow, appealState) {
   const st = appealState;
-  if (!st || st === "NONE" || campaignRow.effective_status === "Active") return campaignRow;
+  // Current reality always wins over a stale/terminal appeal_state — not just
+  // Active. An account-level state (Suspended, or Pending/under its own
+  // review) is definitively past the ad-level appeal, so showing "Appeal
+  // Rejected" instead would hide the actual, more urgent problem.
+  const current = String(campaignRow.effective_status || "");
+  if (!st || st === "NONE" || current === "Active" || current === "Account Suspended" || current === "Account Pending")
+    return campaignRow;
   if (st === "APPEAL_UNDER_REVIEW" || st === "APPEAL_SUBMITTING") {
     return {
       ...campaignRow,

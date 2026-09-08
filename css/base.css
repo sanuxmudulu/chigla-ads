@@ -469,16 +469,17 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .rejection-reason-btn:hover { border-color: var(--loss); color: var(--loss); }
 
 /* ---- rejection reason modal ---- */
-.rr-section-label { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-2); font-weight: 600; margin: 12px 0 6px; }
-.rr-section-label:first-of-type { margin-top: 0; }
-.rr-titles { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+#rrBody { max-height: 60vh; overflow-y: auto; }
+.rr-group { margin-bottom: 16px; }
+.rr-group:last-child { margin-bottom: 0; }
+.rr-group p { margin: 0; }
 .rr-title-chip {
   display: inline-block; background: color-mix(in srgb, var(--loss) 14%, transparent); color: var(--loss);
   border: 1px solid color-mix(in srgb, var(--loss) 35%, transparent); border-radius: 999px;
-  padding: 4px 10px; font-size: 11.5px; font-weight: 600;
+  padding: 4px 10px; font-size: 11.5px; font-weight: 600; margin-bottom: 8px;
 }
 .rr-title-chip--unknown { background: var(--bg-2); color: var(--text-2); border-color: var(--border-strong); }
-.rr-raw-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-1); line-height: 1.55; max-height: 260px; overflow-y: auto; }
+.rr-raw-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-1); line-height: 1.55; }
 .rr-raw-list li { margin-bottom: 8px; }
 .rr-raw-list li:last-child { margin-bottom: 0; }
 

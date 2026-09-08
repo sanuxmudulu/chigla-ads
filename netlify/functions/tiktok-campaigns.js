@@ -55,6 +55,7 @@ const {
 } = require("./_shared/tiktok-mcp");
 const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
 const { submitEngagementOrder, parseComments } = require("./_shared/engagement-provider");
+const { groupReasonsByCategory } = require("./_shared/appeals.js");
 
 const CAMPAIGN_COLUMNS_BASE =
   "campaign_id, connection_id, advertiser_id, advertiser_name, campaign_name, objective_type, budget, budget_mode, campaign_operation_status, campaign_secondary_status, effective_status, effective_tone, status_detail, ad_count, active_ad_count, create_time, updated_at";
@@ -1174,18 +1175,24 @@ async function persistCampaignStatus(supabase, campaignId, detail) {
 }
 
 // "Rejection reason" button: the exact reasons the automatic-appeal pipeline
-// recorded for this campaign's initial ad (raw TikTok text + our category
-// titles) — no-op (returns nulls) for campaigns never processed by it.
+// recorded for this campaign's initial ad — no-op (returns nulls) for
+// campaigns never processed by it. appeal_reasons is ALWAYS regrouped fresh
+// from appeal_raw_reasons here (never trusts whatever shape is sitting in the
+// column) so rows appealed before groupReasonsByCategory existed still
+// render correctly with no backfill needed.
 async function fetchAppealInfo(supabase, campaignId) {
   const { data } = await supabase
     .from("campaign_creator_campaigns")
-    .select("appeal_state, appeal_reasons, appeal_raw_reasons, appeal_adgroup_id")
+    .select("appeal_state, appeal_raw_reasons, appeal_adgroup_id")
     .eq("campaign_id", String(campaignId))
     .maybeSingle();
+  const raw = data?.appeal_raw_reasons || null;
+  const { groups, unknownTexts } = groupReasonsByCategory(raw || []);
   return {
     appeal_state: data?.appeal_state || "NONE",
-    appeal_reasons: data?.appeal_reasons || null,
-    appeal_raw_reasons: data?.appeal_raw_reasons || null,
+    appeal_reasons: groups,
+    appeal_unknown_reasons: unknownTexts,
+    appeal_raw_reasons: raw,
     appeal_adgroup_id: data?.appeal_adgroup_id || null,
   };
 }
