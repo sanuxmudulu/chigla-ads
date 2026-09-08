@@ -37,9 +37,10 @@
   --border: rgba(94, 151, 210, 0.4);
   --border-strong: rgba(103, 232, 249, 0.65);
   --border-hover: #8DADD2;
+  --edge-blue: #539DDE;
   --shadow: 0 12px 40px rgba(3, 9, 22, 0.55);
-  --glow: 0 0 18px rgba(83, 157, 222, 0.45);
-  --glow-strong: 0 0 30px rgba(103, 232, 249, 0.6);
+  --glow: 0 0 20px rgba(83, 157, 222, 0.5);
+  --glow-strong: 0 0 34px rgba(103, 232, 249, 0.65);
   --font-heading: 'Rajdhani', 'Inter', sans-serif;
   --font-body: 'Inter', sans-serif;
   --font-tabular: 'Inter', sans-serif;
@@ -174,33 +175,109 @@
   -webkit-backdrop-filter: blur(14px) saturate(140%);
 }
 
-/* The glowing edge: a bright cyan-blue border + a soft outer halo
-   + a thin inner rim, the way light catches the edge of ice/glass. */
+/* Lets --edge-angle be animated by a keyframe (plain custom
+   properties can't be). Registered once, globally — harmless for
+   Vice, which never references it. */
+@property --edge-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* ---- The glowing edge, PART 1: soft outer halo + inner rim. ---- */
 [data-theme="kuzan"] .card,
 [data-theme="kuzan"] .kpi-card,
 [data-theme="kuzan"] .modal {
-  border-color: var(--border-strong);
   box-shadow:
     var(--shadow),
-    0 0 0 1px rgba(83, 157, 222, 0.3),
-    0 0 22px rgba(83, 157, 222, 0.28),
-    inset 0 0 16px rgba(103, 232, 249, 0.05),
-    inset 0 1px 0 rgba(234, 246, 255, 0.12);
+    0 0 0 1px rgba(83, 157, 222, 0.32),
+    0 0 26px rgba(83, 157, 222, 0.32),
+    inset 0 0 18px rgba(103, 232, 249, 0.06),
+    inset 0 1px 0 rgba(234, 246, 255, 0.14);
 }
 [data-theme="kuzan"] .card:hover,
 [data-theme="kuzan"] .kpi-card:hover {
-  border-color: var(--accent-2);
   box-shadow:
     var(--shadow),
-    0 0 0 1px rgba(103, 232, 249, 0.45),
-    0 0 28px rgba(103, 232, 249, 0.38),
-    inset 0 0 16px rgba(103, 232, 249, 0.07),
-    inset 0 1px 0 rgba(234, 246, 255, 0.14);
+    0 0 0 1px rgba(103, 232, 249, 0.5),
+    0 0 32px rgba(103, 232, 249, 0.42),
+    inset 0 0 18px rgba(103, 232, 249, 0.09),
+    inset 0 1px 0 rgba(234, 246, 255, 0.16);
 }
 
-[data-theme="kuzan"] .modal,
+/* ---- PART 2: the irregular / patchy border highlight, via a
+   masked ::after ring. NOT a double-background layer trick — our
+   panels are deliberately translucent (that's the whole point of
+   the glass look), so a translucent fill can never fully hide a
+   border-box layer sitting behind it; it would just bleed the
+   gradient across the entire panel. A real alpha MASK avoids that
+   problem entirely: it clips by geometry, not by how opaque the
+   paint on top of it is, so only a padding-thin ring is ever
+   visible no matter how see-through the panel is.
+   The gradient's stops are intentionally uneven — short bright
+   cyan flares at irregular angles over a dimmer icy-blue base —
+   so it never reads as a uniform neon outline. Each panel gets a
+   different --edge-angle so they don't all match, and a very slow
+   rotation (26-36s) gives a faint "alive" shimmer for the cost of
+   one compositor-friendly custom-property animation. */
+[data-theme="kuzan"] .card,
+[data-theme="kuzan"] .kpi-card,
+[data-theme="kuzan"] .modal {
+  position: relative;
+  border-color: var(--border-strong);
+}
+/* .tools-drawer is already position:fixed (base.css) — that already
+   provides a valid containing block for the ::after ring below, so
+   it must NOT be touched here (setting position:relative on it would
+   break the fixed slide-out sidebar entirely). */
 [data-theme="kuzan"] .tools-drawer {
-  background: linear-gradient(160deg, rgba(9, 22, 48, 0.42), rgba(20, 42, 76, 0.52));
+  border-color: var(--border-strong);
+  box-shadow: 20px 0 60px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(83, 157, 222, 0.3), 0 0 26px rgba(83, 157, 222, 0.3);
+}
+[data-theme="kuzan"] .card::after,
+[data-theme="kuzan"] .kpi-card::after,
+[data-theme="kuzan"] .modal::after,
+[data-theme="kuzan"] .tools-drawer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(from var(--edge-angle, 0deg),
+    rgba(58, 119, 204, 0.35) 0deg,
+    rgba(103, 232, 249, 0.95) 16deg,
+    rgba(83, 157, 222, 0.35) 46deg,
+    rgba(58, 119, 204, 0.28) 112deg,
+    rgba(141, 173, 210, 0.85) 148deg,
+    rgba(83, 157, 222, 0.32) 178deg,
+    rgba(103, 232, 249, 0.9) 236deg,
+    rgba(58, 119, 204, 0.28) 272deg,
+    rgba(141, 173, 210, 0.7) 318deg,
+    rgba(58, 119, 204, 0.35) 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: kuzanEdgeSweep 28s linear infinite;
+}
+[data-theme="kuzan"] .kpi-card:nth-of-type(1)::after { --edge-angle: 8deg; animation-delay: -3s; }
+[data-theme="kuzan"] .kpi-card:nth-of-type(2)::after { --edge-angle: 95deg; animation-delay: -11s; }
+[data-theme="kuzan"] .kpi-card:nth-of-type(3)::after { --edge-angle: 200deg; animation-delay: -18s; }
+[data-theme="kuzan"] .kpi-card:nth-of-type(4)::after { --edge-angle: 300deg; animation-delay: -24s; }
+[data-theme="kuzan"] .chart-section::after { --edge-angle: 60deg; }
+[data-theme="kuzan"] .table-section::after { --edge-angle: 220deg; }
+[data-theme="kuzan"] .modal::after { --edge-angle: 130deg; animation-duration: 32s; }
+[data-theme="kuzan"] .tools-drawer::after { --edge-angle: 40deg; animation-duration: 36s; }
+
+@keyframes kuzanEdgeSweep { to { --edge-angle: 360deg; } }
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="kuzan"] .card::after,
+  [data-theme="kuzan"] .kpi-card::after,
+  [data-theme="kuzan"] .modal::after,
+  [data-theme="kuzan"] .tools-drawer::after {
+    animation: none;
+  }
 }
 
 [data-theme="kuzan"] .topbar {
@@ -208,6 +285,9 @@
   border-bottom-color: var(--border-strong);
 }
 
+/* ---- inputs / dropdowns / buttons — brighter default border,
+   stronger focus/hover glow, a livelier primary-button gradient,
+   and a real pressed state (opacity/scale dip, no layout shift). ---- */
 [data-theme="kuzan"] select,
 [data-theme="kuzan"] input[type="text"],
 [data-theme="kuzan"] input[type="password"],
@@ -216,14 +296,108 @@
 [data-theme="kuzan"] .tracker-input,
 [data-theme="kuzan"] .icon-btn {
   background: rgba(15, 32, 60, 0.5);
+  border-color: var(--edge-blue);
 }
-[data-theme="kuzan"] .icon-btn:hover { border-color: var(--accent-2); color: var(--accent-2); }
+[data-theme="kuzan"] select:hover,
+[data-theme="kuzan"] input[type="text"]:hover,
+[data-theme="kuzan"] input[type="password"]:hover,
+[data-theme="kuzan"] input[type="number"]:hover,
+[data-theme="kuzan"] .cc-cta-btn:hover,
+[data-theme="kuzan"] .tracker-input:hover {
+  border-color: var(--accent-2);
+}
+[data-theme="kuzan"] select:focus,
+[data-theme="kuzan"] input:focus {
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 0 14px rgba(103, 232, 249, 0.35);
+}
+[data-theme="kuzan"] .icon-btn { box-shadow: 0 0 0 1px rgba(83, 157, 222, 0.18); }
+[data-theme="kuzan"] .icon-btn:hover:not(.danger) {
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  box-shadow: var(--glow-strong), 0 0 0 1px rgba(103, 232, 249, 0.4);
+}
+[data-theme="kuzan"] .icon-btn:active:not(.danger) { filter: brightness(0.88); box-shadow: 0 0 0 1px rgba(83, 157, 222, 0.28); }
+[data-theme="kuzan"] .icon-btn.primary {
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px rgba(103, 232, 249, 0.35), 0 0 16px rgba(83, 157, 222, 0.5);
+}
+[data-theme="kuzan"] .icon-btn.primary:hover {
+  box-shadow: 0 0 0 1px rgba(103, 232, 249, 0.55), 0 0 24px rgba(103, 232, 249, 0.65);
+}
+[data-theme="kuzan"] .icon-btn.primary:active { filter: brightness(0.85); }
+/* Danger stays semantically red/pink — only its glow gets the
+   same treatment as every other button, never a blue recolor. */
+[data-theme="kuzan"] .icon-btn.danger:hover {
+  box-shadow: 0 0 0 1px rgba(255, 92, 122, 0.5), 0 0 24px rgba(255, 92, 122, 0.5);
+}
 
+/* ---- KPI icon circles — brighter gradient with a glossy highlight
+   near the top-left (one added radial-gradient stop, no extra DOM),
+   plus an inner + outer glow so they read as lit, not flat. ---- */
 [data-theme="kuzan"] .kpi-icon {
-  box-shadow: 0 0 0 1px rgba(103, 232, 249, 0.35), 0 0 16px rgba(83, 157, 222, 0.55);
+  background:
+    radial-gradient(circle at 30% 24%,
+      rgba(255, 255, 255, 0.65) 0%,
+      var(--accent-2) 14%,
+      var(--accent) 48%,
+      color-mix(in srgb, var(--accent) 45%, var(--bg-2)) 88%
+    );
+  border-color: var(--accent-2);
+  box-shadow:
+    0 0 0 1px rgba(103, 232, 249, 0.4),
+    0 0 18px rgba(83, 157, 222, 0.6),
+    inset 0 0 8px rgba(255, 255, 255, 0.25),
+    inset -2px -2px 6px rgba(3, 9, 22, 0.35);
+}
+[data-theme="kuzan"] .kpi-card:hover .kpi-icon {
+  box-shadow:
+    0 0 0 1px rgba(103, 232, 249, 0.6),
+    0 0 24px rgba(103, 232, 249, 0.7),
+    inset 0 0 10px rgba(255, 255, 255, 0.3),
+    inset -2px -2px 6px rgba(3, 9, 22, 0.35);
 }
 
 [data-theme="kuzan"] .status-badge:not(.none),
 [data-theme="kuzan"] .tk-adv-status {
   box-shadow: 0 0 10px currentColor;
+}
+
+/* ---- Tools sidebar buttons — subtle icy glow at rest, brighter
+   cyan + background lift on hover, strongest glow while pressed
+   (a real, already-existing browser state — no new "selected"
+   concept needed since these are one-shot triggers, not toggles).
+   Applies automatically to every .tools-item, current and future. ---- */
+[data-theme="kuzan"] .tools-item {
+  border-color: var(--edge-blue);
+  box-shadow: 0 0 0 1px rgba(83, 157, 222, 0.16), 0 0 10px rgba(83, 157, 222, 0.22);
+}
+[data-theme="kuzan"] .tools-item:hover {
+  background: rgba(33, 72, 115, 0.55);
+  border-color: var(--accent-2);
+  box-shadow: var(--glow-strong), 0 0 0 1px rgba(103, 232, 249, 0.45);
+}
+[data-theme="kuzan"] .tools-item:active {
+  background: rgba(33, 72, 115, 0.75);
+  box-shadow: 0 0 0 1px rgba(103, 232, 249, 0.7), 0 0 30px rgba(103, 232, 249, 0.55);
+}
+[data-theme="kuzan"] .theme-btn.active {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), var(--glow-strong);
+}
+
+/* ---- table separators + hover glow, Detailed Metrics + Tracker.
+   Special row effects (profit tint, roas-gold/fire, tracker
+   dead/breakeven/winner) are untouched — this only brightens the
+   plain grid lines and adds a faint lift on hover. ---- */
+[data-theme="kuzan"] #sourcesTable th,
+[data-theme="kuzan"] .tracker-table th {
+  border-bottom-color: var(--border-strong);
+}
+[data-theme="kuzan"] #sourcesTable td,
+[data-theme="kuzan"] .tracker-table td {
+  border-bottom-color: rgba(83, 157, 222, 0.22);
+}
+[data-theme="kuzan"] tbody tr.source-row:hover,
+[data-theme="kuzan"] .tracker-table tbody tr:hover {
+  box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.18), inset 0 0 16px rgba(83, 157, 222, 0.08);
 }
