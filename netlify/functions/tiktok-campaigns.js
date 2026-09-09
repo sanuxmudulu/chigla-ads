@@ -57,6 +57,7 @@ const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
 const { submitEngagementOrder, parseComments } = require("./_shared/engagement-provider");
 const { groupReasonsByCategory } = require("./_shared/appeals.js");
 const { applyAutoBudgetBumps } = require("./_shared/auto-budget-bump");
+const { discoverStrayCampaigns } = require("./_shared/stray-campaigns");
 
 const CAMPAIGN_COLUMNS_BASE =
   "campaign_id, connection_id, advertiser_id, advertiser_name, campaign_name, objective_type, budget, budget_mode, campaign_operation_status, campaign_secondary_status, effective_status, effective_tone, status_detail, ad_count, active_ad_count, create_time, updated_at";
@@ -109,6 +110,19 @@ async function readCampaigns(supabase) {
       res.data = (res.data || []).map((c) => ({ ...c, is_wh_warmup: whIds.has(String(c.campaign_id)) }));
     } catch (_) {
       res.data = (res.data || []).map((c) => ({ ...c, is_wh_warmup: false }));
+    }
+  }
+
+  // Flag stray campaigns (discovered by a full sync, not Campaign Creator or
+  // WH Warmup) the same way — kept out of Detailed Metrics, shown in the
+  // "WHs Warming Up" panel instead so they're never silently unwatched.
+  if (!res.error) {
+    try {
+      const { data: stray } = await supabase.from("stray_campaigns").select("campaign_id");
+      const strayIds = new Set((stray || []).map((r) => String(r.campaign_id)));
+      res.data = (res.data || []).map((c) => ({ ...c, is_stray: strayIds.has(String(c.campaign_id)) }));
+    } catch (_) {
+      res.data = (res.data || []).map((c) => ({ ...c, is_stray: false }));
     }
   }
 
@@ -324,6 +338,11 @@ exports.handler = async function (event) {
             /* table optional */
           }
           try {
+            await supabase.from("stray_campaigns").delete().eq("campaign_id", campaignId);
+          } catch (_) {
+            /* table optional */
+          }
+          try {
             await supabase.from("engagement_orders").delete().eq("campaign_id", campaignId);
           } catch (_) {
             /* best-effort */
@@ -377,6 +396,11 @@ exports.handler = async function (event) {
       // Real deletion succeeded — drop the row. A re-sync won't bring it back
       // (campaign_get no longer returns deleted campaigns).
       await supabase.from("tiktok_campaigns").delete().eq("campaign_id", campaignId);
+      try {
+        await supabase.from("stray_campaigns").delete().eq("campaign_id", campaignId);
+      } catch (_) {
+        /* table optional */
+      }
       return json(200, {
         ok: true,
         campaign_id: campaignId,
@@ -1308,6 +1332,17 @@ async function syncAll(supabase, onlyConnectionId) {
       summary.campaignCount += res.campaignCount;
       summary.connections += 1;
       summary.perConnection[connectionId] = res.perAdvertiser;
+
+      // Full-account scan: every Approved advertiser under this connection,
+      // not just the ones already scoped above — catches campaigns nothing
+      // in this dashboard was tracking yet ("stray" campaigns). Best-effort;
+      // never fails the sync.
+      try {
+        const strayRes = await discoverStrayCampaigns({ supabase, client, connectionId });
+        if (strayRes.strayCount) summary.strayCampaignsFound = (summary.strayCampaignsFound || 0) + strayRes.strayCount;
+      } catch (err) {
+        console.error(`[sync] stray discovery failed conn=${connectionId}: ${err.message}`);
+      }
       await supabase
         .from("tiktok_connections")
         .update({ last_verified_at: new Date().toISOString(), status: "active" })

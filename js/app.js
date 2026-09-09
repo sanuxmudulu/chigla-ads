@@ -622,6 +622,7 @@ function rebuildSources(opts = {}) {
   for (const c of state.tiktokCampaigns) {
     if (!c || !c.campaign_name) continue;
     if (c.is_wh_warmup) continue; // WH Warmup campaigns never belong in Detailed Metrics — no matter their status
+    if (c.is_stray) continue; // stray (unwatched) campaigns show in the WHs Warming Up panel instead
     if (bcFilter !== "all" && String(c.bc_id || "") !== String(bcFilter)) continue;
     tiktokByName.set(c.campaign_name, c);
   }
@@ -1686,24 +1687,26 @@ function renderWhAdvertisers() {
   const shown = filterAdvsByQuery(advs, query);
 
   const wrap = document.getElementById("whAdvList");
+  const campMap = campaignNameByAdvertiser();
   wrap.innerHTML = shown.length
-    ? shown.map((a) => whAdvRow(a)).join("")
+    ? shown.map((a) => whAdvRow(a, campMap)).join("")
     : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts under this Business Center."}</p>`;
 
   syncWhSelectAll();
   updateWhNextButton();
 }
 
-function whAdvRow(a) {
+function whAdvRow(a, campMap) {
   const ok = advIsApproved(a);
   const id = String(a.advertiser_id);
   const meta = [id, a.currency || null, a.display_timezone || a.timezone || null].filter(Boolean).join(" · ");
+  const campaignName = campMap ? campMap.get(id) : null;
   return `
     <label class="tk-adv${ok ? "" : " disabled"}" title="${ok ? "" : "Suspended accounts can't be used — campaign creation would fail."}">
       <input type="checkbox" data-wh-adv="${escapeHtml(id)}" ${whState.selected.has(id) ? "checked" : ""} ${ok ? "" : "disabled"} />
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || id)}</span>
-        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}${campaignName ? ` <span class="tk-adv-campaign">| ${escapeHtml(campaignName)}</span>` : ""}</span>
       </span>
       <span class="tk-adv-status ${ok ? "ok" : "warn"}">${ok ? "Approved" : "Suspended"}</span>
     </label>`;
@@ -1889,14 +1892,19 @@ function renderWhWarmingList() {
 
 function whWarmingRowHtml(c) {
   const id = String(c.campaign_id);
+  const isStray = c.origin === "stray";
   const on = String(c.campaign_operation_status || "").toUpperCase() === "ENABLE";
   const pending = state.pendingActions.has(`wh:${id}`);
   const status = c.effective_status
     ? { label: c.effective_status, tone: c.effective_tone, detail: c.status_detail }
-    : { label: c.cleanup_status === "WAITING_FOR_ACTIVE" ? "In Review" : c.cleanup_status || "—", tone: "neutral", detail: null };
+    : {
+        label: isStray ? "Checking…" : c.cleanup_status === "WAITING_FOR_ACTIVE" ? "In Review" : c.cleanup_status || "—",
+        tone: "neutral",
+        detail: null,
+      };
   const checked = whWarmingState.selected.has(id);
   return `
-    <tr data-wh-row="${escapeHtml(id)}">
+    <tr data-wh-row="${escapeHtml(id)}" class="${isStray ? "wh-warming-row-stray" : ""}">
       <td><input type="checkbox" data-wh-select="${escapeHtml(id)}" ${checked ? "checked" : ""} /></td>
       <td>${switchHtml({
         on,
@@ -1905,7 +1913,10 @@ function whWarmingRowHtml(c) {
         title: on ? "Campaign running — click to pause" : "Campaign paused — click to unpause",
       })}</td>
       <td>${statusBadge(status)}</td>
-      <td><div class="wh-warming-source"><strong>${escapeHtml(c.campaign_name || id)}</strong><span>${escapeHtml(c.advertiser_name || c.advertiser_id)}</span></div></td>
+      <td><div class="wh-warming-source">
+        <strong>${escapeHtml(c.campaign_name || id)}</strong>${isStray ? `<span class="wh-stray-badge" title="Found by a sync — not created through Campaign Creator or WH Warmup. Check it: pause or delete it if it shouldn't be running.">Stray</span>` : ""}
+        <span>${escapeHtml(c.advertiser_name || c.advertiser_id)}</span>
+      </div></td>
       <td><button type="button" class="rowmenu-btn" data-row-menu="wh:${escapeHtml(id)}" aria-label="Campaign actions" title="Campaign actions">⋮</button></td>
     </tr>`;
 }
@@ -2746,14 +2757,16 @@ function renderCcRunAdvertisers() {
   const query = document.getElementById("ccRunAdvSearch")?.value || "";
   const shown = filterAdvsByQuery(advs, query);
   const wrap = document.getElementById("ccRunAdvList");
+  const campMap = campaignNameByAdvertiser();
   wrap.innerHTML = shown.length
     ? shown.map((a) => {
         const ok = advIsApproved(a);
         const id = String(a.advertiser_id);
         const meta = [id, a.currency || null, a.display_timezone || a.timezone || null].filter(Boolean).join(" · ");
+        const campaignName = campMap.get(id);
         return `<label class="tk-adv${ok ? "" : " disabled"}">
           <input type="checkbox" data-cc-adv="${escapeHtml(id)}" ${ccState.run.selected.has(id) ? "checked" : ""} ${ok ? "" : "disabled"} />
-          <span class="tk-adv-main"><span class="tk-adv-name">${escapeHtml(a.advertiser_name || id)}</span><span class="tk-adv-meta">${escapeHtml(meta)}</span></span>
+          <span class="tk-adv-main"><span class="tk-adv-name">${escapeHtml(a.advertiser_name || id)}</span><span class="tk-adv-meta">${escapeHtml(meta)}${campaignName ? ` <span class="tk-adv-campaign">| ${escapeHtml(campaignName)}</span>` : ""}</span></span>
           <span class="tk-adv-status ${ok ? "ok" : "warn"}">${ok ? "Approved" : "Suspended"}</span>
         </label>`;
       }).join("")
@@ -3971,6 +3984,22 @@ function filterAdvsByQuery(advs, query) {
   return advs.filter((a) => String(a.advertiser_name || a.advertiser_id || "").toLowerCase().includes(q));
 }
 
+// advertiser_id -> the campaign name currently sitting in that account, from
+// ANY source (Campaign Creator, WH Warmup, or a stray campaign a sync
+// found) — one CBO campaign per account at a time, so this is what lets the
+// 3 account-picker lists warn "this account is already occupied" before you
+// launch a new one on top of it. Recomputed fresh each render — state.
+// tiktokCampaigns is small enough (tens of rows) that this costs nothing.
+function campaignNameByAdvertiser() {
+  const map = new Map();
+  for (const c of state.tiktokCampaigns) {
+    if (!c || !c.advertiser_id || !c.campaign_name) continue;
+    const id = String(c.advertiser_id);
+    if (!map.has(id)) map.set(id, c.campaign_name);
+  }
+  return map;
+}
+
 // A connection's Business Center identity for display. Real BC name from
 // bc/get when known; never invented from advertiser names.
 function connBcName(c) {
@@ -4052,8 +4081,9 @@ function renderSelectedConnection() {
   // never steals its focus/cursor.
   const query = document.getElementById("tiktokAdvSearch")?.value || "";
   const shownAdvs = filterAdvsByQuery(advs, query);
+  const campMap = campaignNameByAdvertiser();
   const rows = shownAdvs.length
-    ? shownAdvs.map((a) => tiktokAdvRow(a)).join("")
+    ? shownAdvs.map((a) => tiktokAdvRow(a, campMap)).join("")
     : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts found for this connection."}</p>`;
 
   const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
@@ -4083,16 +4113,17 @@ function renderSelectedConnection() {
 // Informational row only — no selection control. Detailed Metrics scopes
 // itself automatically (tracked OR has a Campaign Creator campaign; see
 // scopedAdvertisers in tiktok-campaigns.js), so there's nothing to pick here.
-function tiktokAdvRow(a) {
+function tiktokAdvRow(a, campMap) {
   const meta = [a.advertiser_id, a.currency || null, a.display_timezone || a.timezone || null]
     .filter(Boolean)
     .join(" · ");
   const approved = advIsApproved(a);
+  const campaignName = campMap ? campMap.get(String(a.advertiser_id)) : null;
   return `
     <div class="tk-adv">
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
-        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}${campaignName ? ` <span class="tk-adv-campaign">| ${escapeHtml(campaignName)}</span>` : ""}</span>
       </span>
       <span class="tk-adv-status ${approved ? "ok" : "warn"}">${advStatusLabel(a)}</span>
     </div>`;

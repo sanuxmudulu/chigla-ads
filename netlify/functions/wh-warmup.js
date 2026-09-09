@@ -409,7 +409,40 @@ async function listWarmups(supabase) {
     return json(500, { error: "Supabase read failed", details: sbErr(error) });
   }
 
-  const rows = data || [];
+  const rows = (data || []).map((r) => ({ ...r, origin: "warmup" }));
+
+  // Stray campaigns (found by a full sync — see _shared/stray-campaigns.js):
+  // real campaigns nothing was tracking, shown here for visibility, NEVER
+  // auto-deleted. No WH-specific fields (target_country/daily_budget/
+  // cleanup_status) — those stay null so the frontend can tell them apart.
+  try {
+    const { data: strays } = await supabase
+      .from("stray_campaigns")
+      .select("campaign_id, advertiser_id, campaign_name, discovered_at")
+      .order("discovered_at", { ascending: false })
+      .limit(200);
+    for (const s of strays || []) {
+      rows.push({
+        campaign_id: s.campaign_id,
+        advertiser_id: s.advertiser_id,
+        advertiser_name: null,
+        campaign_name: s.campaign_name,
+        target_country: null,
+        daily_budget: null,
+        currency: null,
+        cleanup_status: null,
+        cleanup_attempts: 0,
+        cleanup_error: null,
+        became_active_at: null,
+        deleted_at: null,
+        created_at: s.discovered_at,
+        origin: "stray",
+      });
+    }
+  } catch (_) {
+    /* table optional — not migrated yet */
+  }
+
   if (rows.length) {
     const ids = rows.map((r) => String(r.campaign_id));
     const { data: live } = await supabase
