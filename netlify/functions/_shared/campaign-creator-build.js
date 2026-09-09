@@ -360,9 +360,23 @@ function pagesFrom(resp) {
 // endpoint — this sweep is the only way.
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const _isRateLimit = (msg) => /rate limit|too many request|429|qps|frequenc|please try again|请求过于频繁/i.test(String(msg || ""));
+// The open MCP server's own connection to TikTok is occasionally flaky —
+// distinct from rate limiting, these are raw transport/pool failures on the
+// MCP server's side (2026-09: seen as "Error 1105: dial tcp ...: connect:
+// connection...", "Error 1105: create connection speed too fast; no valid
+// transaction", "Error 1040: any connections; no valid transaction", and a
+// generic "Couldn't load, refresh to try again."). A user hitting this
+// manually just retries the same click and it goes through — this is that
+// same retry, automatic. Never a real TikTok API rejection (bad targeting,
+// budget, policy, etc.), which always throws a different, specific message.
+const _isTransientMcp = (msg) =>
+  /dial tcp|connect: connection|no valid transaction|couldn'?t load|connection speed|econnreset|etimedout|socket hang up|network error|temporarily unavailable/i.test(
+    String(msg || "")
+  );
 
-// mcpCall + backoff retry on TikTok's rate limiter (the open MCP is aggressively
-// throttled). Only retries rate-limit errors; everything else throws immediately.
+// mcpCall + backoff retry on TikTok's rate limiter AND on transient MCP-server
+// connection failures (see _isTransientMcp above). Any other error — a real
+// TikTok API rejection — throws immediately, no retry.
 async function mcpThrottled(client, name, args, { tries = 5, base = 1200, deadlineMs } = {}) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
@@ -370,7 +384,7 @@ async function mcpThrottled(client, name, args, { tries = 5, base = 1200, deadli
       return await mcpCall(client, name, args);
     } catch (err) {
       lastErr = err;
-      if (!_isRateLimit(err.message)) throw err;
+      if (!_isRateLimit(err.message) && !_isTransientMcp(err.message)) throw err;
       const wait = Math.min(base * 2 ** i, 8000) + Math.floor(Math.random() * 400);
       if (deadlineMs && Date.now() + wait > deadlineMs) break;
       await _sleep(wait);
@@ -931,7 +945,7 @@ async function createOneCampaign({
   try {
     // 1. campaign
     const campPayload = buildCampaignPayload({ advertiserId: advId, campaignName, type, config });
-    const camp = await mcpCall(client, "campaign_create", campPayload);
+    const camp = await mcpThrottled(client, "campaign_create", campPayload);
     campaignId = String(camp?.campaign_id || "");
     if (!campaignId) throw new Error("campaign_create returned no campaign_id");
 
@@ -946,13 +960,13 @@ async function createOneCampaign({
     });
     let ag;
     try {
-      ag = await mcpCall(client, "adgroup_create", agPayload);
+      ag = await mcpThrottled(client, "adgroup_create", agPayload);
     } catch (err) {
       if (SCHEDULE_ERR.test(err.message || "")) {
         const soon = new Date(Date.now() + 5 * 60 * 1000);
         agPayload.schedule_start_time = toApiUtc(soon);
         scheduleLocal.localLabel = fmtLocal(soon, tz) + " (adjusted — chosen time was in the past)";
-        ag = await mcpCall(client, "adgroup_create", agPayload);
+        ag = await mcpThrottled(client, "adgroup_create", agPayload);
       } else {
         throw err;
       }
@@ -977,7 +991,7 @@ async function createOneCampaign({
       });
 
     const tryAd = async (fmt, withCard) =>
-      mcpCall(client, "ad_create", { advertiser_id: advId, adgroup_id: adgroupId, creatives: [makeCreative(fmt, withCard)] });
+      mcpThrottled(client, "ad_create", { advertiser_id: advId, adgroup_id: adgroupId, creatives: [makeCreative(fmt, withCard)] });
 
     let ad;
     let usedCard = !!cardId;
