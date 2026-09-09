@@ -78,6 +78,10 @@ exports.handler = async function (event) {
   // 5. Stale campaign day-metrics — a campaign whose today_* belongs to a past
   //    NY date must read $0 today until its TikTok report reloads. Never deletes
   //    the campaign row; just resets the reporting fields and re-dates them.
+  //    auto_budget_bumps/auto_budget_baseline reset the same way — a campaign
+  //    still running the next day starts that day's $10/$50 auto-budget ladder
+  //    over, on top of whatever budget it already earned (never rolled back).
+  //    See _shared/auto-budget-bump.js.
   await run(out, "stale_today_metrics", () =>
     supabase
       .from("tiktok_campaigns")
@@ -90,6 +94,8 @@ exports.handler = async function (event) {
           today_conversions: 0,
           today_cpm: 0,
           today_cpa: 0,
+          auto_budget_bumps: 0,
+          auto_budget_baseline: null,
         },
         { count: "exact" }
       )

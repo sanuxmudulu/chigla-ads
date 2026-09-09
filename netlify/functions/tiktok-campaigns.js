@@ -56,6 +56,7 @@ const {
 const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
 const { submitEngagementOrder, parseComments } = require("./_shared/engagement-provider");
 const { groupReasonsByCategory } = require("./_shared/appeals.js");
+const { applyAutoBudgetBumps } = require("./_shared/auto-budget-bump");
 
 const CAMPAIGN_COLUMNS_BASE =
   "campaign_id, connection_id, advertiser_id, advertiser_name, campaign_name, objective_type, budget, budget_mode, campaign_operation_status, campaign_secondary_status, effective_status, effective_tone, status_detail, ad_count, active_ad_count, create_time, updated_at";
@@ -964,6 +965,10 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
   // shows yesterday's metrics today. Best-effort; the daily cron does this too
   // for when the dashboard is closed. today_date/today_spend errors just mean
   // the metrics migration hasn't run yet.
+  // auto_budget_bumps/auto_budget_baseline reset the same way: a campaign
+  // still running the next day starts that day's $10/$50 ladder over, on top
+  // of whatever budget it already earned (never rolled back) — see
+  // _shared/auto-budget-bump.js.
   try {
     const { error: resetErr } = await supabase
       .from("tiktok_campaigns")
@@ -975,10 +980,12 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
         today_conversions: 0,
         today_cpm: 0,
         today_cpa: 0,
+        auto_budget_bumps: 0,
+        auto_budget_baseline: null,
       })
       .not("today_date", "is", null)
       .neq("today_date", date);
-    if (resetErr && !/today_(date|spend|impressions|clicks|conversions|cpm|cpa)|does not exist/.test(resetErr.message || "")) {
+    if (resetErr && !/today_(date|spend|impressions|clicks|conversions|cpm|cpa)|auto_budget_(bumps|baseline)|does not exist/.test(resetErr.message || "")) {
       console.error(`[tiktok-metrics] stale today_* reset failed: ${resetErr.message}`);
     }
   } catch (_) {
@@ -995,13 +1002,24 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
     return json(200, { ok: true, date, metrics: {}, okAdvertiserIds: [], errors: {} });
   }
 
-  // campaign_id -> { connection_id, advertiser_id, campaign_name } — used to
-  // ignore report rows for campaigns we don't track and to satisfy the NOT NULL
-  // columns when persisting.
+  // campaign_id -> { connection_id, advertiser_id, campaign_name, ... } — used
+  // to ignore report rows for campaigns we don't track, to satisfy the NOT
+  // NULL columns when persisting, and (auto_budget_baseline/auto_budget_bumps)
+  // as the running state for the auto budget-bump feature below.
   const { data: known } = await supabase
     .from("tiktok_campaigns")
-    .select("campaign_id, connection_id, advertiser_id, campaign_name, effective_status");
+    .select("campaign_id, connection_id, advertiser_id, campaign_name, effective_status, auto_budget_baseline, auto_budget_bumps");
   const knownById = new Map((known || []).map((c) => [String(c.campaign_id), c]));
+
+  // WH Warmup campaigns are throwaway (auto-delete once Active) — never
+  // worth scaling their budget.
+  let whIds = new Set();
+  try {
+    const { data: wh } = await supabase.from("wh_warmup_campaigns").select("campaign_id");
+    whIds = new Set((wh || []).map((r) => String(r.campaign_id)));
+  } catch (_) {
+    /* no WH table — nothing to exclude */
+  }
 
   // Engagement FOUNDATION: on this ~60s tick, flip any campaign currently stored
   // as "Active" that has a post URL to READY. Idempotent, no external calls.
@@ -1017,6 +1035,7 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
   const metrics = {};
   const errors = {};
   const okAdvertiserIds = [];
+  const budgetBumps = {}; // campaign_id -> { budget, auto_budget_baseline, auto_budget_bumps }
 
   // Stay comfortably inside the function time limit even with many advertisers.
   const DEADLINE_MS = 9000;
@@ -1057,6 +1076,19 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
           const byId = await loadCampaignMetricsForAdvertiser(client, advId, { date });
           for (const [cid, m] of Object.entries(byId)) metrics[cid] = m;
           okAdvertiserIds.push(advId);
+
+          // Auto budget-bump: +$50 to a CBO campaign's budget for every $10 it
+          // spends today. Reuses this SAME connected client + the spend this
+          // call just fetched — no extra report/connection. Best-effort: a
+          // failure here never blocks metrics for the rest of this advertiser.
+          try {
+            const spendByCampaignId = {};
+            for (const [cid, m] of Object.entries(byId)) spendByCampaignId[cid] = m.spend;
+            const bumps = await applyAutoBudgetBumps({ client, advertiserId: advId, spendByCampaignId, knownById, whIds });
+            for (const b of bumps) budgetBumps[b.campaign_id] = b;
+          } catch (err) {
+            console.error(`[auto-budget] adv=${advId} failed: ${err.message}`);
+          }
         } catch (err) {
           errors[`adv:${advId}`] = err.message;
           console.error(`[tiktok-metrics] report failed adv=${advId}: ${err.message}`);
@@ -1069,12 +1101,14 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
 
   // Persist today's metrics onto the known campaign rows (one upsert). This is
   // what daily_totals.total_spend is derived from, so it must be best-effort and
-  // must never fail the response.
+  // must never fail the response. Any auto budget-bump applied this cycle
+  // (budgetBumps) rides along in the SAME upsert.
   const now = new Date().toISOString();
   const rows = [];
   for (const [cid, m] of Object.entries(metrics)) {
     const k = knownById.get(cid);
     if (!k) continue;
+    const bump = budgetBumps[cid];
     rows.push({
       campaign_id: cid,
       connection_id: k.connection_id,
@@ -1084,6 +1118,7 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
       today_spend: m.spend,
       today_impressions: m.impressions,
       today_clicks: m.clicks,
+      ...(bump ? { budget: bump.budget, auto_budget_baseline: bump.auto_budget_baseline, auto_budget_bumps: bump.auto_budget_bumps } : {}),
       today_conversions: m.conversions,
       today_cpm: m.cpm,
       today_cpa: m.cpa,
@@ -1092,7 +1127,7 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
   }
   if (rows.length) {
     const { error: upErr } = await supabase.from("tiktok_campaigns").upsert(rows, { onConflict: "campaign_id" });
-    if (upErr && !/today_(date|spend|impressions|clicks|conversions|cpm|cpa)|metrics_updated_at/.test(upErr.message || "")) {
+    if (upErr && !/today_(date|spend|impressions|clicks|conversions|cpm|cpa)|metrics_updated_at|auto_budget_(bumps|baseline)/.test(upErr.message || "")) {
       // A real write error (not "column missing" — that just means the migration
       // hasn't been run yet, which only affects daily_totals, not the live table).
       errors.persist = upErr.message;
@@ -1114,7 +1149,7 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
     console.error(`[tiktok-metrics] spend snapshot failed: ${err.message}`);
   }
 
-  return json(200, { ok: true, date, metrics, okAdvertiserIds, errors, spendToday });
+  return json(200, { ok: true, date, metrics, okAdvertiserIds, errors, spendToday, budgetBumps });
 }
 
 // Current hour (0-23) in America/New_York — the graph's fixed axis / boundary.
