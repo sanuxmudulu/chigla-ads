@@ -1687,26 +1687,24 @@ function renderWhAdvertisers() {
   const shown = filterAdvsByQuery(advs, query);
 
   const wrap = document.getElementById("whAdvList");
-  const campMap = campaignNameByAdvertiser();
   wrap.innerHTML = shown.length
-    ? shown.map((a) => whAdvRow(a, campMap)).join("")
+    ? shown.map((a) => whAdvRow(a)).join("")
     : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts under this Business Center."}</p>`;
 
   syncWhSelectAll();
   updateWhNextButton();
 }
 
-function whAdvRow(a, campMap) {
+function whAdvRow(a) {
   const ok = advIsApproved(a);
   const id = String(a.advertiser_id);
   const meta = [id, a.currency || null, a.display_timezone || a.timezone || null].filter(Boolean).join(" · ");
-  const campaignName = campMap ? campMap.get(id) : null;
   return `
     <label class="tk-adv${ok ? "" : " disabled"}" title="${ok ? "" : "Suspended accounts can't be used — campaign creation would fail."}">
       <input type="checkbox" data-wh-adv="${escapeHtml(id)}" ${whState.selected.has(id) ? "checked" : ""} ${ok ? "" : "disabled"} />
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || id)}</span>
-        <span class="tk-adv-meta">${escapeHtml(meta)}${campaignName ? ` <span class="tk-adv-campaign">| ${escapeHtml(campaignName)}</span>` : ""}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
       </span>
       <span class="tk-adv-status ${ok ? "ok" : "warn"}">${ok ? "Approved" : "Suspended"}</span>
     </label>`;
@@ -4081,9 +4079,8 @@ function renderSelectedConnection() {
   // never steals its focus/cursor.
   const query = document.getElementById("tiktokAdvSearch")?.value || "";
   const shownAdvs = filterAdvsByQuery(advs, query);
-  const campMap = campaignNameByAdvertiser();
   const rows = shownAdvs.length
-    ? shownAdvs.map((a) => tiktokAdvRow(a, campMap)).join("")
+    ? shownAdvs.map((a) => tiktokAdvRow(a)).join("")
     : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts found for this connection."}</p>`;
 
   const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
@@ -4113,17 +4110,16 @@ function renderSelectedConnection() {
 // Informational row only — no selection control. Detailed Metrics scopes
 // itself automatically (tracked OR has a Campaign Creator campaign; see
 // scopedAdvertisers in tiktok-campaigns.js), so there's nothing to pick here.
-function tiktokAdvRow(a, campMap) {
+function tiktokAdvRow(a) {
   const meta = [a.advertiser_id, a.currency || null, a.display_timezone || a.timezone || null]
     .filter(Boolean)
     .join(" · ");
   const approved = advIsApproved(a);
-  const campaignName = campMap ? campMap.get(String(a.advertiser_id)) : null;
   return `
     <div class="tk-adv">
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
-        <span class="tk-adv-meta">${escapeHtml(meta)}${campaignName ? ` <span class="tk-adv-campaign">| ${escapeHtml(campaignName)}</span>` : ""}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
       </span>
       <span class="tk-adv-status ${approved ? "ok" : "warn"}">${advStatusLabel(a)}</span>
     </div>`;
