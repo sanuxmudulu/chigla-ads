@@ -129,12 +129,12 @@ const state = {
   campaignMetricsDate: null, // NY date the metrics belong to
   campaignMetricsStale: false, // last metrics refresh had a partial/total failure
   spendToday: null, // { date, currentHour, cumulative, byHour } — Live Performance Spend series ONLY
+  earningsToday: null, // { date, currentHour, cumulative, byHour } — Live Performance Earnings series ONLY (combined Glitchy+Mabac)
   budgets: {}, // advertiser_id -> { budget_mode, capped, cap, spent, remaining, account_balance, currency, bc_id }
   bcBalances: {}, // bc_id -> { balance, currency, bc_name }
   detailBcFilter: "all", // "all" | bc_id — VIEW filter only, never untracks anything
   adGroupsByCampaign: {}, // campaign_id -> { loadedAt, rows, error }
   pendingActions: new Set(), // in-flight campaign/adgroup writes (double-click guard)
-  raw: [],
   hasFetchedOnce: false,
   prevConversions: new Map(),
   baseSpendTotal: 0,
@@ -342,10 +342,7 @@ function renderFromCacheOrFallback() {
     applyGlitchyResponse(cache.data, { flagNewConversions: false });
     lastUpdatedAt = cache.savedAt || Date.now();
   } else {
-    applyGlitchyResponse(
-      { sources: fallbackSources(), raw: [] },
-      { flagNewConversions: false }
-    );
+    applyGlitchyResponse({ sources: fallbackSources() }, { flagNewConversions: false });
     lastUpdatedAt = Date.now();
   }
 }
@@ -606,7 +603,9 @@ function applyGlitchyResponse(data, { flagNewConversions }) {
   state.prevConversions = new Map(sources.map((s) => [s.source, s.conversions]));
 
   state.glitchyRows = sources;
-  state.raw = data.raw || [];
+  // Live Performance Earnings series only — keep the last snapshot if this
+  // cycle didn't return one (e.g. the snapshot table isn't migrated yet).
+  if (data.earningsToday) state.earningsToday = data.earningsToday;
 
   rebuildSources({ newConversionSources });
 }
@@ -4011,21 +4010,13 @@ function cssEscapeAttr(str) {
 
 // ============================== MAIN CHART ==============================
 
-function hourlyPayoutCombined() {
-  const buckets = Array(24).fill(0);
-  for (const entry of state.raw) {
-    const stat = entry.Stat || entry.stat || entry;
-    if (!stat) continue;
-    const hr = parseInt(stat.hour, 10);
-    if (Number.isFinite(hr) && hr >= 0 && hr < 24) buckets[hr] += Number(stat.payout || 0);
-  }
-  return buckets;
-}
-
-// Hourly TikTok spend for the Live Performance graph, derived from the
-// cumulative-spend snapshots the metrics refresh stores each NY hour.
+// Hourly series for the Live Performance graph, derived from a cumulative-
+// so-far snapshot object { date, currentHour, cumulative, byHour } — shared
+// by both Spend (TikTok) and Earnings (combined Glitchy+Mabac), which are
+// snapshotted the exact same way (see tiktok-campaigns.js's spendToday /
+// _shared/glitchy-daily.js's earningsSnapshotToday).
 //
-// Cumulative spend only ever goes up, so an hour with no recorded snapshot
+// A cumulative total only ever goes up, so an hour with no recorded snapshot
 // safely means "still whatever it last was" — never a real unknown. Forward-
 // filling the cumulative total across every hour (starting from 0 at
 // midnight) turns that into a smooth, always-connected line running from
@@ -4033,11 +4024,12 @@ function hourlyPayoutCombined() {
 // happened not to land (e.g. before the first poll of the day, or across any
 // stretch the dashboard was closed). Each hour's bar is then just the delta
 // between its filled-in cumulative total and the previous hour's — still
-// clamped at 0 so a counter reset never shows as a negative dip.
-// Future hours stay null. Aggregate only — the chart always shows the
-// combined total across every source.
-function hourlySpendSeries() {
-  const st = state.spendToday;
+// clamped at 0 so a counter reset never shows as a negative dip. The CURRENT
+// hour always uses the live cumulative value straight from this poll (not
+// whatever was last snapshotted), so the point for the hour in progress rises
+// immediately as new data comes in rather than waiting for the hour to end.
+// Future hours stay null.
+function hourlySeriesFromCumulative(st) {
   if (!st || st.date !== todayStr()) return Array(24).fill(null);
 
   const byHour = st.byHour || {};
@@ -4062,6 +4054,12 @@ function hourlySpendSeries() {
   }
   return out;
 }
+function hourlySpendSeries() {
+  return hourlySeriesFromCumulative(state.spendToday);
+}
+function hourlyEarningsSeries() {
+  return hourlySeriesFromCumulative(state.earningsToday);
+}
 
 function renderChart() {
   if (!mainChartCanvas || !window.Chart) return;
@@ -4073,7 +4071,7 @@ function renderChart() {
   const limit = currentEstHour() + 1;
 
   const spendFull = hourlySpendSeries();
-  const earningsFull = hourlyPayoutCombined();
+  const earningsFull = hourlyEarningsSeries();
 
   const spendBuckets = spendFull.map((v, h) => (h < limit ? v : null));
   const earningsBuckets = earningsFull.map((v, h) => (h < limit ? v : null));

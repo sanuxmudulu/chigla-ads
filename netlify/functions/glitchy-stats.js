@@ -12,6 +12,7 @@ const {
   fetchGlitchy,
   upsertTodayTotals,
   networkByCampaignName,
+  earningsSnapshotToday,
 } = require("./_shared/glitchy-daily");
 const { fetchMabacSubIdReport } = require("./_shared/mabac");
 
@@ -41,6 +42,7 @@ exports.handler = async function (event) {
     // reaches today (the normal dashboard poll). Combined Glitchy + Mabac
     // earnings by network ownership. Every part here is best-effort — a Mabac
     // or Supabase hiccup never blocks the Glitchy response.
+    let earningsToday = null;
     if (endDate >= today) {
       const supabase = supabaseClient();
       if (supabase) {
@@ -53,9 +55,13 @@ exports.handler = async function (event) {
         }
         try {
           const networkByName = await networkByCampaignName(supabase);
-          await upsertTodayTotals(supabase, entries, { mabacSources, networkByName });
-        } catch (_) {
-          /* history write is best-effort */
+          const totals = await upsertTodayTotals(supabase, entries, { mabacSources, networkByName });
+          // Live Performance graph ONLY: snapshot the combined total-so-far into
+          // the current NY hour so the Earnings line reflects Mabac too (raw
+          // Glitchy entries alone, used below for backward-compat, never do).
+          earningsToday = await earningsSnapshotToday(supabase, today, totals.total_earnings);
+        } catch (err) {
+          console.error(`[glitchy-stats] daily history / earnings snapshot failed: ${err.message}`);
         }
       }
     }
@@ -67,8 +73,10 @@ exports.handler = async function (event) {
         endDate,
         raw_entry_count: entries.length,
         sources,
-        // Raw entries power the Live Performance hourly chart on the frontend.
-        raw: entries,
+        // The Live Performance hourly chart uses `earningsToday` (combined
+        // Glitchy+Mabac, snapshotted per NY hour — see above), not raw
+        // per-entry data, so the raw entries themselves aren't sent here.
+        earningsToday,
       }),
     };
   } catch (err) {

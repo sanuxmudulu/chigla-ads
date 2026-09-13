@@ -1276,16 +1276,29 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
   // ---- Live Performance graph ONLY: snapshot today's cumulative spend into the
   // current NY hour, then hand back every hour's cumulative so the frontend can
   // derive hourly spend (delta between consecutive snapshots). Zero extra MCP
-  // calls — this is all Supabase. Never fails the response.
-  let spendToday = null;
+  // calls — this is all Supabase.
+  //
+  // tiktokSpendForToday can't itself fail (self-contained try/catch, returns 0
+  // worst case), so `cumulative` and `spendToday` are always real — the write
+  // and read below are each isolated in their own try/catch so a snapshot
+  // write hiccup (a transient Supabase error not matching the "table not
+  // migrated yet" pattern below) can never blank the graph's Spend line down
+  // to nothing; it just means that one hour's bucket doesn't get its usual
+  // precision this cycle.
+  const cumulative = await tiktokSpendForToday(supabase, date); // Σ persisted today_spend
+  const hour = nyHourNow();
   try {
-    const cumulative = await tiktokSpendForToday(supabase, date); // Σ persisted today_spend
-    const hour = nyHourNow();
     await recordSpendSnapshot(supabase, date, hour, cumulative);
-    spendToday = { date, currentHour: hour, cumulative, byHour: await readSpendSnapshots(supabase, date) };
   } catch (err) {
-    console.error(`[tiktok-metrics] spend snapshot failed: ${err.message}`);
+    console.error(`[tiktok-metrics] spend snapshot write failed: ${err.message}`);
   }
+  let byHour = {};
+  try {
+    byHour = await readSpendSnapshots(supabase, date);
+  } catch (err) {
+    console.error(`[tiktok-metrics] spend snapshot read failed: ${err.message}`);
+  }
+  const spendToday = { date, currentHour: hour, cumulative, byHour };
 
   return json(200, { ok: true, date, metrics, okAdvertiserIds, errors, spendToday, budgetBumps });
 }
