@@ -949,11 +949,19 @@ async function autoProcessReadyEngagements(supabase, campaignIds) {
 
   let ready;
   try {
+    // Oldest post-URL-attached first (NOT updated_at — that column gets
+    // touched by the unrelated per-tick status refresh for every active
+    // Campaign Creator campaign, so it doesn't distinguish "waiting on
+    // engagement" at all). With more READY campaigns than the per-tick
+    // budget can clear, this guarantees every campaign eventually reaches
+    // the front of the queue instead of a few fast/always-first ones
+    // perpetually crowding out whichever happen to sort last.
     const { data, error } = await supabase
       .from("tiktok_campaigns")
-      .select("campaign_id, tiktok_post_url")
+      .select("campaign_id, tiktok_post_url, engagement_added_at")
       .in("campaign_id", ids)
-      .eq("engagement_status", "READY");
+      .eq("engagement_status", "READY")
+      .order("engagement_added_at", { ascending: true, nullsFirst: true });
     if (error) return; // unmigrated / transient — nothing to do
     ready = (data || []).filter((c) => String(c.tiktok_post_url || "").trim());
   } catch (_) {

@@ -337,8 +337,6 @@ td.negative { color: var(--loss); }
 }
 .rowmenu-item:hover { background: var(--bg-2); }
 .rowmenu-item.danger { color: var(--danger); }
-.rowmenu-item.muted { color: var(--text-2); }
-.rowmenu-item.muted:hover { background: var(--bg-2); }
 .rowmenu-item.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
 /* ---- budget modal ---- */
@@ -679,8 +677,10 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .modal textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.eng-placeholder { font-size: 12px; color: var(--text-1); line-height: 1.5; margin: 0 0 8px; min-height: 0; }
+.eng-placeholder { font-size: 12px; color: var(--text-1); line-height: 1.5; margin: 0 0 8px; min-height: 0; white-space: pre-line; }
 .eng-placeholder.ok { color: var(--profit); }
+.eng-placeholder.warn { color: var(--warn); }
+.eng-placeholder.bad { color: var(--loss); }
 .eng-placeholder.busy { color: var(--text-1); }
 .eng-placeholder:empty { display: none; }
 

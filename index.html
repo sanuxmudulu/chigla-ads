@@ -458,8 +458,10 @@
 
       <div class="ec-auto" id="ecAutoOrders" hidden></div>
 
-      <label class="budget-field-label" for="engagementCommentsUrl">TikTok Post URL</label>
-      <input type="text" id="engagementCommentsUrl" placeholder="https://www.tiktok.com/@handle/video/…" autocomplete="off" />
+      <div id="ecUrlField">
+        <label class="budget-field-label" for="engagementCommentsUrl">TikTok Post URL</label>
+        <input type="text" id="engagementCommentsUrl" placeholder="https://www.tiktok.com/@handle/video/…" autocomplete="off" />
+      </div>
 
       <label class="budget-field-label" for="engagementServiceIdInput">Service ID</label>
       <input type="text" id="engagementServiceIdInput" placeholder="e.g. 5824" autocomplete="off" />
@@ -491,6 +493,31 @@
         <button class="icon-btn" id="ecTplCancelBtn">Cancel</button>
         <button class="icon-btn primary" id="ecTplSaveBtn">Save</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ENGAGEMENT (manual LIKES/SAVES fallback) MODAL ============ -->
+<div class="modal-backdrop" id="engagementManualModal">
+  <div class="modal ec-modal">
+    <div class="modal-header">
+      <h3>Engagement</h3>
+      <button id="closeEngagementManualModal">✕</button>
+    </div>
+    <p class="eng-target">Campaign: <strong id="engagementManualCampaignName"></strong></p>
+    <p class="eng-note">On-demand push to the same panels the auto-trigger uses — for campaigns it missed or hasn't reached yet.</p>
+
+    <label class="budget-field-label" for="engagementManualLikes">Likes</label>
+    <input type="number" id="engagementManualLikes" min="0" step="1" placeholder="0" />
+
+    <label class="budget-field-label" for="engagementManualSaves">Saves</label>
+    <input type="number" id="engagementManualSaves" min="0" step="1" placeholder="0" />
+
+    <div class="eng-placeholder" id="engagementManualResult"></div>
+    <div class="modal-error" id="engagementManualError"></div>
+    <div class="modal-actions">
+      <button class="icon-btn" id="cancelEngagementManualBtn">Cancel</button>
+      <button class="icon-btn primary" id="submitEngagementManualBtn">Add</button>
     </div>
   </div>
 </div>

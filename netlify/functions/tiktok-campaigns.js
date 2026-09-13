@@ -17,9 +17,16 @@
 //        "set_adgroup_status"  : { campaign_id, adgroup_id, operation_status } — write
 //        "set_post_url"       : { campaign_id, tiktok_post_url } — set/clear a campaign's
 //                                TikTok post URL (validated https tiktok.com link; no external calls)
-//        "queue_engagement_comments": { campaign_id, service_id, comments } — store a comment
-//                                batch (against the campaign's tiktok_post_url) as an
-//                                engagement_orders row. NEVER contacts an SMM service.
+//        "queue_engagement_comments": { campaign_ids (or legacy campaign_id), service_id, comments }
+//                                — one comment batch (same template/service id) per
+//                                campaign, against each campaign's own tiktok_post_url.
+//                                -> { results: [{ campaign_id, ok, message, ... }] }
+//        "queue_engagement_manual" : { campaign_ids, likes_quantity?, saves_quantity? } —
+//                                on-demand LIKES/SAVES push, bypassing the auto-trigger's
+//                                own state machine entirely (a fallback for campaigns it
+//                                missed). -> { results: [{ campaign_id, ok, likes?, saves? }] }
+//        "engagement_defaults" : current LIKES/SAVES panel quantity + configured flag,
+//                                so the UI can pre-fill "default = what auto-engagement uses"
 //
 // None of these need the admin password. Discovery/sync/metrics/budgets and
 // every per-campaign write are restricted server-side to "scoped" advertiser
@@ -54,7 +61,7 @@ const {
   json,
 } = require("./_shared/tiktok-mcp");
 const { tiktokSpendForToday } = require("./_shared/glitchy-daily");
-const { submitEngagementOrder, parseComments } = require("./_shared/engagement-provider");
+const { submitEngagementOrder, parseComments, configFor } = require("./_shared/engagement-provider");
 const { groupReasonsByCategory } = require("./_shared/appeals.js");
 const { applyAutoBudgetBumps } = require("./_shared/auto-budget-bump");
 const { discoverStrayCampaigns } = require("./_shared/stray-campaigns");
@@ -572,83 +579,53 @@ exports.handler = async function (event) {
     }
 
     if (action === "queue_engagement_comments") {
-      if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
-      const r = await resolveTrackedCampaign(supabase, body.campaign_id);
-      if (r.error) return r.error;
-      if (!(await withoutTemporaryCampaigns(supabase, [String(body.campaign_id)])).length) {
-        return json(400, { error: "WH Warmup campaigns can't be used for engagement." });
-      }
-
-      const link = (r.campaign.tiktok_post_url || "").trim();
-      if (!link) {
-        return json(400, {
-          error: "This campaign has no TikTok post URL yet. It is set automatically when the campaign is created.",
-        });
-      }
+      const ids = normalizeCampaignIds(body.campaign_ids, body.campaign_id);
+      if (!ids.length) return json(400, { error: "campaign_id(s) required" });
 
       const comments = parseComments(body.comments);
-      if (!comments.length) {
-        return json(400, { error: "Enter at least one comment (one per line)." });
-      }
+      if (!comments.length) return json(400, { error: "Enter at least one comment (one per line)." });
       const serviceId = typeof body.service_id === "string" ? body.service_id.trim() : "";
-      if (!serviceId) {
-        return json(400, { error: "Service ID is required." });
+      if (!serviceId) return json(400, { error: "Service ID is required." });
+
+      const results = [];
+      for (const cid of ids) {
+        results.push(await queueCommentsForOne(supabase, cid, serviceId, comments));
       }
+      return json(200, { ok: true, results });
+    }
 
-      // Store the batch first (so a provider failure still leaves a record).
-      const orderRow = {
-        campaign_id: String(r.campaign.campaign_id),
-        kind: "COMMENTS",
-        provider: null,
-        service_id: serviceId,
-        link,
-        quantity: comments.length,
-        comments,
-        status: "READY",
-        note: null,
-        updated_at: new Date().toISOString(),
-      };
-      const ins = await supabase.from("engagement_orders").insert(orderRow).select().maybeSingle();
-      if (ins.error && /does not exist|schema cache|could not find the table/i.test(ins.error.message || "")) {
-        return json(500, {
-          error: "The engagement_orders table isn't migrated yet. Run supabase/tiktok_engagement.sql, then retry.",
-          details: ins.error.message,
-        });
+    // Manual fallback for LIKES / SAVES — the same panels the ~60s auto-trigger
+    // uses (see _shared/engagement-provider.js), fired on demand instead of
+    // waiting on that lifecycle. Bypasses the auto system's own idempotency
+    // latch/attempt-cap entirely: this is an explicit "place it now" action, so
+    // a campaign the auto-trigger already gave up on (or hasn't reached yet)
+    // can still be pushed through by hand. { campaign_ids, likes_quantity?,
+    // saves_quantity? } — a 0/omitted quantity skips that kind for every
+    // campaign in the batch.
+    if (action === "queue_engagement_manual") {
+      const ids = normalizeCampaignIds(body.campaign_ids, body.campaign_id);
+      if (!ids.length) return json(400, { error: "campaign_id(s) required" });
+      const likesQty = Math.max(0, Math.floor(Number(body.likes_quantity) || 0));
+      const savesQty = Math.max(0, Math.floor(Number(body.saves_quantity) || 0));
+      if (!likesQty && !savesQty) return json(400, { error: "Enter a Likes and/or Saves quantity." });
+
+      const results = [];
+      for (const cid of ids) {
+        results.push(await queueManualForOne(supabase, cid, { likesQty, savesQty }));
       }
-      if (ins.error) return json(500, { error: "Could not store the comment batch", details: ins.error.message });
+      return json(200, { ok: true, results });
+    }
 
-      // Dispatch to the COMMENTS provider (DripFeedPanel) using the modal's
-      // Service ID. With no ENGAGEMENT_COMMENTS_API_KEY this is stored-only.
-      const result = await submitEngagementOrder({
-        kind: "COMMENTS",
-        campaignId: String(r.campaign.campaign_id),
-        serviceId,
-        link,
-        quantity: comments.length,
-        comments,
-      });
-
-      if (ins.data) {
-        await supabase
-          .from("engagement_orders")
-          .update({
-            status: result.status || "READY",
-            provider: result.provider || null,
-            provider_ref: result.providerRef || null,
-            note: result.message || null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", ins.data.id);
-      }
-
+    // Read-only: current LIKES/SAVES panel defaults (quantity + whether an API
+    // key is configured for that kind), so the Engagement modal can pre-fill
+    // "default = whatever auto-engagement currently uses." No secrets returned.
+    if (action === "engagement_defaults") {
+      const likes = configFor("LIKES");
+      const saves = configFor("SAVES");
       return json(200, {
         ok: true,
-        order_id: ins.data ? ins.data.id : null,
-        count: comments.length,
-        submitted: !!result.submitted,
-        status: result.status || "READY",
-        provider_ref: result.providerRef || null,
-        message: result.message || "Stored locally — ready for an approved provider integration.",
+        likes: { quantity: likes.quantity, configured: !!likes.apiKey },
+        saves: { quantity: saves.quantity, configured: !!saves.apiKey },
       });
     }
 
@@ -659,6 +636,143 @@ exports.handler = async function (event) {
     return json(500, { error: "Request failed", details: err.message });
   }
 };
+
+// Accepts either the new `campaign_ids` (array) or the legacy single
+// `campaign_id` param, returns a deduped array of string ids either way.
+function normalizeCampaignIds(campaignIds, campaignId) {
+  const raw = Array.isArray(campaignIds) ? campaignIds : campaignId != null ? [campaignId] : [];
+  return [...new Set(raw.map((v) => String(v || "").trim()).filter(Boolean))];
+}
+
+// One campaign's COMMENTS batch — same template/service id, this campaign's
+// own tiktok_post_url. Never throws; every failure comes back as a per-
+// campaign { ok:false, error } entry so a batch of many never aborts on one
+// bad row (e.g. a campaign missing its post URL).
+async function queueCommentsForOne(supabase, campaignId, serviceId, comments) {
+  const cid = String(campaignId);
+  const r = await resolveTrackedCampaign(supabase, cid);
+  if (r.error) return { campaign_id: cid, ok: false, error: "Campaign not found or not tracked." };
+  if (!(await withoutTemporaryCampaigns(supabase, [cid])).length) {
+    return { campaign_id: cid, ok: false, error: "WH Warmup campaigns can't be used for engagement." };
+  }
+  const link = (r.campaign.tiktok_post_url || "").trim();
+  if (!link) {
+    return { campaign_id: cid, ok: false, error: "This campaign has no TikTok post URL yet." };
+  }
+
+  const orderRow = {
+    campaign_id: cid,
+    kind: "COMMENTS",
+    provider: null,
+    service_id: serviceId,
+    link,
+    quantity: comments.length,
+    comments,
+    status: "READY",
+    note: null,
+    updated_at: new Date().toISOString(),
+  };
+  const ins = await supabase.from("engagement_orders").insert(orderRow).select().maybeSingle();
+  if (ins.error && /does not exist|schema cache|could not find the table/i.test(ins.error.message || "")) {
+    return { campaign_id: cid, ok: false, error: "engagement_orders isn't migrated yet — run supabase/tiktok_engagement.sql." };
+  }
+  if (ins.error) return { campaign_id: cid, ok: false, error: `Could not store the comment batch: ${ins.error.message}` };
+
+  const result = await submitEngagementOrder({ kind: "COMMENTS", campaignId: cid, serviceId, link, quantity: comments.length, comments });
+
+  if (ins.data) {
+    await supabase
+      .from("engagement_orders")
+      .update({
+        status: result.status || "READY",
+        provider: result.provider || null,
+        provider_ref: result.providerRef || null,
+        note: result.message || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", ins.data.id);
+  }
+
+  return {
+    campaign_id: cid,
+    ok: true,
+    order_id: ins.data ? ins.data.id : null,
+    count: comments.length,
+    submitted: !!result.submitted,
+    status: result.status || "READY",
+    provider_ref: result.providerRef || null,
+    message: result.message || "Stored locally — ready for an approved provider integration.",
+  };
+}
+
+// One campaign's manual LIKES/SAVES push — deliberately independent of the
+// auto-trigger's own state machine (ensureAutoOrder in _shared/tiktok-mcp.js),
+// since this exists specifically to cover campaigns the auto path missed or
+// gave up on. LIKES/SAVES have at most one row per campaign (a partial unique
+// index — see supabase/engagement_orders_auto.sql), so this reuses that row
+// if the auto-trigger already created one (any prior PENDING/FAILED attempt
+// is simply overwritten with this fresh push) instead of inserting a
+// duplicate, which would violate that constraint.
+async function queueManualForOne(supabase, campaignId, { likesQty, savesQty }) {
+  const cid = String(campaignId);
+  const r = await resolveTrackedCampaign(supabase, cid);
+  if (r.error) return { campaign_id: cid, ok: false, error: "Campaign not found or not tracked." };
+  if (!(await withoutTemporaryCampaigns(supabase, [cid])).length) {
+    return { campaign_id: cid, ok: false, error: "WH Warmup campaigns can't be used for engagement." };
+  }
+  const link = (r.campaign.tiktok_post_url || "").trim();
+  if (!link) {
+    return { campaign_id: cid, ok: false, error: "This campaign has no TikTok post URL yet." };
+  }
+
+  const out = { campaign_id: cid, ok: true };
+  for (const [kind, qty] of [["LIKES", likesQty], ["SAVES", savesQty]]) {
+    if (!qty) continue;
+
+    const { data: existing } = await supabase
+      .from("engagement_orders")
+      .select("id")
+      .eq("campaign_id", cid)
+      .eq("kind", kind)
+      .maybeSingle();
+
+    const row = { campaign_id: cid, kind, provider: null, link, quantity: qty, status: "PENDING", note: null, updated_at: new Date().toISOString() };
+    let rowId = existing ? existing.id : null;
+    if (rowId) {
+      const { error } = await supabase.from("engagement_orders").update(row).eq("id", rowId);
+      if (error) {
+        out[kind.toLowerCase()] = { ok: false, error: error.message };
+        out.ok = false;
+        continue;
+      }
+    } else {
+      const ins = await supabase.from("engagement_orders").insert(row).select("id").maybeSingle();
+      if (ins.error) {
+        out[kind.toLowerCase()] = { ok: false, error: ins.error.message };
+        out.ok = false;
+        continue;
+      }
+      rowId = ins.data ? ins.data.id : null;
+    }
+
+    const result = await submitEngagementOrder({ kind, campaignId: cid, link, quantity: qty });
+    if (rowId) {
+      await supabase
+        .from("engagement_orders")
+        .update({
+          status: result.status || "READY",
+          provider: result.provider || null,
+          provider_ref: result.providerRef || null,
+          note: result.message || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", rowId);
+    }
+    out[kind.toLowerCase()] = { ok: !!result.ok, submitted: !!result.submitted, message: result.message };
+    if (!result.ok) out.ok = false;
+  }
+  return out;
+}
 
 // Confirms an advertiser account is ours to manage (tracked, OR it has at
 // least one Campaign Creator campaign registered) and returns its connection

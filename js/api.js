@@ -255,17 +255,49 @@ export async function setCampaignPostUrl(campaignId, tiktokPostUrl) {
   return readTiktokResponse(res, "Couldn't save the post URL"); // { tiktok_post_url }
 }
 
-// Queue a comment batch (one per line) against the campaign's tiktok_post_url.
-// Server-side it is stored as an engagement_orders row and, if
-// ENGAGEMENT_COMMENTS_API_KEY is configured, sent to the comments provider
+// Queue the SAME comment batch (one per line) against one or many campaigns'
+// own tiktok_post_url — pass a single id or an array. Server-side each
+// campaign gets its own engagement_orders row and, if
+// ENGAGEMENT_COMMENTS_API_KEY is configured, is sent to the comments provider
 // (DripFeedPanel) with the given Service ID. No credentials are ever returned.
-export async function queueEngagementComments(campaignId, serviceId, comments) {
+// -> { results: [{ campaign_id, ok, message, ... }] }
+export async function queueEngagementComments(campaignIds, serviceId, comments) {
   const res = await fetch("/.netlify/functions/tiktok-campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "queue_engagement_comments", campaign_id: campaignId, service_id: serviceId, comments }),
+    body: JSON.stringify({ action: "queue_engagement_comments", campaign_ids: [].concat(campaignIds), service_id: serviceId, comments }),
   });
   return readTiktokResponse(res, "Couldn't queue the comments");
+}
+
+// On-demand LIKES/SAVES push for one or many campaigns — a fallback for
+// campaigns the ~60s auto-trigger missed or gave up on. Bypasses that
+// trigger's own state entirely; a 0/omitted quantity skips that kind.
+// -> { results: [{ campaign_id, ok, likes?, saves? }] }
+export async function queueEngagementManual(campaignIds, likesQuantity, savesQuantity) {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "queue_engagement_manual",
+      campaign_ids: [].concat(campaignIds),
+      likes_quantity: likesQuantity,
+      saves_quantity: savesQuantity,
+    }),
+  });
+  return readTiktokResponse(res, "Couldn't queue the engagement");
+}
+
+// Current LIKES/SAVES panel defaults — used to pre-fill the Engagement
+// modal with "default = whatever auto-engagement currently uses."
+// -> { likes: { quantity, configured }, saves: { quantity, configured } }
+export async function fetchEngagementDefaults() {
+  const res = await fetch("/.netlify/functions/tiktok-campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "engagement_defaults" }),
+  });
+  return readTiktokResponse(res, "Couldn't load engagement defaults");
 }
 
 // Read-only: the engagement orders (likes / saves / comments) recorded for one
