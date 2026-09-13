@@ -337,6 +337,8 @@ td.negative { color: var(--loss); }
 }
 .rowmenu-item:hover { background: var(--bg-2); }
 .rowmenu-item.danger { color: var(--danger); }
+.rowmenu-item.muted { color: var(--text-2); }
+.rowmenu-item.muted:hover { background: var(--bg-2); }
 .rowmenu-item.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
 /* ---- budget modal ---- */
@@ -959,9 +961,11 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 .cc-tzblock-fields select { width: auto; min-width: 64px; }
 
 /* ============================== TRACKER ============================== */
-.tracker-modal { width: 1080px; max-width: 96vw; }
+/* Fixed-height modal (matches .wh-modal / .cc-modal) — the table area scrolls
+   internally instead of the whole dialog growing with the row count. */
+.tracker-modal { width: 1080px; max-width: 96vw; max-height: 88vh; display: flex; flex-direction: column; }
 
-.tracker-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.tracker-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; flex: none; }
 
 .tracker-tabs, .tracker-offer-filter {
   display: flex; gap: 4px; background: var(--bg-1); border: 1px solid var(--border);
@@ -977,7 +981,7 @@ tr.expanded + tr.row-detail .row-detail-inner { max-height: 640px; overflow-y: a
 
 .tracker-add-winner-btn { margin-left: auto; }
 
-.tracker-table-wrap { overflow-x: auto; }
+.tracker-table-wrap { overflow-x: auto; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .tracker-table { width: 100%; min-width: 900px; border-collapse: collapse; font-size: 12.5px; }
 .tracker-table th {
   text-align: left; font-weight: 600; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;

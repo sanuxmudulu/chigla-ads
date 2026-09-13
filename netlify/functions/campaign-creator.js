@@ -224,7 +224,21 @@ async function processDuplication(supabase) {
   // matching TikTok's real current state for the campaign's whole life, not
   // just during its initial review — it just never re-enters appeal/
   // duplication handling once it's past that stage.
-  const { data: rows, error } = await supabase.from("campaign_creator_campaigns").select("*");
+  //
+  // This table is never purged (it's the permanent duplication/appeal audit
+  // trail), so it only grows — with this account's volume (1 CBO per ad, 20
+  // ad-group dupes) it can hold a lot of history. The 45s deadline below can't
+  // always reach every row in one tick, so newest-first ordering matters: a
+  // freshly launched campaign's status is still actively changing (review ->
+  // active, appeal outcome, etc.) and needs to surface fast, while an old
+  // COMPLETE/FAILED row's status rarely changes again. Without this order, an
+  // unordered `select("*")` on a large table can leave the very rows a user
+  // just launched waiting behind years of settled history that didn't need
+  // rechecking this cycle at all.
+  const { data: rows, error } = await supabase
+    .from("campaign_creator_campaigns")
+    .select("*")
+    .order("created_at", { ascending: false });
   if (error) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, checked: 0, created: 0, completed: 0, failed: 0, unmigrated: true });

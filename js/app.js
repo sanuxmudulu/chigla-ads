@@ -912,10 +912,14 @@ function toggleDetailActionsMenu(btn) {
   // (WH Warmup campaigns never reach this list at all — they're excluded
   // from Detailed Metrics entirely — so there's no engagement exclusion to
   // account for here anymore.)
-  const addCommentsItem =
-    selected.length === 1
-      ? `<button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments</button>`
-      : `<button type="button" class="rowmenu-item" disabled title="Select exactly one campaign to add comments">Add comments</button>`;
+  //
+  // NOTE: this item stays a real (non-`disabled`) button even when it can't
+  // run yet — a genuinely `disabled` button never dispatches a click event at
+  // all, so with more than one campaign selected the click handler below
+  // would never fire and clicking would look completely dead (no modal, no
+  // message, nothing). Instead it's always clickable and the handler itself
+  // decides whether to open the modal or explain why not, via setStatus.
+  const addCommentsItem = `<button type="button" class="rowmenu-item${selected.length === 1 ? "" : " muted"}" data-menu-action="add-comments" title="${selected.length === 1 ? "" : "Select exactly one campaign to add comments"}">Add comments</button>`;
 
   const menu = document.createElement("div");
   menu.className = "rowmenu";
@@ -942,7 +946,11 @@ function toggleDetailActionsMenu(btn) {
       if (advIds.length) openBudgetModal(advIds);
       else setStatus("No ad-account budget is available for the selected campaign(s).", true);
     } else if (act === "add-comments") {
-      openEngagementCommentsModal(selected[0]);
+      if (selected.length !== 1) {
+        setStatus("Select exactly one campaign to add comments.", true);
+      } else {
+        openEngagementCommentsModal(selected[0]);
+      }
     } else if (act === "delete-campaign") {
       openDeleteCampaignModal(selected);
     }
@@ -4505,10 +4513,21 @@ async function loadTrackerData() {
   }
 }
 
+// Hide zero-spend placeholder rows (a campaign that never actually spent that
+// day). `spend` may be absent on rows recorded before supabase/tracker.sql's
+// spend column existed — for those, fall back to "every auto metric is 0",
+// the same signature a true $0 day has, so real historical winners with a
+// nonzero cpa/cpnc/epc/roas are never hidden just because `spend` is missing.
+function trackerTestHasSpend(r) {
+  if (r.spend != null) return Number(r.spend) > 0;
+  return toNum(r.cpa) > 0 || toNum(r.cpnc) > 0 || toNum(r.epc) > 0 || toNum(r.roas) > 0;
+}
+
 function trackerFilteredTests() {
   const f = state.tracker.offerFilter;
-  if (f === "all") return state.tracker.tests;
-  return state.tracker.tests.filter((r) => String(r.offer || "").toUpperCase() === f);
+  const base = state.tracker.tests.filter(trackerTestHasSpend);
+  if (f === "all") return base;
+  return base.filter((r) => String(r.offer || "").toUpperCase() === f);
 }
 
 function trackerFilteredWinners() {
