@@ -236,7 +236,7 @@ async function processDuplication(supabase) {
   // unordered `select("*")` on a large table can leave the very rows a user
   // just launched waiting behind years of settled history that didn't need
   // rechecking this cycle at all.
-  const { data: rows, error } = await supabase
+  const { data: fetched, error } = await supabase
     .from("campaign_creator_campaigns")
     .select("*")
     .order("created_at", { ascending: false });
@@ -246,7 +246,26 @@ async function processDuplication(supabase) {
     }
     return json(500, { error: "Supabase read failed", details: sbErr(error) });
   }
-  if (!rows || !rows.length) return json(200, { ok: true, checked: 0, created: 0, completed: 0, failed: 0 });
+  if (!fetched || !fetched.length) return json(200, { ok: true, checked: 0, created: 0, completed: 0, failed: 0 });
+
+  // DUPLICATING rows routinely need several ticks each (DUPES_PER_CYCLE=5 vs.
+  // a dupe_target that can be 20+), and the 45s deadline below can cut a tick
+  // off partway through the list. Left in the newest-first order above, the
+  // SAME campaigns — whichever landed earliest in the list — would claim the
+  // budget on every single tick, while campaigns sorted later never got a
+  // turn at all: exactly the "some got all 10 dupes, some got 0" bug this
+  // fixes. Pulling DUPLICATING rows out and sorting them oldest-updated-first
+  // makes it self-correcting: a row touched this tick sorts to the back next
+  // time, so whichever rows were skipped naturally rise to the front instead
+  // of the same ones winning every tick. WAITING_FOR_ACTIVE/READY/FAILED/
+  // COMPLETE keep the original newest-first order untouched (see the comment
+  // above) — this only reorders the rows actually competing for the
+  // duplication budget.
+  const duplicating = fetched
+    .filter((r) => r.dupe_status === "DUPLICATING")
+    .sort((a, b) => new Date(a.updated_at || 0) - new Date(b.updated_at || 0));
+  const rest = fetched.filter((r) => r.dupe_status !== "DUPLICATING");
+  const rows = [...duplicating, ...rest];
 
   const byConnection = {};
   for (const r of rows) (byConnection[r.connection_id] = byConnection[r.connection_id] || []).push(r);
