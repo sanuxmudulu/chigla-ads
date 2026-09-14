@@ -587,10 +587,13 @@ exports.handler = async function (event) {
       const serviceId = typeof body.service_id === "string" ? body.service_id.trim() : "";
       if (!serviceId) return json(400, { error: "Service ID is required." });
 
-      const results = [];
-      for (const cid of ids) {
-        results.push(await queueCommentsForOne(supabase, cid, serviceId, comments));
-      }
+      // Fired in parallel, not one-at-a-time: each call is a round trip to an
+      // external panel, and a serial await-in-a-loop over a real batch (10+
+      // campaigns) reliably outran Netlify's function time limit, killing the
+      // whole request with a 504 after only the first campaign or two had
+      // actually gone through (see queue_engagement_manual below for the same
+      // fix and the full story).
+      const results = await Promise.all(ids.map((cid) => queueCommentsForOne(supabase, cid, serviceId, comments)));
       return json(200, { ok: true, results });
     }
 
@@ -609,10 +612,13 @@ exports.handler = async function (event) {
       const savesQty = Math.max(0, Math.floor(Number(body.saves_quantity) || 0));
       if (!likesQty && !savesQty) return json(400, { error: "Enter a Likes and/or Saves quantity." });
 
-      const results = [];
-      for (const cid of ids) {
-        results.push(await queueManualForOne(supabase, cid, { likesQty, savesQty }));
-      }
+      // Parallel, not serial — see the comment on queue_engagement_comments
+      // above. A batch of N campaigns here means up to 2N sequential external
+      // HTTP round trips (LIKES then SAVES, one campaign at a time) inside a
+      // single function invocation; that's exactly what was blowing past
+      // Netlify's execution limit and coming back as a bare 504 with only
+      // the first campaign or two actually placed.
+      const results = await Promise.all(ids.map((cid) => queueManualForOne(supabase, cid, { likesQty, savesQty })));
       return json(200, { ok: true, results });
     }
 
@@ -725,51 +731,51 @@ async function queueManualForOne(supabase, campaignId, { likesQty, savesQty }) {
     return { campaign_id: cid, ok: false, error: "This campaign has no TikTok post URL yet." };
   }
 
+  // LIKES and SAVES are independent rows (the partial unique index is on
+  // (campaign_id, kind)), so they're placed in parallel — two sequential
+  // panel round trips per campaign was half of what turned a 12-campaign
+  // batch into a 504 (see the comment on queue_engagement_manual above).
   const out = { campaign_id: cid, ok: true };
-  for (const [kind, qty] of [["LIKES", likesQty], ["SAVES", savesQty]]) {
-    if (!qty) continue;
-
-    const { data: existing } = await supabase
-      .from("engagement_orders")
-      .select("id")
-      .eq("campaign_id", cid)
-      .eq("kind", kind)
-      .maybeSingle();
-
-    const row = { campaign_id: cid, kind, provider: null, link, quantity: qty, status: "PENDING", note: null, updated_at: new Date().toISOString() };
-    let rowId = existing ? existing.id : null;
-    if (rowId) {
-      const { error } = await supabase.from("engagement_orders").update(row).eq("id", rowId);
-      if (error) {
-        out[kind.toLowerCase()] = { ok: false, error: error.message };
-        out.ok = false;
-        continue;
-      }
-    } else {
-      const ins = await supabase.from("engagement_orders").insert(row).select("id").maybeSingle();
-      if (ins.error) {
-        out[kind.toLowerCase()] = { ok: false, error: ins.error.message };
-        out.ok = false;
-        continue;
-      }
-      rowId = ins.data ? ins.data.id : null;
-    }
-
-    const result = await submitEngagementOrder({ kind, campaignId: cid, link, quantity: qty });
-    if (rowId) {
-      await supabase
+  const kinds = [["LIKES", likesQty], ["SAVES", savesQty]].filter(([, qty]) => qty);
+  const settled = await Promise.all(
+    kinds.map(async ([kind, qty]) => {
+      const { data: existing } = await supabase
         .from("engagement_orders")
-        .update({
-          status: result.status || "READY",
-          provider: result.provider || null,
-          provider_ref: result.providerRef || null,
-          note: result.message || null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", rowId);
-    }
-    out[kind.toLowerCase()] = { ok: !!result.ok, submitted: !!result.submitted, message: result.message };
-    if (!result.ok) out.ok = false;
+        .select("id")
+        .eq("campaign_id", cid)
+        .eq("kind", kind)
+        .maybeSingle();
+
+      const row = { campaign_id: cid, kind, provider: null, link, quantity: qty, status: "PENDING", note: null, updated_at: new Date().toISOString() };
+      let rowId = existing ? existing.id : null;
+      if (rowId) {
+        const { error } = await supabase.from("engagement_orders").update(row).eq("id", rowId);
+        if (error) return [kind, { ok: false, error: error.message }];
+      } else {
+        const ins = await supabase.from("engagement_orders").insert(row).select("id").maybeSingle();
+        if (ins.error) return [kind, { ok: false, error: ins.error.message }];
+        rowId = ins.data ? ins.data.id : null;
+      }
+
+      const result = await submitEngagementOrder({ kind, campaignId: cid, link, quantity: qty });
+      if (rowId) {
+        await supabase
+          .from("engagement_orders")
+          .update({
+            status: result.status || "READY",
+            provider: result.provider || null,
+            provider_ref: result.providerRef || null,
+            note: result.message || null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", rowId);
+      }
+      return [kind, { ok: !!result.ok, submitted: !!result.submitted, message: result.message }];
+    })
+  );
+  for (const [kind, res] of settled) {
+    out[kind.toLowerCase()] = res;
+    if (!res.ok) out.ok = false;
   }
   return out;
 }
