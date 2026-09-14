@@ -225,17 +225,27 @@ async function loadTiktokCampaigns() {
   }
 }
 
-// Advertiser-account budgets + BC balances. Hits the MCP, so on load + manual
-// refresh only (not the 60s poll).
+// Advertiser-account budgets + BC balances. Hits the MCP — runs on load and
+// inside the 60s refresh cycle (like loadTiktokMetrics), not just a manual
+// refresh, so the Budget column stays current instead of needing a full page
+// reload. Guarded so a slow request never overlaps the next tick.
+let budgetsInFlight = false;
 async function loadTiktokBudgets() {
+  if (budgetsInFlight) return;
+  budgetsInFlight = true;
   try {
     const data = await fetchTiktokBudgets();
     state.budgets = data.advertisers || {};
     state.bcBalances = data.bc || {};
     renderDetailBcSelector();
     rebuildSources();
-  } catch (_) {
-    /* non-fatal — Budget column just shows — */
+  } catch (err) {
+    // Non-fatal — the Budget column just keeps its last-known values — but
+    // log it: this used to fail silently with no trace, which made a
+    // permanently-blank Budget column impossible to diagnose from the console.
+    console.error(`[budgets] refresh failed: ${err.message}`);
+  } finally {
+    budgetsInFlight = false;
   }
 }
 
@@ -567,6 +577,7 @@ async function refreshAll() {
       loadMabac(),
       loadTiktokMetrics(),
       loadTiktokCampaigns(),
+      loadTiktokBudgets(),
       runWhWarmupCleanup(),
       runCampaignCreatorDuplication(),
     ]);

@@ -164,7 +164,17 @@ async function tiktokSpendForToday(supabase, today) {
     const { data, error } = await supabase
       .from("tiktok_campaigns")
       .select("campaign_id, today_spend, today_date");
-    if (error || !Array.isArray(data)) return 0;
+    if (error) {
+      // Was silent before — a real error here (as opposed to a genuinely
+      // empty table) previously meant the Live Performance Spend line sat at
+      // a permanent, indistinguishable-from-"no data" $0 with no trace of
+      // why anywhere. "does not exist"/"schema cache" means
+      // supabase/tiktok_campaign_metrics.sql hasn't been run yet; anything
+      // else is worth investigating.
+      console.error(`[tiktokSpendForToday] query failed: ${error.message}`);
+      return 0;
+    }
+    if (!Array.isArray(data)) return 0;
 
     // WH Warmup campaigns show in Detailed Metrics while they exist but their
     // throwaway warmup spend must never land in the permanent daily_totals
@@ -184,7 +194,8 @@ async function tiktokSpendForToday(supabase, today) {
       spend += Number(r.today_spend) || 0;
     }
     return Math.round(spend * 100) / 100;
-  } catch (_) {
+  } catch (err) {
+    console.error(`[tiktokSpendForToday] failed: ${err.message}`);
     return 0;
   }
 }

@@ -568,13 +568,20 @@ function reviewState(review) {
 
 // Derives ONE display status for a campaign row. Priority (as specified):
 //   1. account suspended/limited/punished
-//   2. an ad currently rejected (and not since re-approved / not mid-appeal)
-//   3. an ad currently pending / in review / mid-appeal
-//   4. campaign active with >= 1 delivering ad copy
+//   2. campaign active with >= 1 delivering ad copy — a sibling ad group's
+//      own In Review / Rejected state never masks this (a freshly duplicated
+//      ad group sitting In Review is normal and expected while the original
+//      is already Active; the campaign shows Active either way)
+//   3. an ad currently rejected, ONLY when nothing is delivering
+//   4. an ad currently pending / in review / mid-appeal, ONLY when nothing
+//      is delivering and nothing is rejected
 //   5. scheduled / out of budget
-//   6. whole campaign manually paused
+//   6. whole campaign manually paused — "Paused" is reserved for a campaign
+//      that has genuinely cleared review (every ad group's own reviewState()
+//      is null/approved) and is now administratively disabled; a campaign
+//      paused while still under review reports its real In Review/Rejected
+//      state instead, never "Paused"
 //   7. all ad groups individually paused (campaign itself not paused)
-// A few manually-paused ad groups never hide an "Active" row.
 // ---------------------------------------------------------------------------
 // Campaign Creator campaigns under a live automatic appeal show a clearer
 // label/tone than TikTok's raw status — this is the ONE place that decides
@@ -656,11 +663,16 @@ function deriveEffectiveStatus({ advertiserStatus, campaign, adGroups, reviewByA
   const activeAdCount = n("active");
 
   if (total > 0) {
+    // A genuinely delivering ad group wins over every other ad group's state.
+    // Once the original ad group is Active, freshly duplicated ones sit in
+    // In Review for a while (or, rarely, one gets Rejected) — that's normal
+    // and never in doubt about the campaign itself, so it must never mask an
+    // Active campaign behind "In Review"/"Rejected" for a sibling ad group.
+    if (activeAdCount > 0) return { label: "Active", tone: "good", detail: null, activeAdCount };
     if (n("rejected") > 0)
       return { label: "Rejected", tone: "bad", detail: "One or more ads are currently not approved", activeAdCount };
     if (n("in_review") > 0)
       return { label: "In Review", tone: "warn", detail: null, activeAdCount };
-    if (activeAdCount > 0) return { label: "Active", tone: "good", detail: null, activeAdCount };
     if (n("scheduled") > 0) return { label: "Scheduled", tone: "neutral", detail: null, activeAdCount };
     if (n("budget") > 0) return { label: "Out of Budget", tone: "warn", detail: null, activeAdCount };
     if (n("campaign_paused") === total)
@@ -1441,7 +1453,13 @@ async function getAdvertiserBudgets({ client, bcId }) {
       const mode = String(a.budget_mode || "UNLIMITED").toUpperCase();
       const cap = toNum(a.budget);
       const spent = toNum(a.budget_cost);
-      const remaining = a.budget_remaining != null ? toNum(a.budget_remaining) : Math.max(0, cap - spent);
+      // Always derived from spend, never TikTok's own budget_remaining — in
+      // practice the account-level spend figure updates on TikTok's side
+      // faster than budget_remaining does, so trusting the latter shows a
+      // stale "left" amount (e.g. still showing room after the account is
+      // actually out of budget). cap/spent are the same live numbers either
+      // way; this is just which one to derive the third from.
+      const remaining = Math.max(0, cap - spent);
       byId[id] = {
         advertiser_id: id,
         budget_mode: mode,

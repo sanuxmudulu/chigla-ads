@@ -884,30 +884,43 @@ async function budgetsForScopedAdvertisers(supabase) {
   const advertisers = {};
   const bc = {}; // bc_id -> { balance, currency, connection_id, bc_name }
 
-  for (const [connectionId, list] of Object.entries(byConnection)) {
-    const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
-    if (!conn) continue;
-    const bcIds = [...new Set(list.map((t) => t.bc_id || conn.bc_id).filter(Boolean))];
-    if (!bcIds.length) continue;
+  // Every connection, and every BC within it, fetched in parallel. This used
+  // to run one BC at a time — sequentially, even across DIFFERENT connections
+  // — so with more than a handful of Business Centers it reliably outran
+  // Netlify's function time limit. The request then died with no JSON body
+  // at all, which the frontend's catch-and-ignore (see loadTiktokBudgets in
+  // js/app.js) turned into a permanently blank Budget column: the only thing
+  // that ever populated it was the unrelated side effect of editing one
+  // account's cap, which stores THAT account's fresh number straight from
+  // the edit response.
+  await Promise.all(
+    Object.entries(byConnection).map(async ([connectionId, list]) => {
+      const { data: conn } = await supabase.from("tiktok_connections").select("*").eq("id", connectionId).maybeSingle();
+      if (!conn) return;
+      const bcIds = [...new Set(list.map((t) => t.bc_id || conn.bc_id).filter(Boolean))];
+      if (!bcIds.length) return;
 
-    const provider = new SupabaseOAuthProvider({ supabase, serverUrl, redirectUrl, connection: conn });
-    let client;
-    try {
-      ({ client } = await connectMcp({ provider, serverUrl }));
-      for (const bcId of bcIds) {
-        const [bal, budgets] = await Promise.all([
-          getBcBalance({ client, bcId }),
-          getAdvertiserBudgets({ client, bcId }),
-        ]);
-        bc[bcId] = { bc_id: bcId, bc_name: conn.bc_name || null, connection_id: connectionId, ...bal };
-        for (const [advId, b] of Object.entries(budgets.byId || {})) advertisers[advId] = { ...b, bc_id: bcId };
+      const provider = new SupabaseOAuthProvider({ supabase, serverUrl, redirectUrl, connection: conn });
+      let client;
+      try {
+        ({ client } = await connectMcp({ provider, serverUrl }));
+        await Promise.all(
+          bcIds.map(async (bcId) => {
+            const [bal, budgets] = await Promise.all([
+              getBcBalance({ client, bcId }),
+              getAdvertiserBudgets({ client, bcId }),
+            ]);
+            bc[bcId] = { bc_id: bcId, bc_name: conn.bc_name || null, connection_id: connectionId, ...bal };
+            for (const [advId, b] of Object.entries(budgets.byId || {})) advertisers[advId] = { ...b, bc_id: bcId };
+          })
+        );
+      } catch (err) {
+        bc[`err:${connectionId}`] = { error: err.message };
+      } finally {
+        if (client) await client.close().catch(() => {});
       }
-    } catch (err) {
-      bc[`err:${connectionId}`] = { error: err.message };
-    } finally {
-      if (client) await client.close().catch(() => {});
-    }
-  }
+    })
+  );
 
   return json(200, { advertisers, bc });
 }
@@ -1353,7 +1366,13 @@ async function readSpendSnapshots(supabase, date) {
     .from("tiktok_spend_snapshots")
     .select("hour, cumulative_spend")
     .eq("date", date);
-  if (error || !Array.isArray(data)) return {};
+  if (error) {
+    if (!/tiktok_spend_snapshots|does not exist|schema cache/i.test(error.message || "")) {
+      console.error(`[readSpendSnapshots] query failed: ${error.message}`);
+    }
+    return {};
+  }
+  if (!Array.isArray(data)) return {};
   const byHour = {};
   for (const r of data) byHour[String(r.hour)] = Number(r.cumulative_spend) || 0;
   return byHour;
