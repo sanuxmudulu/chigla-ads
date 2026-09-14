@@ -49,7 +49,7 @@ import {
   trackerDeleteWinner,
 } from "./api.js";
 import { initTheme } from "./theme.js";
-import { createMainChart } from "./charts.js";
+import { createMainChart, updateMainChart } from "./charts.js";
 
 // ---------------------------------------------------------------------------
 // Fallback dataset — only ever used on a brand-new browser with no cache AND
@@ -139,6 +139,7 @@ const state = {
   prevConversions: new Map(),
   baseSpendTotal: 0,
   baseEarningsTotal: 0,
+  kpiPrevText: {}, // KPI element id -> its last-rendered text, so the flash-on-change animation only fires on an actual change
   expandedSources: new Set(),
   selectedCampaigns: new Set(), // campaign_ids checked in the Select column
   tracker: {
@@ -171,7 +172,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   initTheme(() => {
     // Chart colors are read from CSS vars at creation time — rebuild on theme swap.
-    renderChart();
+    renderChart(true);
   });
 
   mainChartCanvas = document.getElementById("mainChart");
@@ -741,12 +742,21 @@ function renderKpis() {
 function setKpi(id, text, sentiment) {
   const el = document.getElementById(id);
   if (!el) return;
+  // Only flash when the displayed value actually changed since the last
+  // render — this used to flash on EVERY ~60s refresh regardless (Net
+  // Profit's sentiment is always "positive" or "negative", never neither),
+  // which was a real, recurring "blink" at the top of the page even when
+  // nothing had changed. `undefined` (first render) never flashes either.
+  const prevText = state.kpiPrevText[id];
+  const changed = prevText !== undefined && prevText !== text;
+  state.kpiPrevText[id] = text;
+
   const flashClass = sentiment === "positive" ? "kpi-flash-up" : sentiment === "negative" ? "kpi-flash-down" : null;
   el.textContent = text;
   el.classList.remove("positive", "negative");
   if (sentiment) el.classList.add(sentiment);
   const card = el.closest(".kpi-card");
-  if (flashClass && card) {
+  if (changed && flashClass && card) {
     card.classList.remove("kpi-flash-up", "kpi-flash-down");
     void card.offsetWidth; // restart animation
     card.classList.add(flashClass);
@@ -758,7 +768,6 @@ function setKpi(id, text, sentiment) {
 function renderTable(newConversionSources) {
   const tbody = document.getElementById("sourcesBody");
   closeRowMenu(); // any re-render invalidates the floating menu's anchor
-  tbody.innerHTML = "";
 
   // Drop selections for campaigns that no longer exist in this render (e.g.
   // deleted, or filtered out by the BC view).
@@ -772,17 +781,37 @@ function renderTable(newConversionSources) {
   // (> 0) ROAS, so rows with no TikTok spend yet don't get an arbitrary crown.
   const bestRoas = sorted.reduce((best, s) => (s.roas > (best?.roas ?? 0) ? s : best), null);
 
+  // Reuse existing <tr> elements (keyed by source name) instead of tearing
+  // down and rebuilding the whole tbody on every refresh. Destroying every
+  // row on the ~60s auto-refresh was what actually caused the visible
+  // "blink" and the page nudging up/down: it restarted every row's CSS
+  // animation (the 3x+ ROAS glow) all at once, and reordering from live ROAS
+  // changes moved a freshly-recreated element instead of just relocating the
+  // one already there. Same content, same node — nothing for the browser to
+  // flash, and no layout thrash from wiping ~30+ rows at once.
+  const existingRows = new Map();
+  for (const child of tbody.children) {
+    if (child.classList.contains("source-row")) existingRows.set(child.dataset.source, child);
+  }
+
+  let anchor = null; // insert/keep each row+detail pair immediately after this node
   sorted.forEach((s) => {
-    const tr = document.createElement("tr");
+    let tr = existingRows.get(s.source);
+    let detailTr;
+    if (tr) {
+      existingRows.delete(s.source);
+      detailTr = tr.nextElementSibling;
+    } else {
+      tr = document.createElement("tr");
+      tr.dataset.source = s.source;
+      detailTr = document.createElement("tr");
+      detailTr.className = "row-detail";
+    }
+
     tr.className = "source-row " + (s.profit >= 0 ? "profit-positive" : "profit-negative");
     // Premium winner highlight: golden border at 2x+, add an animated glow at 3x+.
     if (s.roas >= 3) tr.classList.add("roas-gold", "roas-fire");
     else if (s.roas >= 2) tr.classList.add("roas-gold");
-    tr.dataset.source = s.source;
-    if (newConversionSources && newConversionSources.has(s.source)) {
-      tr.classList.add("new-conversion");
-      setTimeout(() => tr.classList.remove("new-conversion"), 2500);
-    }
 
     const crown = bestRoas && s === bestRoas ? `<span class="crown" title="Best ROAS today">👑</span>` : "";
 
@@ -801,18 +830,38 @@ function renderTable(newConversionSources) {
       <td class="num roas-cell" style="color:${roasColor(s.roas)}">${s.roas.toFixed(2)}x</td>
       <td class="budget-cell">${budgetCell(s)}</td>
     `;
-    tbody.appendChild(tr);
 
-    const detailTr = document.createElement("tr");
-    detailTr.className = "row-detail";
+    if (newConversionSources && newConversionSources.has(s.source)) {
+      // Force the glow to restart even if this row (rare, but possible across
+      // two conversions in quick succession) still had it from last time.
+      tr.classList.remove("new-conversion");
+      void tr.offsetWidth;
+      tr.classList.add("new-conversion");
+      setTimeout(() => tr.classList.remove("new-conversion"), 2500);
+    }
+
     detailTr.innerHTML = `<td colspan="13"><div class="row-detail-inner"><div class="adgroups-panel" data-adgroups-for="${escapeHtml(s.campaignId || "")}"></div></div></td>`;
-    tbody.appendChild(detailTr);
 
     if (state.expandedSources.has(s.source)) {
       tr.classList.add("expanded");
       requestAnimationFrame(() => renderAdGroupsPanel(s));
     }
+
+    // Position this pair right after `anchor` — a no-op (no DOM move at all)
+    // when it's already there, which is the common case on a routine refresh.
+    const afterAnchor = anchor ? anchor.nextElementSibling : tbody.firstElementChild;
+    if (afterAnchor !== tr) tbody.insertBefore(tr, afterAnchor);
+    if (tr.nextElementSibling !== detailTr) tbody.insertBefore(detailTr, tr.nextElementSibling);
+    anchor = detailTr;
   });
+
+  // Anything left is a source no longer in state.sources (deleted, or
+  // filtered out by the current Business Center view) — remove its pair.
+  for (const tr of existingRows.values()) {
+    const detailTr = tr.nextElementSibling;
+    tr.remove();
+    if (detailTr && detailTr.classList.contains("row-detail")) detailTr.remove();
+  }
 
   syncDetailActionsButton();
 }
@@ -4061,7 +4110,12 @@ function hourlyEarningsSeries() {
   return hourlySeriesFromCumulative(state.earningsToday);
 }
 
-function renderChart() {
+// `forceRecreate` is only for an actual theme swap (chart colors are read
+// from CSS vars at creation time). Every routine data refresh instead
+// updates the existing chart in place — destroying and recreating it every
+// ~60s replayed Chart.js's whole entrance animation, a visible flash right
+// near the top of the page on every single auto-refresh.
+function renderChart(forceRecreate) {
   if (!mainChartCanvas || !window.Chart) return;
 
   // Fixed 00:00–23:00 EST axis, always — never the viewer's local timezone.
@@ -4076,7 +4130,9 @@ function renderChart() {
   const spendBuckets = spendFull.map((v, h) => (h < limit ? v : null));
   const earningsBuckets = earningsFull.map((v, h) => (h < limit ? v : null));
 
-  createMainChart(mainChartCanvas, hourLabels, earningsBuckets, spendBuckets);
+  if (forceRecreate || !updateMainChart(hourLabels, earningsBuckets, spendBuckets)) {
+    createMainChart(mainChartCanvas, hourLabels, earningsBuckets, spendBuckets);
+  }
 }
 
 // ============================== TOOLS DRAWER ==============================
