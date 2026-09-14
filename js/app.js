@@ -161,9 +161,11 @@ let mainChartCanvas = null;
 let openRowMenuFor = null; // campaignId whose ⋮ menu is open, or null
 let rowMenuEl = null; // the floating menu element (appended to <body>)
 let deleteCampaignTargets = []; // source row(s) pending delete confirmation
-let engagementTargets = []; // source row(s) for the open Add-comments modal — 1 = single-campaign UI, >1 = batch
-let engagementManualTargets = []; // source row(s) for the open Engagement (manual likes/saves) modal
+let engagementManualTargets = []; // source row(s) for the open Engagement modal — 1 = single-campaign UI, >1 = batch
 const ENGAGEMENT_SERVICE_ID_KEY = "chigla_engagement_service_id_v1";
+// Which engagement kinds to actually send when "Add" is clicked — all on by
+// default; the modal's per-kind toggle switches flip these.
+const engagementToggles = { likes: true, saves: true, comments: true };
 
 // ============================== INIT ==============================
 
@@ -411,6 +413,7 @@ function wireEvents() {
   });
   document.getElementById("budgetModeSelect").addEventListener("change", syncBudgetAmountVisibility);
   document.getElementById("confirmBudgetBtn").addEventListener("click", submitBudgetEdit);
+  document.getElementById("setMinBudgetBtn").addEventListener("click", submitBudgetMinimum);
 
   // ---- ⋮ row menu: close on outside click / scroll / Escape ----
   document.addEventListener("click", (e) => {
@@ -439,22 +442,17 @@ function wireEvents() {
     if (e.target.id === "rejectionReasonModal") closeRejectionReasonModal();
   });
 
-  // ---- engagement: Add comments modal ----
-  document.getElementById("closeEngagementCommentsModal").addEventListener("click", closeEngagementCommentsModal);
-  document.getElementById("cancelEngagementCommentsBtn").addEventListener("click", closeEngagementCommentsModal);
-  document.getElementById("engagementCommentsModal").addEventListener("click", (e) => {
-    if (e.target.id === "engagementCommentsModal") closeEngagementCommentsModal();
-  });
-  document.getElementById("submitEngagementCommentsBtn").addEventListener("click", submitEngagementComments);
-  wireCommentTemplateEvents();
-
-  // ---- engagement: manual Likes/Saves fallback modal ----
+  // ---- engagement modal (Likes / Saves / Comments, each toggleable) ----
   document.getElementById("closeEngagementManualModal").addEventListener("click", closeEngagementManualModal);
   document.getElementById("cancelEngagementManualBtn").addEventListener("click", closeEngagementManualModal);
   document.getElementById("engagementManualModal").addEventListener("click", (e) => {
     if (e.target.id === "engagementManualModal") closeEngagementManualModal();
   });
   document.getElementById("submitEngagementManualBtn").addEventListener("click", submitEngagementManual);
+  document.getElementById("engToggleLikes").addEventListener("click", () => toggleEngagementKind("likes"));
+  document.getElementById("engToggleSaves").addEventListener("click", () => toggleEngagementKind("saves"));
+  document.getElementById("engToggleComments").addEventListener("click", () => toggleEngagementKind("comments"));
+  wireCommentTemplateEvents();
 
   document.getElementById("sourcesBody").addEventListener("click", (e) => {
     // Select checkbox — must NOT toggle the row (its own `change` listener
@@ -975,17 +973,17 @@ function toggleDetailActionsMenu(btn) {
   openRowMenuFor = "bulk";
   btn.classList.add("active");
 
-  // Add comments and Engagement both run the same call as a batch across
-  // every selected campaign's own tiktok_post_url (each modal handles the
-  // 1-vs-many UI difference itself) — same as Edit budget and Delete.
-  // (WH Warmup campaigns never reach this list at all — they're excluded
-  // from Detailed Metrics entirely — so there's no engagement exclusion to
-  // account for here anymore.)
+  // Engagement runs the same call as a batch across every selected campaign's
+  // own tiktok_post_url (the modal handles the 1-vs-many UI difference
+  // itself) — same as Edit budget and Delete. Comments live inside the
+  // Engagement modal now (a toggleable kind alongside Likes/Saves), not as a
+  // separate menu entry. (WH Warmup campaigns never reach this list at all —
+  // they're excluded from Detailed Metrics entirely — so there's no
+  // engagement exclusion to account for here anymore.)
   const menu = document.createElement("div");
   menu.className = "rowmenu";
   menu.innerHTML = `
     <button type="button" class="rowmenu-item" data-menu-action="edit-budget">Edit budget${selected.length > 1 ? ` (${selected.length})` : ""}</button>
-    <button type="button" class="rowmenu-item" data-menu-action="add-comments">Add comments${selected.length > 1 ? ` (${selected.length})` : ""}</button>
     <button type="button" class="rowmenu-item" data-menu-action="engagement">Engagement${selected.length > 1 ? ` (${selected.length})` : ""}</button>
     <button type="button" class="rowmenu-item danger" data-menu-action="delete-campaign">Delete campaign${selected.length > 1 ? `s (${selected.length})` : ""}</button>`;
   document.body.appendChild(menu);
@@ -1006,8 +1004,6 @@ function toggleDetailActionsMenu(btn) {
       const advIds = [...new Set(selected.map((s) => s.advertiserId).filter(Boolean))];
       if (advIds.length) openBudgetModal(advIds);
       else setStatus("No ad-account budget is available for the selected campaign(s).", true);
-    } else if (act === "add-comments") {
-      openEngagementCommentsModal(selected);
     } else if (act === "engagement") {
       openEngagementManualModal(selected);
     } else if (act === "delete-campaign") {
@@ -1081,17 +1077,13 @@ async function confirmDeleteCampaign() {
   loadTiktokCampaigns();
 }
 
-// ---- engagement: "Add comments" ----
+// ---- engagement: comments (a toggleable kind inside the Engagement modal) ----
 // Stages a comment batch server-side against each selected campaign's OWN
 // stored tiktok_post_url, and sends it to the configured comments provider
 // (DripFeedPanel) via the given Service ID — see _shared/engagement-provider.js.
 // One selected campaign shows the full single-campaign UI (editable URL, this
 // campaign's own auto-order history); more than one runs the same
 // template/service id as a batch against each campaign's own URL.
-
-function currentEngagementCampaign() {
-  return engagementTargets.length === 1 ? engagementTargets[0] : null;
-}
 
 // Global reusable comment templates (Supabase `comment_templates`). Never
 // touched by any cleanup. Selecting one loads its comments into the textarea;
@@ -1147,10 +1139,10 @@ function updateTemplateCommentCount() {
 }
 
 function showEcView(which) {
-  document.getElementById("ecMain").hidden = which !== "main";
+  document.getElementById("engManualMain").hidden = which !== "main";
   document.getElementById("ecTemplateForm").hidden = which !== "form";
-  document.getElementById("engagementCommentsTitle").textContent =
-    which === "form" ? (ecState.editId ? "Edit template" : "New template") : "Add comments";
+  document.getElementById("engagementManualTitle").textContent =
+    which === "form" ? (ecState.editId ? "Edit template" : "New template") : "Engagement";
 }
 
 async function loadCommentTemplates() {
@@ -1201,7 +1193,7 @@ function selectTemplate(id) {
   if (!t) return;
   ecState.selectedId = String(id);
   ecState.confirmDeleteId = null;
-  document.getElementById("engagementCommentsError").textContent = "";
+  document.getElementById("engagementManualError").textContent = "";
   renderTemplateList();
 }
 
@@ -1272,32 +1264,79 @@ async function confirmTemplateDelete(id) {
   renderTemplateList();
 }
 
+const DEFAULT_SERVICE_ID = "5824";
+function loadServiceId() {
+  try {
+    return localStorage.getItem(ENGAGEMENT_SERVICE_ID_KEY) || DEFAULT_SERVICE_ID;
+  } catch (_) {
+    return DEFAULT_SERVICE_ID;
+  }
+}
+function saveServiceId(v) {
+  try {
+    if (v) localStorage.setItem(ENGAGEMENT_SERVICE_ID_KEY, v);
+  } catch (_) {}
+}
+
+// ---- Engagement modal: Likes / Saves / Comments, each independently
+// toggleable (on by default) ----
+// Fires the same panels the ~60s auto-trigger uses (see
+// _shared/engagement-provider.js) on demand, for campaigns it missed or
+// hasn't reached yet, or to explicitly re-send one kind. Likes/Saves defaults
+// pre-fill from the provider's own configured quantity so "Add" with no
+// edits matches what auto-engagement would place; Comments keeps its
+// existing template picker exactly as it worked as a standalone modal.
+let engagementManualDefaults = null; // cached { likes: {quantity,configured}, saves: {...} } for this session
+
+function syncEngagementToggleUI() {
+  const ids = { likes: "engToggleLikes", saves: "engToggleSaves", comments: "engToggleComments" };
+  for (const [kind, id] of Object.entries(ids)) {
+    const btn = document.getElementById(id);
+    const on = engagementToggles[kind];
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-checked", on ? "true" : "false");
+  }
+  document.getElementById("engagementManualLikes").classList.toggle("eng-kind-off", !engagementToggles.likes);
+  document.getElementById("engagementManualSaves").classList.toggle("eng-kind-off", !engagementToggles.saves);
+  document.getElementById("engCommentsSection").classList.toggle("eng-kind-off", !engagementToggles.comments);
+}
+function toggleEngagementKind(kind) {
+  engagementToggles[kind] = !engagementToggles[kind];
+  syncEngagementToggleUI();
+}
+
 // One campaign: the TikTok Post URL is prefilled from the campaign's stored
 // tiktok_post_url (Campaign Creation Automation will usually have set it) but
 // stays editable — editing it here saves back to tiktok_post_url before
-// staging. Many campaigns: the URL field is hidden (each uses its own stored
-// URL; any missing one is called out and skipped) and the same
-// template/Service ID is queued against every one of them in a single batch
-// request. Exactly one saved template must be selected either way.
-function openEngagementCommentsModal(sources) {
+// staging (required only when Comments is on; Likes/Saves-only fall back to
+// each campaign's already-stored URL, same as before this modal merged
+// comments in). Many campaigns: the URL field is hidden (each uses its own
+// stored URL; any missing one is called out and skipped) and the same
+// template/Service ID is queued against every one of them in a single batch.
+function openEngagementManualModal(sources) {
   const list = (Array.isArray(sources) ? sources : [sources]).filter((s) => s && s.campaignId);
   if (!list.length) return;
-  engagementTargets = list;
+  engagementManualTargets = list;
   const single = list.length === 1;
+
+  engagementToggles.likes = true;
+  engagementToggles.saves = true;
+  engagementToggles.comments = true;
+  syncEngagementToggleUI();
 
   ecState.selectedId = null;
   ecState.confirmDeleteId = null;
   ecState.editId = null;
   showEcView("main");
 
-  document.getElementById("engagementCommentsCampaignName").textContent = single ? list[0].source : `${list.length} campaigns selected`;
+  document.getElementById("engagementManualCampaignName").textContent = single ? list[0].source : `${list.length} campaigns selected`;
   document.getElementById("ecUrlField").hidden = !single;
   document.getElementById("engagementCommentsUrl").value = single ? list[0].tiktokPostUrl || "" : "";
   document.getElementById("engagementServiceIdInput").value = loadServiceId();
-  const resultEl = document.getElementById("engagementCommentsResult");
-  resultEl.className = "eng-placeholder";
-  document.getElementById("engagementCommentsError").textContent = "";
+  document.getElementById("engagementManualError").textContent = "";
 
+  const resultEl = document.getElementById("engagementManualResult");
+  resultEl.className = "eng-placeholder";
   const missing = list.filter((s) => !String(s.tiktokPostUrl || "").trim());
   if (!single && missing.length) {
     resultEl.className = "eng-placeholder warn";
@@ -1306,10 +1345,30 @@ function openEngagementCommentsModal(sources) {
     resultEl.textContent = "";
   }
 
-  const btn = document.getElementById("submitEngagementCommentsBtn");
+  const btn = document.getElementById("submitEngagementManualBtn");
   btn.disabled = false;
-  btn.textContent = "Add comments";
-  document.getElementById("engagementCommentsModal").classList.add("open");
+  btn.textContent = "Add";
+
+  const likesInput = document.getElementById("engagementManualLikes");
+  const savesInput = document.getElementById("engagementManualSaves");
+  const fillDefaults = (d) => {
+    likesInput.value = d?.likes?.quantity || "";
+    savesInput.value = d?.saves?.quantity || "";
+  };
+  if (engagementManualDefaults) {
+    fillDefaults(engagementManualDefaults);
+  } else {
+    likesInput.value = "";
+    savesInput.value = "";
+    fetchEngagementDefaults()
+      .then((d) => {
+        engagementManualDefaults = d;
+        if (document.getElementById("engagementManualModal").classList.contains("open")) fillDefaults(d);
+      })
+      .catch(() => {});
+  }
+
+  document.getElementById("engagementManualModal").classList.add("open");
 
   document.getElementById("ecTplList").innerHTML = `<div class="ec-tpl-empty">Loading templates…</div>`;
   loadCommentTemplates();
@@ -1335,7 +1394,7 @@ async function loadEngagementOrders(campaignId) {
   } catch (_) {
     return;
   }
-  if (engagementTargets.length !== 1 || String(engagementTargets[0].campaignId) !== String(campaignId)) return; // modal moved on
+  if (engagementManualTargets.length !== 1 || String(engagementManualTargets[0].campaignId) !== String(campaignId)) return; // modal moved on
   if (!orders.length) return;
 
   const latest = {};
@@ -1361,88 +1420,112 @@ async function loadEngagementOrders(campaignId) {
   el.hidden = !rows;
 }
 
-function closeEngagementCommentsModal() {
-  document.getElementById("engagementCommentsModal").classList.remove("open");
-  engagementTargets = [];
+function closeEngagementManualModal() {
+  document.getElementById("engagementManualModal").classList.remove("open");
+  engagementManualTargets = [];
   showEcView("main"); // never leave the modal parked on the template form
 }
 
-const DEFAULT_SERVICE_ID = "5824";
-function loadServiceId() {
-  try {
-    return localStorage.getItem(ENGAGEMENT_SERVICE_ID_KEY) || DEFAULT_SERVICE_ID;
-  } catch (_) {
-    return DEFAULT_SERVICE_ID;
-  }
-}
-function saveServiceId(v) {
-  try {
-    if (v) localStorage.setItem(ENGAGEMENT_SERVICE_ID_KEY, v);
-  } catch (_) {}
-}
-
-// Renders a per-campaign results[] response (queue_engagement_comments /
-// queue_engagement_manual) into one result box. A single-campaign batch shows
-// that one call's own message/error, matching the old single-campaign UI
-// exactly; a multi-campaign batch shows a success count plus which campaigns
-// failed and why, by name — so a partial failure is never silently swallowed.
-function renderEngagementBatchResult(resultEl, targets, results) {
+// Combines queue_engagement_manual (Likes/Saves) and queue_engagement_comments
+// results — whichever kinds were actually toggled on — into one result box
+// per campaign. A campaign counts as failed if ANY kind it was sent for
+// failed. A single-campaign batch shows that one campaign's combined message;
+// a multi-campaign batch shows a success count plus which campaigns failed
+// and why, by name, so a partial failure is never silently swallowed.
+function renderCombinedEngagementResult(resultEl, targets, { manualResults, commentsResults }) {
   resultEl.textContent = "";
   resultEl.className = "eng-placeholder";
-  if (!results.length) return;
-  if (results.length === 1) {
-    const r = results[0];
-    resultEl.classList.add(r.ok ? "ok" : "bad");
-    resultEl.textContent = r.ok ? r.message || "Done." : r.error || "Failed.";
+  const manualById = new Map((manualResults || []).map((r) => [String(r.campaign_id), r]));
+  const commentsById = new Map((commentsResults || []).map((r) => [String(r.campaign_id), r]));
+  const ids = [...new Set([...manualById.keys(), ...commentsById.keys()])];
+  if (!ids.length) return;
+
+  const summarize = (cid) => {
+    const parts = [];
+    const mr = manualById.get(cid);
+    if (mr) {
+      const sub = [mr.likes, mr.saves].filter(Boolean).map((k) => k.message).filter(Boolean);
+      parts.push(...(sub.length ? sub : mr.ok ? [] : [mr.error || "likes/saves failed"]));
+    }
+    const cr = commentsById.get(cid);
+    if (cr) parts.push(cr.ok ? cr.message || "comments queued" : cr.error || "comments failed");
+    return parts.join(" · ") || "Done.";
+  };
+  const okFor = (cid) => {
+    const mr = manualById.get(cid);
+    const cr = commentsById.get(cid);
+    return (!mr || mr.ok) && (!cr || cr.ok);
+  };
+
+  if (ids.length === 1) {
+    const cid = ids[0];
+    resultEl.classList.add(okFor(cid) ? "ok" : "bad");
+    resultEl.textContent = summarize(cid);
     return;
   }
   const byId = new Map(targets.map((s) => [String(s.campaignId), s]));
-  const okCount = results.filter((r) => r.ok).length;
-  const lines = [`${okCount}/${results.length} succeeded.`];
-  for (const r of results) {
-    if (!r.ok) {
-      const name = byId.get(String(r.campaign_id))?.source || r.campaign_id;
-      lines.push(`✕ ${name}: ${r.error || r.message || "failed"}`);
+  const okCount = ids.filter(okFor).length;
+  const lines = [`${okCount}/${ids.length} succeeded.`];
+  for (const cid of ids) {
+    if (!okFor(cid)) {
+      const name = byId.get(cid)?.source || cid;
+      lines.push(`✕ ${name}: ${summarize(cid)}`);
     }
   }
-  resultEl.classList.add(okCount === results.length ? "ok" : okCount === 0 ? "bad" : "warn");
+  resultEl.classList.add(okCount === ids.length ? "ok" : okCount === 0 ? "bad" : "warn");
   resultEl.textContent = lines.join("\n");
 }
 
-async function submitEngagementComments() {
-  if (!engagementTargets.length) return;
-  const single = engagementTargets.length === 1;
-  const errEl = document.getElementById("engagementCommentsError");
-  const resultEl = document.getElementById("engagementCommentsResult");
-  const btn = document.getElementById("submitEngagementCommentsBtn");
+async function submitEngagementManual() {
+  if (!engagementManualTargets.length) return;
+  const single = engagementManualTargets.length === 1;
+  const errEl = document.getElementById("engagementManualError");
+  const resultEl = document.getElementById("engagementManualResult");
+  const btn = document.getElementById("submitEngagementManualBtn");
   errEl.textContent = "";
   resultEl.textContent = "";
   resultEl.className = "eng-placeholder";
 
-  const serviceId = document.getElementById("engagementServiceIdInput").value.trim();
-  if (!serviceId) {
-    errEl.textContent = "Enter a Service ID.";
-    return;
+  const likes = engagementToggles.likes
+    ? Math.max(0, Math.floor(Number(document.getElementById("engagementManualLikes").value) || 0))
+    : 0;
+  const saves = engagementToggles.saves
+    ? Math.max(0, Math.floor(Number(document.getElementById("engagementManualSaves").value) || 0))
+    : 0;
+
+  let serviceId = "";
+  let commentBody = [];
+  if (engagementToggles.comments) {
+    serviceId = document.getElementById("engagementServiceIdInput").value.trim();
+    if (!serviceId) {
+      errEl.textContent = "Enter a Service ID (or turn Comments off).";
+      return;
+    }
+    if (!ecState.selectedId) {
+      errEl.textContent = "Select a comment template (or turn Comments off).";
+      return;
+    }
+    commentBody = selectedTemplateComments();
+    if (!commentBody.length) {
+      errEl.textContent = "That template has no comments — edit it first.";
+      return;
+    }
   }
-  if (!ecState.selectedId) {
-    errEl.textContent = "Select a comment template.";
-    return;
-  }
-  const lines = selectedTemplateComments();
-  if (!lines.length) {
-    errEl.textContent = "That template has no comments — edit it first.";
+
+  if (!likes && !saves && !engagementToggles.comments) {
+    errEl.textContent = "Turn on at least one of Likes, Saves, or Comments.";
     return;
   }
 
-  let targets = engagementTargets;
+  let targets = engagementManualTargets;
   if (single) {
     const url = document.getElementById("engagementCommentsUrl").value.trim();
-    if (!url) {
+    if (engagementToggles.comments && !url) {
       errEl.textContent = "Enter the TikTok post URL for this campaign.";
       return;
     }
-    const s = engagementTargets[0];
-    if (url !== (s.tiktokPostUrl || "")) {
+    const s = engagementManualTargets[0];
+    if (url && url !== (s.tiktokPostUrl || "")) {
       // If the URL was edited (or the campaign had none), persist it to the
       // campaign's tiktok_post_url first so the rest of the app stays in sync.
       try {
@@ -1457,139 +1540,26 @@ async function submitEngagementComments() {
       }
     }
   } else {
-    targets = engagementTargets.filter((s) => String(s.tiktokPostUrl || "").trim());
+    targets = engagementManualTargets.filter((s) => String(s.tiktokPostUrl || "").trim());
     if (!targets.length) {
       errEl.textContent = "None of the selected campaigns have a TikTok post URL yet.";
       return;
     }
   }
 
-  saveServiceId(serviceId);
+  if (engagementToggles.comments) saveServiceId(serviceId);
   btn.disabled = true;
   btn.textContent = "Adding…";
   try {
-    const res = await queueEngagementComments(targets.map((s) => s.campaignId), serviceId, lines);
-    renderEngagementBatchResult(resultEl, targets, res.results || []);
-    btn.textContent = "Done";
-  } catch (err) {
-    errEl.textContent = err.message;
-    btn.disabled = false;
-    btn.textContent = "Add comments";
-  }
-}
-
-// ---- Engagement (manual LIKES/SAVES fallback) ----
-// Fires the same panels the ~60s auto-trigger uses (see
-// _shared/engagement-provider.js) on demand, for campaigns it missed or
-// hasn't reached yet. Defaults pre-fill from the provider's own configured
-// quantity so "Add" with no edits matches what auto-engagement would place.
-let engagementManualDefaults = null; // cached { likes: {quantity,configured}, saves: {...} } for this session
-
-function openEngagementManualModal(sources) {
-  const list = (Array.isArray(sources) ? sources : [sources]).filter((s) => s && s.campaignId);
-  if (!list.length) return;
-  engagementManualTargets = list;
-
-  document.getElementById("engagementManualCampaignName").textContent =
-    list.length === 1 ? list[0].source : `${list.length} campaigns selected`;
-  document.getElementById("engagementManualResult").textContent = "";
-  document.getElementById("engagementManualResult").className = "eng-placeholder";
-  document.getElementById("engagementManualError").textContent = "";
-  const btn = document.getElementById("submitEngagementManualBtn");
-  btn.disabled = false;
-  btn.textContent = "Add";
-
-  const likesInput = document.getElementById("engagementManualLikes");
-  const savesInput = document.getElementById("engagementManualSaves");
-  const fillDefaults = (d) => {
-    likesInput.value = d?.likes?.quantity || "";
-    savesInput.value = d?.saves?.quantity || "";
-  };
-  if (engagementManualDefaults) {
-    fillDefaults(engagementManualDefaults);
-  } else {
-    likesInput.value = "";
-    savesInput.value = "";
-    fetchEngagementDefaults()
-      .then((d) => {
-        engagementManualDefaults = d;
-        if (document.getElementById("engagementManualModal").classList.contains("open")) fillDefaults(d);
-      })
-      .catch(() => {});
-  }
-
-  const missing = list.filter((s) => !String(s.tiktokPostUrl || "").trim());
-  if (missing.length) {
-    const el = document.getElementById("engagementManualResult");
-    el.className = "eng-placeholder warn";
-    el.textContent = `${missing.length} of ${list.length} selected campaign(s) have no TikTok post URL yet and will be skipped: ${missing.map((s) => s.source).join(", ")}`;
-  }
-
-  document.getElementById("engagementManualModal").classList.add("open");
-}
-
-function closeEngagementManualModal() {
-  document.getElementById("engagementManualModal").classList.remove("open");
-  engagementManualTargets = [];
-}
-
-// One manual result carries `likes`/`saves` sub-results (each { ok, message })
-// instead of the flat message/error the comments batch uses, so it gets its
-// own renderer rather than reusing renderEngagementBatchResult.
-function renderEngagementManualResult(resultEl, targets, results) {
-  resultEl.textContent = "";
-  resultEl.className = "eng-placeholder";
-  if (!results.length) return;
-  const summarize = (r) =>
-    [r.likes, r.saves]
-      .filter(Boolean)
-      .map((k) => k.message)
-      .filter(Boolean)
-      .join(" · ") || (r.ok ? "Done." : "Failed.");
-  if (results.length === 1) {
-    const r = results[0];
-    resultEl.classList.add(r.ok ? "ok" : "bad");
-    resultEl.textContent = r.error || summarize(r);
-    return;
-  }
-  const byId = new Map(targets.map((s) => [String(s.campaignId), s]));
-  const okCount = results.filter((r) => r.ok).length;
-  const lines = [`${okCount}/${results.length} succeeded.`];
-  for (const r of results) {
-    if (!r.ok) {
-      const name = byId.get(String(r.campaign_id))?.source || r.campaign_id;
-      lines.push(`✕ ${name}: ${r.error || summarize(r)}`);
-    }
-  }
-  resultEl.classList.add(okCount === results.length ? "ok" : okCount === 0 ? "bad" : "warn");
-  resultEl.textContent = lines.join("\n");
-}
-
-async function submitEngagementManual() {
-  if (!engagementManualTargets.length) return;
-  const errEl = document.getElementById("engagementManualError");
-  const resultEl = document.getElementById("engagementManualResult");
-  const btn = document.getElementById("submitEngagementManualBtn");
-  errEl.textContent = "";
-
-  const likes = Math.max(0, Math.floor(Number(document.getElementById("engagementManualLikes").value) || 0));
-  const saves = Math.max(0, Math.floor(Number(document.getElementById("engagementManualSaves").value) || 0));
-  if (!likes && !saves) {
-    errEl.textContent = "Enter a Likes and/or Saves quantity.";
-    return;
-  }
-
-  const targets = engagementManualTargets.filter((s) => String(s.tiktokPostUrl || "").trim());
-  if (!targets.length) {
-    errEl.textContent = "None of the selected campaigns have a TikTok post URL yet.";
-    return;
-  }
-
-  btn.disabled = true;
-  btn.textContent = "Adding…";
-  try {
-    const res = await queueEngagementManual(targets.map((s) => s.campaignId), likes, saves);
-    renderEngagementManualResult(resultEl, targets, res.results || []);
+    const ids = targets.map((s) => s.campaignId);
+    const [manualRes, commentsRes] = await Promise.all([
+      likes || saves ? queueEngagementManual(ids, likes, saves) : Promise.resolve(null),
+      engagementToggles.comments ? queueEngagementComments(ids, serviceId, commentBody) : Promise.resolve(null),
+    ]);
+    renderCombinedEngagementResult(resultEl, targets, {
+      manualResults: manualRes ? manualRes.results : null,
+      commentsResults: commentsRes ? commentsRes.results : null,
+    });
     btn.textContent = "Done";
   } catch (err) {
     errEl.textContent = err.message;
@@ -4043,6 +4013,59 @@ async function submitBudgetEdit() {
   closeBudgetModal();
   setStatus(
     `${ids.length > 1 ? `${ids.length} ad account caps` : "Ad account cap"} updated — ${mode === "UNLIMITED" ? "uncapped" : money(amount) + " " + (BUDGET_MODE_LABEL[mode] || "")}.`
+  );
+}
+
+// "Set minimum budget" — sets each selected account's cap to whatever
+// minimum TikTok itself allows above its current spend. Bypasses the Cap
+// type / amount fields entirely: TikTok computes and applies the exact
+// number server-side (advertiser_update's ONE_CLICK_SET), since the actual
+// minimum varies account to account (TikTok's own ~105%-of-spend rule,
+// rounded however TikTok rounds it) and is never guessed here. Fired in
+// parallel across accounts — each is its own independent request to the
+// backend, not N MCP calls sharing one function's time budget, so there's no
+// reason to wait on them one at a time.
+async function submitBudgetMinimum() {
+  if (!budgetModalAdvIds.length) return;
+  const ids = budgetModalAdvIds;
+  const errEl = document.getElementById("budgetModalError");
+  errEl.textContent = "";
+
+  const btn = document.getElementById("setMinBudgetBtn");
+  const updateBtn = document.getElementById("confirmBudgetBtn");
+  btn.disabled = true;
+  updateBtn.disabled = true;
+  btn.textContent = ids.length > 1 ? `Setting ${ids.length}…` : "Setting…";
+  ids.forEach((id) => state.pendingActions.add(`b:${id}`));
+  rebuildSources();
+
+  const failures = await Promise.all(
+    ids.map(async (advId) => {
+      try {
+        const res = await setAdvertiserBudget(advId, "ONE_CLICK_MINIMUM", 0);
+        if (res.budget) state.budgets[advId] = { ...state.budgets[advId], ...res.budget };
+        return null;
+      } catch (err) {
+        return `${advId}: ${err.message}`;
+      } finally {
+        state.pendingActions.delete(`b:${advId}`);
+      }
+    })
+  );
+  const failed = failures.filter(Boolean);
+
+  btn.disabled = false;
+  updateBtn.disabled = false;
+  btn.textContent = "Set minimum budget";
+  rebuildSources();
+
+  if (failed.length) {
+    errEl.textContent = `${failed.length} account${failed.length === 1 ? "" : "s"} failed — ${failed.join("; ")}`;
+    return;
+  }
+  closeBudgetModal();
+  setStatus(
+    `${ids.length > 1 ? `${ids.length} ad account caps` : "Ad account cap"} set to TikTok's minimum above current spend.`
   );
 }
 

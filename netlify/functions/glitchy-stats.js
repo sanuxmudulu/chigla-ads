@@ -38,6 +38,15 @@ exports.handler = async function (event) {
     const { entries, bySource } = await fetchGlitchy(token, startDate, endDate);
     const sources = Object.keys(bySource).map((src) => ({ source: src, ...bySource[src] }));
 
+    // Diagnostic only — helps confirm whether Glitchy's Stat.date carries a
+    // real time-of-day (needed for true per-hour Earnings attribution on the
+    // Live Performance graph, not yet implemented) or is just a bare date.
+    // Safe to remove once that's settled; never affects the response.
+    if (entries.length) {
+      const sample = (entries[0].Stat || entries[0].stat || entries[0] || {}).date;
+      console.log(`[glitchy-stats] sample Stat.date: ${JSON.stringify(sample)}`);
+    }
+
     // Automatic daily history: refresh today's row whenever the requested range
     // reaches today (the normal dashboard poll). Combined Glitchy + Mabac
     // earnings by network ownership. Every part here is best-effort — a Mabac

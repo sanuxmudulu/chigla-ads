@@ -1179,9 +1179,43 @@ const CAMPAIGN_METRIC_FIELDS = [
   "cost_per_result",
 ];
 
-async function loadCampaignMetricsForAdvertiser(client, advertiserId, { date } = {}) {
+// Best-effort hour-of-day out of TikTok's stat_time_hour dimension value
+// (an hour-bucket timestamp like "2026-09-14 05:00:00" — exact format isn't
+// documented, so this just looks for the first HH:MM it can find). Returns
+// null on anything unrecognized so a format surprise degrades to "this row's
+// spend isn't hour-attributed" rather than a wrong hour.
+function hourFromStatTimeHour(raw) {
+  if (typeof raw !== "string") return null;
+  const m = raw.match(/(\d{1,2}):\d{2}(?::\d{2})?/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  return Number.isFinite(h) && h >= 0 && h <= 23 ? h : null;
+}
+
+// `withHourly` (opt-in, default false — every existing caller is unaffected)
+// adds `stat_time_hour` to the request so the SAME call can also hand back
+// `byHour` (spend summed per hour across every campaign in this advertiser)
+// for the Live Performance graph, instead of the graph reconstructing hours
+// from a periodically-polled cumulative total (which attributes a whole
+// day's-worth of spend to whichever hour the dashboard happened to be
+// polling when TikTok's own report first reflected it — not when the spend
+// actually happened). With withHourly on, rows are split per hour, so
+// per-campaign totals are accumulated across each campaign's hour-rows
+// (never trusting a single row's own cpm/cost_per_conversion, since those
+// would only cover that one hour) — this is exactly equivalent to the old
+// single-row-per-campaign math when withHourly is off, since summing one row
+// is a no-op.
+async function loadCampaignMetricsForAdvertiser(client, advertiserId, { date, withHourly = false } = {}) {
   const advId = String(advertiserId);
-  const byId = {};
+  // withHourly splits each campaign across multiple hour-rows, so cpm/cpa
+  // can't trust any single row's own value (each only covers that hour) —
+  // raw totals are summed instead and the ratios re-derived from the sums.
+  // Without withHourly there's exactly one row per campaign, so the original
+  // per-row logic (preferring TikTok's own cost_per_conversion/cost_per_result
+  // over a manual spend÷conversions fallback) is kept byte-for-byte — this
+  // path is unchanged for every pre-existing caller.
+  const raw = {}; // campaign_id -> accumulated { spend, impressions, clicks, conversions }
+  const byHour = {}; // "<hour>" -> spend, summed across every campaign (only populated if withHourly)
   let page = 1;
   for (;;) {
     const rep = await mcpCall(client, "report_integrated_get", {
@@ -1189,7 +1223,7 @@ async function loadCampaignMetricsForAdvertiser(client, advertiserId, { date } =
       service_type: "AUCTION",
       data_level: "AUCTION_CAMPAIGN",
       advertiser_id: advId,
-      dimensions: ["campaign_id"],
+      dimensions: withHourly ? ["campaign_id", "stat_time_hour"] : ["campaign_id"],
       metrics: CAMPAIGN_METRIC_FIELDS,
       start_date: date,
       end_date: date,
@@ -1201,21 +1235,18 @@ async function loadCampaignMetricsForAdvertiser(client, advertiserId, { date } =
       const id = String(row.dimensions?.campaign_id || "");
       if (!id) continue;
       const m = row.metrics || {};
-      const spend = round2(num(m.spend));
-      const impressions = Math.round(num(m.impressions));
-      const clicks = Math.round(num(m.clicks));
-      const conversions = num(m.conversion) || num(m.result);
-      const directCpm = num(m.cpm);
-      const cpm = directCpm > 0 ? round2(directCpm) : impressions > 0 ? round2((spend / impressions) * 1000) : 0;
-      byId[id] = {
-        advertiser_id: advId,
-        spend,
-        impressions,
-        clicks,
-        conversions,
-        cpm,
-        cpa: round2(tiktokCpa(m)),
-      };
+      const spend = num(m.spend);
+      const r = (raw[id] = raw[id] || { spend: 0, impressions: 0, clicks: 0, conversions: 0, lastMetrics: null });
+      r.spend += spend;
+      r.impressions += num(m.impressions);
+      r.clicks += num(m.clicks);
+      r.conversions += num(m.conversion) || num(m.result);
+      r.lastMetrics = m; // only ever meaningfully used when there's exactly one row (below)
+
+      if (withHourly) {
+        const hour = hourFromStatTimeHour(row.dimensions?.stat_time_hour);
+        if (hour != null) byHour[hour] = (byHour[hour] || 0) + spend;
+      }
     }
 
     const info = rep?.page_info || {};
@@ -1223,7 +1254,26 @@ async function loadCampaignMetricsForAdvertiser(client, advertiserId, { date } =
     page += 1;
     if (page > 50) break; // safety
   }
-  return byId;
+
+  const byId = {};
+  for (const [id, r] of Object.entries(raw)) {
+    const spend = round2(r.spend);
+    const impressions = Math.round(r.impressions);
+    const clicks = Math.round(r.clicks);
+    const conversions = num(r.conversions);
+    let cpm, cpa;
+    if (!withHourly) {
+      const m = r.lastMetrics || {};
+      const directCpm = num(m.cpm);
+      cpm = directCpm > 0 ? round2(directCpm) : impressions > 0 ? round2((spend / impressions) * 1000) : 0;
+      cpa = round2(tiktokCpa(m));
+    } else {
+      cpm = impressions > 0 ? round2((spend / impressions) * 1000) : 0;
+      cpa = conversions > 0 ? round2(spend / conversions) : 0;
+    }
+    byId[id] = { advertiser_id: advId, spend, impressions, clicks, conversions, cpm, cpa };
+  }
+  return withHourly ? { byId, byHour } : byId;
 }
 
 // -------- lazy: one campaign's live detail (row status + ad groups + today) --
@@ -1483,17 +1533,34 @@ async function getAdvertiserBudgets({ client, bcId }) {
 
 // UPDATE / set / remove one ad account's cap.
 //   budgetMode: UNLIMITED | MONTHLY_BUDGET | DAILY_BUDGET | CUSTOM_BUDGET
-//   budget:     cap amount (ignored when UNLIMITED)
+//               | ONE_CLICK_MINIMUM (our own sentinel, not a TikTok value —
+//               see below)
+//   budget:     cap amount (ignored when UNLIMITED or ONE_CLICK_MINIMUM)
+//
+// ONE_CLICK_MINIMUM uses TikTok's own advertiser_update budget_update_type
+// "ONE_CLICK_SET", which sets the account's cap to whatever minimum TikTok
+// itself allows above current spend (their own 105%-of-spend-style rule,
+// rounded however they round it — never guessed or replicated client-side).
+// TikTok's ONE_CLICK_SET only accepts ONE advertiser per call (unlike
+// UPDATE's up-to-50), so a multi-account "Set minimum budget" click makes
+// one of these calls per account — see the caller.
 async function setAdvertiserBudget({ client, bcId, advertiserId, budgetMode, budget }) {
   const mode = String(budgetMode || "").toUpperCase();
-  const item = { advertiser_id: String(advertiserId), budget_mode: mode };
-  if (mode !== "UNLIMITED") item.budget = toNum(budget);
-
-  await mcpCall(client, "advertiser_update", {
-    bc_id: bcId,
-    budget_update_type: "UPDATE",
-    advertiser_budgets: [item],
-  });
+  if (mode === "ONE_CLICK_MINIMUM") {
+    await mcpCall(client, "advertiser_update", {
+      bc_id: bcId,
+      budget_update_type: "ONE_CLICK_SET",
+      advertiser_budgets: [{ advertiser_id: String(advertiserId) }],
+    });
+  } else {
+    const item = { advertiser_id: String(advertiserId), budget_mode: mode };
+    if (mode !== "UNLIMITED") item.budget = toNum(budget);
+    await mcpCall(client, "advertiser_update", {
+      bc_id: bcId,
+      budget_update_type: "UPDATE",
+      advertiser_budgets: [item],
+    });
+  }
 
   // Re-read this one account.
   const d = await mcpCall(client, "advertiser_balance_get", {
@@ -1513,7 +1580,9 @@ async function setAdvertiserBudget({ client, bcId, advertiserId, budgetMode, bud
     capped: m !== "UNLIMITED" && cap > 0,
     cap,
     spent,
-    remaining: a.budget_remaining != null ? toNum(a.budget_remaining) : Math.max(0, cap - spent),
+    // Always derived from spend, never TikTok's own budget_remaining — see
+    // the matching fix + reasoning in getAdvertiserBudgets above.
+    remaining: Math.max(0, cap - spent),
     account_balance: toNum(a.valid_account_balance ?? a.account_balance),
     currency: a.currency || "USD",
   };

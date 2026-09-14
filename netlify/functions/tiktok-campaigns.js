@@ -503,10 +503,14 @@ exports.handler = async function (event) {
     if (action === "set_advertiser_budget") {
       if (!body.advertiser_id) return json(400, { error: "advertiser_id is required" });
       const mode = String(body.budget_mode || "").toUpperCase();
-      const allowed = ["UNLIMITED", "MONTHLY_BUDGET", "DAILY_BUDGET", "CUSTOM_BUDGET"];
+      // ONE_CLICK_MINIMUM: our own sentinel (not a TikTok value) for "set the
+      // cap to whatever minimum TikTok itself allows above current spend" —
+      // see setAdvertiserBudget. No amount needed; TikTok computes it.
+      const allowed = ["UNLIMITED", "MONTHLY_BUDGET", "DAILY_BUDGET", "CUSTOM_BUDGET", "ONE_CLICK_MINIMUM"];
       if (!allowed.includes(mode)) return json(400, { error: `budget_mode must be one of ${allowed.join(", ")}` });
       const amount = Number(body.budget);
-      if (mode !== "UNLIMITED" && !(amount > 0)) return json(400, { error: "budget must be a positive number" });
+      if (mode !== "UNLIMITED" && mode !== "ONE_CLICK_MINIMUM" && !(amount > 0))
+        return json(400, { error: "budget must be a positive number" });
 
       const r = await resolveTrackedAdvertiser(supabase, body.advertiser_id);
       if (r.error) return r.error;
@@ -1207,6 +1211,7 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
   const errors = {};
   const okAdvertiserIds = [];
   const budgetBumps = {}; // campaign_id -> { budget, auto_budget_baseline, auto_budget_bumps }
+  const trueSpendByHour = {}; // "<hour>" -> spend, summed across every advertiser this cycle (Live Performance graph)
 
   // Stay comfortably inside the function time limit even with many advertisers.
   const DEADLINE_MS = 9000;
@@ -1244,8 +1249,12 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
           console.warn(`[tiktok-metrics] advertiser ${advId} tz="${tz}" — daily boundary uses the NY date, near-midnight skew possible`);
         }
         try {
-          const byId = await loadCampaignMetricsForAdvertiser(client, advId, { date });
+          const { byId, byHour: advByHour } = await loadCampaignMetricsForAdvertiser(client, advId, {
+            date,
+            withHourly: true,
+          });
           for (const [cid, m] of Object.entries(byId)) metrics[cid] = m;
+          for (const [h, v] of Object.entries(advByHour)) trueSpendByHour[h] = (trueSpendByHour[h] || 0) + v;
           okAdvertiserIds.push(advId);
 
           // Auto budget-bump: +$50 to a CBO campaign's budget for every $10 it
@@ -1306,32 +1315,51 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
     }
   }
 
-  // ---- Live Performance graph ONLY: snapshot today's cumulative spend into the
-  // current NY hour, then hand back every hour's cumulative so the frontend can
-  // derive hourly spend (delta between consecutive snapshots). Zero extra MCP
-  // calls — this is all Supabase.
-  //
-  // tiktokSpendForToday can't itself fail (self-contained try/catch, returns 0
-  // worst case), so `cumulative` and `spendToday` are always real — the write
-  // and read below are each isolated in their own try/catch so a snapshot
-  // write hiccup (a transient Supabase error not matching the "table not
-  // migrated yet" pattern below) can never blank the graph's Spend line down
-  // to nothing; it just means that one hour's bucket doesn't get its usual
-  // precision this cycle.
-  const cumulative = await tiktokSpendForToday(supabase, date); // Σ persisted today_spend
+  // ---- Live Performance graph ONLY: turn this cycle's TRUE per-hour spend
+  // (trueSpendByHour, from TikTok's own stat_time_hour breakdown — see
+  // loadCampaignMetricsForAdvertiser) into a cumulative-by-hour series. This
+  // replaces the old approach of polling a running total and snapshotting it
+  // into "whichever hour we happened to be polling" — that attributed a
+  // whole burst of spend to the poll that first noticed it, not to the hour
+  // it actually happened in (and could disagree with the Earnings line by an
+  // hour or more purely from polling timing, independent of any real delay
+  // between spend and conversion). This is TikTok's own attribution, so it's
+  // accurate regardless of when/how often this endpoint gets polled. No
+  // history is backfilled for hours before this change shipped — those stay
+  // at $0 for today only; a fresh day starts clean.
   const hour = nyHourNow();
-  try {
-    await recordSpendSnapshot(supabase, date, hour, cumulative);
-  } catch (err) {
-    console.error(`[tiktok-metrics] spend snapshot write failed: ${err.message}`);
+  let spendToday;
+  const totalSpendThisCycle = Object.values(metrics).reduce((a, m) => a + (Number(m.spend) || 0), 0);
+  if (Object.keys(trueSpendByHour).length > 0 || totalSpendThisCycle <= 0) {
+    const cumulativeByHour = {};
+    let running = 0;
+    for (let h = 0; h <= hour && h < 24; h++) {
+      running += Number(trueSpendByHour[h] ?? trueSpendByHour[String(h)] ?? 0);
+      cumulativeByHour[String(h)] = Math.round(running * 100) / 100;
+    }
+    spendToday = { date, currentHour: hour, cumulative: cumulativeByHour[String(hour)] ?? 0, byHour: cumulativeByHour };
+  } else {
+    // Safety net: there IS real spend this cycle but stat_time_hour parsing
+    // came back completely empty (TikTok's exact hour-dimension string format
+    // isn't documented, so hourFromStatTimeHour's assumption could be wrong
+    // for this account/report). Rather than show a flat $0 line all day, fall
+    // back to the old cumulative-total-snapshot approach so the graph still
+    // shows SOMETHING, just without per-hour precision this cycle.
+    console.error("[tiktok-metrics] stat_time_hour produced no hours despite real spend — falling back to cumulative snapshot");
+    const cumulative = await tiktokSpendForToday(supabase, date);
+    try {
+      await recordSpendSnapshot(supabase, date, hour, cumulative);
+    } catch (err) {
+      console.error(`[tiktok-metrics] spend snapshot write failed: ${err.message}`);
+    }
+    let byHourFallback = {};
+    try {
+      byHourFallback = await readSpendSnapshots(supabase, date);
+    } catch (err) {
+      console.error(`[tiktok-metrics] spend snapshot read failed: ${err.message}`);
+    }
+    spendToday = { date, currentHour: hour, cumulative, byHour: byHourFallback };
   }
-  let byHour = {};
-  try {
-    byHour = await readSpendSnapshots(supabase, date);
-  } catch (err) {
-    console.error(`[tiktok-metrics] spend snapshot read failed: ${err.message}`);
-  }
-  const spendToday = { date, currentHour: hour, cumulative, byHour };
 
   return json(200, { ok: true, date, metrics, okAdvertiserIds, errors, spendToday, budgetBumps });
 }
