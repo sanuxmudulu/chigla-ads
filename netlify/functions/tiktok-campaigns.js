@@ -650,6 +650,20 @@ function normalizeCampaignIds(campaignIds, campaignId) {
   return [...new Set(raw.map((v) => String(v || "").trim()).filter(Boolean))];
 }
 
+// resolveTrackedCampaign's `error` is a full { statusCode, body } response
+// (built for handlers that return it straight through). The batch helpers
+// below instead fold it into a per-campaign result row, so this pulls the
+// real "Campaign not found. Run a campaign sync first." / "That advertiser
+// account is not tracked." text back out instead of flattening every reason
+// into one generic, undebuggable message.
+function trackedErrorMessage(r) {
+  try {
+    return JSON.parse(r.error.body).error || "Campaign not found or not tracked.";
+  } catch (_) {
+    return "Campaign not found or not tracked.";
+  }
+}
+
 // One campaign's COMMENTS batch — same template/service id, this campaign's
 // own tiktok_post_url. Never throws; every failure comes back as a per-
 // campaign { ok:false, error } entry so a batch of many never aborts on one
@@ -657,7 +671,7 @@ function normalizeCampaignIds(campaignIds, campaignId) {
 async function queueCommentsForOne(supabase, campaignId, serviceId, comments) {
   const cid = String(campaignId);
   const r = await resolveTrackedCampaign(supabase, cid);
-  if (r.error) return { campaign_id: cid, ok: false, error: "Campaign not found or not tracked." };
+  if (r.error) return { campaign_id: cid, ok: false, error: trackedErrorMessage(r) };
   if (!(await withoutTemporaryCampaigns(supabase, [cid])).length) {
     return { campaign_id: cid, ok: false, error: "WH Warmup campaigns can't be used for engagement." };
   }
@@ -722,7 +736,7 @@ async function queueCommentsForOne(supabase, campaignId, serviceId, comments) {
 async function queueManualForOne(supabase, campaignId, { likesQty, savesQty }) {
   const cid = String(campaignId);
   const r = await resolveTrackedCampaign(supabase, cid);
-  if (r.error) return { campaign_id: cid, ok: false, error: "Campaign not found or not tracked." };
+  if (r.error) return { campaign_id: cid, ok: false, error: trackedErrorMessage(r) };
   if (!(await withoutTemporaryCampaigns(supabase, [cid])).length) {
     return { campaign_id: cid, ok: false, error: "WH Warmup campaigns can't be used for engagement." };
   }
