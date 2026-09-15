@@ -42,13 +42,49 @@ exports.handler = async function (event) {
 
   // 1. WH Warmup — terminal rows only. WAITING_FOR_ACTIVE / DELETE_PENDING are
   //    never eligible (they're still being monitored).
-  await run(out, "wh_warmup_terminal", () =>
-    supabase
+  //
+  //    A genuinely DELETED row already had its tiktok_campaigns row removed
+  //    immediately, the moment it went DELETED (wh-warmup.js's own cleanup
+  //    action). A FAILED row never did — "Advertiser suspended" / "never
+  //    reached Active after 3 days" leaves the campaign's tiktok_campaigns
+  //    row sitting there, correctly hidden from Detailed Metrics only
+  //    because is_wh_warmup is computed live from THIS table on every read.
+  //    Purging just the tracking row here (the old behavior) silently
+  //    flipped that off the instant this ran — the campaign then leaked into
+  //    Detailed Metrics forever as a normal-looking row frozen on whatever
+  //    stale status it last had (confirmed live: two campaigns named
+  //    "Traffic####" — WH Warmup's own naming pattern — showing "Account
+  //    Suspended" days after their WH tracking row aged out). Select the
+  //    ids first so both tables are purged together, closing that gap.
+  try {
+    const { data: whTerminal, error: whSelErr } = await supabase
       .from("wh_warmup_campaigns")
-      .delete({ count: "exact" })
+      .select("campaign_id")
       .in("cleanup_status", ["DELETED", "FAILED"])
-      .lt("updated_at", isoAgo(WH_TERMINAL_DAYS * day))
-  );
+      .lt("updated_at", isoAgo(WH_TERMINAL_DAYS * day));
+    if (whSelErr) {
+      if (!/does not exist|schema cache|could not find/i.test(whSelErr.message || "")) out.errors.wh_warmup_terminal = whSelErr.message;
+    } else {
+      const whIds = (whTerminal || []).map((r) => r.campaign_id);
+      if (whIds.length) {
+        const { error: whDelErr } = await supabase.from("wh_warmup_campaigns").delete().in("campaign_id", whIds);
+        if (whDelErr) {
+          out.errors.wh_warmup_terminal = whDelErr.message;
+        } else {
+          out.purged.wh_warmup_terminal = whIds.length;
+          try {
+            await supabase.from("tiktok_campaigns").delete().in("campaign_id", whIds);
+          } catch (err) {
+            out.errors.wh_warmup_terminal_campaigns = err.message;
+          }
+        }
+      } else {
+        out.purged.wh_warmup_terminal = 0;
+      }
+    }
+  } catch (err) {
+    out.errors.wh_warmup_terminal = err.message;
+  }
 
   // 2. engagement_orders — finished operational records. READY / SUBMITTED
   //    (pending) are kept. A future comment-TEMPLATE feature is a separate

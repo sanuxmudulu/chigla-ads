@@ -1547,10 +1547,17 @@ async function getAdvertiserBudgets({ client, bcId }) {
 async function setAdvertiserBudget({ client, bcId, advertiserId, budgetMode, budget }) {
   const mode = String(budgetMode || "").toUpperCase();
   if (mode === "ONE_CLICK_MINIMUM") {
+    // budget_mode must be sent even here: an account that's currently
+    // UNLIMITED has no existing capped mode for TikTok to shrink, and
+    // without an explicit mode ONE_CLICK_SET silently left it UNLIMITED
+    // (confirmed — one of two accounts stayed "Uncapped" while the other,
+    // already on DAILY_BUDGET, correctly got minimized). DAILY_BUDGET
+    // matches this app's only cap type elsewhere (the regular Update flow
+    // defaults new caps to DAILY_BUDGET too).
     await mcpCall(client, "advertiser_update", {
       bc_id: bcId,
       budget_update_type: "ONE_CLICK_SET",
-      advertiser_budgets: [{ advertiser_id: String(advertiserId) }],
+      advertiser_budgets: [{ advertiser_id: String(advertiserId), budget_mode: "DAILY_BUDGET" }],
     });
   } else {
     const item = { advertiser_id: String(advertiserId), budget_mode: mode };
