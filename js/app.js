@@ -1615,6 +1615,7 @@ function wireWhWarmupEvents() {
     whState.connectionId = e.target.value;
     whState.selected.clear();
     renderWhAdvertisers();
+    refreshWhWarmingCount(); // the "WHs Warming Up" badge is scoped to this BC too
   });
   document.getElementById("whSelectAll").addEventListener("change", (e) => {
     const approved = whAdvsForConnection().filter((a) => advIsApproved(a));
@@ -2108,11 +2109,14 @@ function closeWhWarmingUpModal() {
   document.getElementById("whWarmingUpModal").classList.remove("open");
 }
 
+// Scoped to whState.connectionId — the box/modal live right under the BC
+// selector in the WH Warmup creator, so they only ever show/count that same
+// BC's warming campaigns, never every connected BC mixed together.
 async function loadWhWarmingList() {
   const el = document.getElementById("whWarmingList");
   el.innerHTML = `<p class="tk-loading">Loading WH campaigns…</p>`;
   try {
-    const res = await listWhWarmup();
+    const res = await listWhWarmup(whState.connectionId);
     whWarmingState.campaigns = res.campaigns || [];
     renderWhWarmingList();
     updateWhWarmingCount();
@@ -2125,7 +2129,7 @@ async function loadWhWarmingList() {
 // never blocks it.
 async function refreshWhWarmingCount() {
   try {
-    const res = await listWhWarmup();
+    const res = await listWhWarmup(whState.connectionId);
     whWarmingState.campaigns = res.campaigns || [];
     updateWhWarmingCount();
   } catch (_) {

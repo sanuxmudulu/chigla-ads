@@ -77,7 +77,7 @@ exports.handler = async function (event) {
 
     if (body.action === "create") return createBatch(supabase, body);
     if (body.action === "cleanup") return cleanupBatch(supabase);
-    if (body.action === "list") return listWarmups(supabase);
+    if (body.action === "list") return listWarmups(supabase, body.connection_id || null);
     if (body.action === "countries") return countriesFor(supabase, body);
     if (body.action === "template_countries") return templateCountries(supabase);
 
@@ -421,15 +421,22 @@ async function patchRow(supabase, campaignId, patch) {
 // Also joins in each campaign's live on/off + status from tiktok_campaigns
 // (the same columns Detailed Metrics reads) so the panel can show on/off and
 // status without a second round trip.
-async function listWarmups(supabase) {
-  const { data, error } = await supabase
+// `connectionId` (optional): scopes the list to one Business Center — the
+// "WHs Warming Up" box lives right under the BC selector in the WH Warmup
+// creator (js/app.js openWhWarmingUpModal passes whState.connectionId), so
+// it should only ever count/show that same BC's campaigns, not every
+// connected BC's mixed together. Omit it for the unscoped view.
+async function listWarmups(supabase, connectionId) {
+  let warmupQ = supabase
     .from("wh_warmup_campaigns")
     .select(
-      "campaign_id, advertiser_id, advertiser_name, campaign_name, target_country, daily_budget, currency, cleanup_status, cleanup_attempts, cleanup_error, became_active_at, deleted_at, created_at"
+      "campaign_id, advertiser_id, advertiser_name, campaign_name, target_country, daily_budget, currency, cleanup_status, cleanup_attempts, cleanup_error, became_active_at, deleted_at, created_at, connection_id"
     )
     .in("cleanup_status", ["WAITING_FOR_ACTIVE", "PAUSE_PENDING", "DELETE_PENDING"])
     .order("created_at", { ascending: false })
     .limit(200);
+  if (connectionId) warmupQ = warmupQ.eq("connection_id", connectionId);
+  const { data, error } = await warmupQ;
   if (error) {
     if (/does not exist|schema cache|could not find the table/i.test(error.message || "")) {
       return json(200, { ok: true, campaigns: [], unmigrated: true });
@@ -444,11 +451,13 @@ async function listWarmups(supabase) {
   // auto-deleted. No WH-specific fields (target_country/daily_budget/
   // cleanup_status) — those stay null so the frontend can tell them apart.
   try {
-    const { data: strays } = await supabase
+    let strayQ = supabase
       .from("stray_campaigns")
-      .select("campaign_id, advertiser_id, campaign_name, discovered_at")
+      .select("campaign_id, advertiser_id, campaign_name, discovered_at, connection_id")
       .order("discovered_at", { ascending: false })
       .limit(200);
+    if (connectionId) strayQ = strayQ.eq("connection_id", connectionId);
+    const { data: strays } = await strayQ;
     for (const s of strays || []) {
       rows.push({
         campaign_id: s.campaign_id,

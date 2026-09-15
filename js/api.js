@@ -552,11 +552,14 @@ export async function cleanupWhWarmup() {
   return readTiktokResponse(res, "WH Warmup cleanup failed");
 }
 
-export async function listWhWarmup() {
+// `connectionId` (optional): scopes the list to one Business Center — the
+// "WHs Warming Up" box sits right under the BC selector in the WH Warmup
+// creator, so it only shows that same BC's campaigns. Omit for every BC.
+export async function listWhWarmup(connectionId) {
   const res = await fetch("/.netlify/functions/wh-warmup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "list" }),
+    body: JSON.stringify({ action: "list", ...(connectionId ? { connection_id: connectionId } : {}) }),
   });
   return readTiktokResponse(res, "Couldn't load WH Warmup campaigns"); // { campaigns: [...] }
 }
