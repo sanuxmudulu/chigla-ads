@@ -494,7 +494,13 @@ export async function setConnectionNetwork(connectionId, affiliateNetwork) {
 // Bulk temporary Traffic-CBO warmup campaigns that auto-delete once Active.
 // All TikTok writes are server-side; nothing sensitive is returned here.
 
-export async function createWhWarmup(connectionId, advertiserIds, targetCountry, sparkCode, locationId) {
+// `campaignNames` (optional, same length/order as advertiserIds): the exact
+// "whN" name to use for each account. A large batch is sent as several
+// smaller requests (see js/app.js submitWhWarmup) so continuous numbering
+// across requests needs the caller to compute names once up front, the same
+// way Campaign Creator's own chunked create does — without this, each
+// request would restart naming from wh1 and collide with an earlier chunk's.
+export async function createWhWarmup(connectionId, advertiserIds, targetCountry, sparkCode, locationId, campaignNames) {
   const res = await fetch("/.netlify/functions/wh-warmup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -505,6 +511,7 @@ export async function createWhWarmup(connectionId, advertiserIds, targetCountry,
       target_country: targetCountry,
       location_id: locationId || null,
       spark_code: sparkCode,
+      ...(campaignNames ? { campaign_names: campaignNames } : {}),
     }),
   });
   return readTiktokResponse(res, "WH Warmup creation failed"); // { results: [...] }

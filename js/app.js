@@ -1941,6 +1941,16 @@ function updateWhNextButton() {
   document.getElementById("whNextBtn").disabled = whState.selected.size === 0;
 }
 
+// One request creates warmup campaigns sequentially server-side (campaign ->
+// ad group -> Spark ad, PLUS the $5 account safety cap first — slightly more
+// MCP calls per account than Campaign Creator's own create) and the
+// serverless function has a hard wall-clock limit, so — exactly like
+// Campaign Creator (see CC_CREATE_CHUNK_SIZE) — a batch bigger than this is
+// split into consecutive requests of this size instead of one unbounded
+// request. The total batch size has no cap; a bigger batch just takes
+// proportionally longer (more requests).
+const WH_CREATE_CHUNK_SIZE = 6;
+
 async function submitWhWarmup() {
   const typed = document.getElementById("whCountryInput").value.trim();
   const spark = document.getElementById("whSparkInput").value.trim();
@@ -1960,20 +1970,59 @@ async function submitWhWarmup() {
     .filter((a) => whState.selected.has(String(a.advertiser_id)))
     .map((a) => String(a.advertiser_id));
   if (!ids.length) return whGoToStep(1);
+  // Computed once, up front, over the FULL list — so numbering stays
+  // continuous (wh1, wh2, …) across chunk boundaries instead of each chunk
+  // restarting at wh1 and colliding with an earlier one's names.
+  const namesAll = ids.map((_, i) => `wh${i + 1}`);
+  const total = ids.length;
+  const chunkCount = Math.ceil(total / WH_CREATE_CHUNK_SIZE);
 
   btn.disabled = true;
   btn.textContent = "Creating…";
   progressEl.className = "eng-placeholder busy";
-  progressEl.textContent = `Creating ${ids.length} warmup campaign${ids.length === 1 ? "" : "s"}… this can take a minute.`;
 
+  const allResults = [];
+  let warning = null;
   try {
-    const res = await createWhWarmup(whState.connectionId, ids, picked.name, spark, picked.location_id);
-    renderWhResults(res.results || [], res.warning);
+    for (let c = 0; c < chunkCount; c++) {
+      const start = c * WH_CREATE_CHUNK_SIZE;
+      const end = Math.min(start + WH_CREATE_CHUNK_SIZE, total);
+      progressEl.textContent = chunkCount > 1
+        ? `Creating ${total} warmup campaigns… batch ${c + 1}/${chunkCount} (${allResults.filter((x) => x.status === "Created").length} done so far).`
+        : `Creating ${total} warmup campaign${total === 1 ? "" : "s"}… this can take a minute.`;
+      try {
+        const res = await createWhWarmup(
+          whState.connectionId,
+          ids.slice(start, end),
+          picked.name,
+          spark,
+          picked.location_id,
+          namesAll.slice(start, end)
+        );
+        allResults.push(...(res.results || []));
+        if (res.warning && !warning) warning = res.warning;
+      } catch (chunkErr) {
+        // One batch failing outright (network error, etc.) never stops the
+        // rest — the remaining batches still run, this one's accounts are
+        // just recorded as failed.
+        ids.slice(start, end).forEach((advId, i) => {
+          const a = whAdvsForConnection().find((x) => String(x.advertiser_id) === advId);
+          allResults.push({
+            advertiser_id: advId,
+            advertiser_name: a?.advertiser_name || advId,
+            status: "Failed",
+            error: chunkErr.message,
+          });
+        });
+      }
+    }
+    renderWhResults(allResults, warning);
     whGoToStep(3);
     // Kick a cleanup pass so newly-Active ones start deleting promptly.
     runWhWarmupCleanup();
   } catch (err) {
     errEl.textContent = err.message;
+  } finally {
     btn.disabled = false;
     btn.textContent = "Create WH Warmup";
     progressEl.textContent = "";
@@ -4357,8 +4406,9 @@ function renderSelectedConnection() {
   // never steals its focus/cursor.
   const query = document.getElementById("tiktokAdvSearch")?.value || "";
   const shownAdvs = filterAdvsByQuery(advs, query);
+  const campMap = campaignNameByAdvertiser();
   const rows = shownAdvs.length
-    ? shownAdvs.map((a) => tiktokAdvRow(a)).join("")
+    ? shownAdvs.map((a) => tiktokAdvRow(a, campMap)).join("")
     : `<p class="tk-empty">${advs.length ? "No accounts match your search." : "No advertiser accounts found for this connection."}</p>`;
 
   const net = String(c.affiliate_network || "GLITCHY").toUpperCase();
@@ -4388,16 +4438,17 @@ function renderSelectedConnection() {
 // Informational row only — no selection control. Detailed Metrics scopes
 // itself automatically (tracked OR has a Campaign Creator campaign; see
 // scopedAdvertisers in tiktok-campaigns.js), so there's nothing to pick here.
-function tiktokAdvRow(a) {
+function tiktokAdvRow(a, campMap) {
   const meta = [a.advertiser_id, a.currency || null, a.display_timezone || a.timezone || null]
     .filter(Boolean)
     .join(" · ");
   const approved = advIsApproved(a);
+  const campaignName = campMap ? campMap.get(String(a.advertiser_id)) : null;
   return `
     <div class="tk-adv">
       <span class="tk-adv-main">
         <span class="tk-adv-name">${escapeHtml(a.advertiser_name || a.advertiser_id)}</span>
-        <span class="tk-adv-meta">${escapeHtml(meta)}</span>
+        <span class="tk-adv-meta">${escapeHtml(meta)}${campaignName ? ` <span class="tk-adv-campaign">| ${escapeHtml(campaignName)}</span>` : ""}</span>
       </span>
       <span class="tk-adv-status ${approved ? "ok" : "warn"}">${advStatusLabel(a)}</span>
     </div>`;
