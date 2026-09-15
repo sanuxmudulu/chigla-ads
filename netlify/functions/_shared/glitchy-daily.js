@@ -288,6 +288,87 @@ async function earningsSnapshotToday(supabase, date, earnings) {
   return { date, currentHour: hour, cumulative: earnings, byHour };
 }
 
+// Best-effort hour-of-day (EST) out of one Glitchy stat's own date/timestamp
+// field. Returns null for a bare "YYYY-MM-DD" (no time to extract — nothing
+// gained by "extracting" hour 0 from every entry) or anything unparseable,
+// so the caller can tell "no real per-entry time info this run" apart from
+// a genuine hour value and fall back instead of silently misattributing
+// every entry to midnight.
+function entryEstHour(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const d = new Date(trimmed);
+  if (isNaN(d)) return null;
+  const est = new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return est.getHours();
+}
+
+// True per-hour combined Glitchy+Mabac earnings for TODAY, recomputed fresh
+// from THIS poll's own complete entry list — the Earnings-line analog of
+// tiktok-campaigns.js's stat_time_hour fix for Spend. The old approach
+// (snapshotting a polled running total into "whichever hour we're currently
+// in", see earningsSnapshotToday above) attributed a whole day's catch-up to
+// one hour whenever polling had any gap (e.g. the dashboard tab closed for a
+// while, or simply hadn't run yet that hour) — recomputing the full day from
+// Glitchy's own per-entry data every time has no such gap, the same way
+// TikTok's own stat_time_hour report doesn't.
+//
+// Respects the same network-ownership rule as combinedEarnings (a name
+// declared/inferred MABAC is never ALSO counted from its Glitchy entries).
+// Mabac itself has no per-entry timestamps (one day-level API call, no
+// hourly breakdown) — its contribution is folded into `currentHour` as a
+// whole, same as the old mechanism; only Glitchy's (the primary network)
+// gets true hour-of-day attribution. Returns null when NONE of today's
+// entries carry usable time-of-day info, so the caller can fall back to
+// earningsSnapshotToday instead of a wrong/empty graph.
+function hourlyEarningsFromEntries({ entries, dateStr, glitchyBySourceDay, mabacBySub1, networkByName, currentHour }) {
+  // Whole-day ownership decision per name (same default combinedEarnings
+  // uses: explicit declaration wins; otherwise "present only in Mabac,
+  // never in Glitchy today" defaults to Mabac) — decided ONCE so a name's
+  // owner can't flip from hour to hour.
+  const mabacOwned = new Set();
+  for (const name of Object.keys(mabacBySub1 || {})) {
+    const declared = String((networkByName || {})[name] || "").toUpperCase();
+    if (declared === "MABAC") mabacOwned.add(name);
+    else if (declared !== "GLITCHY" && !glitchyBySourceDay[name]) mabacOwned.add(name);
+  }
+  for (const name of Object.keys(networkByName || {})) {
+    if (String(networkByName[name]).toUpperCase() === "MABAC") mabacOwned.add(name);
+  }
+
+  const payoutByHour = {};
+  let anyHourInfo = false;
+  for (const entry of entries) {
+    const stat = entry.Stat || entry.stat || entry;
+    if (!stat || !stat.source) continue;
+    if (mabacOwned.has(stat.source)) continue; // owned by Mabac — never counted from Glitchy's own feed
+    const dk = stat.date ? normalizeDateKey(stat.date, dateStr) : dateStr;
+    if (dk !== dateStr) continue; // not today
+    const hour = entryEstHour(stat.date);
+    if (hour == null) continue; // no usable time-of-day on this entry
+    anyHourInfo = true;
+    payoutByHour[hour] = (payoutByHour[hour] || 0) + Number(stat.payout || 0);
+  }
+  if (!anyHourInfo) return null;
+
+  // Mabac's own total (whole-day, no hourly breakdown available) folded
+  // entirely into the current hour — same imprecision the old mechanism had
+  // for Mabac specifically, acceptable since it's the secondary/optional
+  // network.
+  let mabacTotal = 0;
+  for (const name of mabacOwned) if (mabacBySub1[name]) mabacTotal += Number(mabacBySub1[name].revenue || 0);
+  if (mabacTotal) payoutByHour[currentHour] = (payoutByHour[currentHour] || 0) + mabacTotal;
+
+  const cumulativeByHour = {};
+  let running = 0;
+  for (let h = 0; h <= currentHour && h < 24; h++) {
+    running += Number(payoutByHour[h] || 0);
+    cumulativeByHour[String(h)] = Math.round(running * 100) / 100;
+  }
+  return cumulativeByHour;
+}
+
 // campaign_name -> affiliate_network, from tiktok_campaigns. Empty on any error
 // (e.g. before the migration) so callers just get Glitchy-only behaviour.
 async function networkByCampaignName(supabase) {
@@ -315,4 +396,6 @@ module.exports = {
   tiktokSpendForToday,
   upsertTodayTotals,
   earningsSnapshotToday,
+  hourlyEarningsFromEntries,
+  nyHourNow,
 };

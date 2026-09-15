@@ -13,6 +13,9 @@ const {
   upsertTodayTotals,
   networkByCampaignName,
   earningsSnapshotToday,
+  hourlyEarningsFromEntries,
+  sumEntriesBySourceForDate,
+  nyHourNow,
 } = require("./_shared/glitchy-daily");
 const { fetchMabacSubIdReport } = require("./_shared/mabac");
 
@@ -38,15 +41,6 @@ exports.handler = async function (event) {
     const { entries, bySource } = await fetchGlitchy(token, startDate, endDate);
     const sources = Object.keys(bySource).map((src) => ({ source: src, ...bySource[src] }));
 
-    // Diagnostic only — helps confirm whether Glitchy's Stat.date carries a
-    // real time-of-day (needed for true per-hour Earnings attribution on the
-    // Live Performance graph, not yet implemented) or is just a bare date.
-    // Safe to remove once that's settled; never affects the response.
-    if (entries.length) {
-      const sample = (entries[0].Stat || entries[0].stat || entries[0] || {}).date;
-      console.log(`[glitchy-stats] sample Stat.date: ${JSON.stringify(sample)}`);
-    }
-
     // Automatic daily history: refresh today's row whenever the requested range
     // reaches today (the normal dashboard poll). Combined Glitchy + Mabac
     // earnings by network ownership. Every part here is best-effort — a Mabac
@@ -65,10 +59,42 @@ exports.handler = async function (event) {
         try {
           const networkByName = await networkByCampaignName(supabase);
           const totals = await upsertTodayTotals(supabase, entries, { mabacSources, networkByName });
-          // Live Performance graph ONLY: snapshot the combined total-so-far into
-          // the current NY hour so the Earnings line reflects Mabac too (raw
-          // Glitchy entries alone, used below for backward-compat, never do).
-          earningsToday = await earningsSnapshotToday(supabase, today, totals.total_earnings);
+          const currentHour = nyHourNow();
+
+          // Live Performance graph ONLY. Prefer TRUE per-hour attribution,
+          // recomputed fresh from this poll's own complete entry list (see
+          // hourlyEarningsFromEntries) — same idea as tiktok-campaigns.js's
+          // stat_time_hour fix for Spend, so the two lines stop disagreeing
+          // by however long it's been since the dashboard was last open.
+          // Falls back to the old polled-snapshot mechanism only when
+          // Glitchy's entries carry no usable time-of-day this run.
+          const mabacBySub1 = {};
+          for (const s of mabacSources) if (s && s.sub1) mabacBySub1[s.sub1] = s;
+          const glitchyBySourceDay = sumEntriesBySourceForDate(entries, today);
+          const trueHourly = hourlyEarningsFromEntries({
+            entries,
+            dateStr: today,
+            glitchyBySourceDay,
+            mabacBySub1,
+            networkByName,
+            currentHour,
+          });
+
+          if (trueHourly) {
+            earningsToday = {
+              date: today,
+              currentHour,
+              cumulative: trueHourly[String(currentHour)] ?? 0,
+              byHour: trueHourly,
+            };
+          } else {
+            // Diagnostic (warn, not log — Vercel's Runtime Logs only surface
+            // warn/error/fatal). Safe to remove once this stops appearing.
+            console.warn(
+              `[glitchy-stats] hourlyEarningsFromEntries found no per-entry time info (entries=${entries.length}) — using the polled-snapshot fallback this cycle`
+            );
+            earningsToday = await earningsSnapshotToday(supabase, today, totals.total_earnings);
+          }
         } catch (err) {
           console.error(`[glitchy-stats] daily history / earnings snapshot failed: ${err.message}`);
         }
