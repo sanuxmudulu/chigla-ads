@@ -169,11 +169,38 @@ async function isCampaignCreatorCampaign(supabase, campaignId) {
   }
 }
 
+// A campaign row with NO owner anywhere: advertiser untracked, not a Campaign
+// Creator campaign, not currently claimed by WH Warmup, not stray-tracked.
+// Under normal operation nothing can ever reach this state — every path that
+// writes a tiktok_campaigns row only ever does so for a tracked advertiser —
+// so it only shows up as the residue of a bug (see commit 9399565: WH
+// Warmup's retention job used to purge its own tracking row without also
+// dropping the matching tiktok_campaigns row, leaking a "Traffic####" ghost
+// into Detailed Metrics frozen on its last known status, permanently
+// unmanageable because resolveTrackedCampaign correctly refused to touch an
+// untracked advertiser's campaign). Only ever used to allow deletion of that
+// exact dead-end shape — never loosens any other write action.
+async function isOrphanGhostCampaign(supabase, campaignId) {
+  try {
+    const cid = String(campaignId);
+    const [wh, stray, creator] = await Promise.all([
+      supabase.from("wh_warmup_campaigns").select("campaign_id").eq("campaign_id", cid).maybeSingle(),
+      supabase.from("stray_campaigns").select("campaign_id").eq("campaign_id", cid).maybeSingle(),
+      isCampaignCreatorCampaign(supabase, cid),
+    ]);
+    return !wh.data && !stray.data && !creator;
+  } catch (_) {
+    return false; // can't confirm it's abandoned — don't allow
+  }
+}
+
 // Loads a stored campaign row and confirms it's ours to manage: either its
 // advertiser account is explicitly `tracked` (the legacy manual selection,
 // kept working for back-compat), or the campaign itself was created by
-// Campaign Creator — which needs no manual tracking at all.
-async function resolveTrackedCampaign(supabase, campaignId) {
+// Campaign Creator — which needs no manual tracking at all. `allowOrphan`
+// (delete_campaign only) additionally permits a true ownerless ghost row —
+// see isOrphanGhostCampaign.
+async function resolveTrackedCampaign(supabase, campaignId, { allowOrphan = false } = {}) {
   const { data: campaign } = await supabase
     .from("tiktok_campaigns")
     .select("*")
@@ -191,7 +218,9 @@ async function resolveTrackedCampaign(supabase, campaignId) {
     return { error: json(403, { error: "That advertiser account is not tracked." }) };
   }
   if (!adv.tracked && !(await isCampaignCreatorCampaign(supabase, campaign.campaign_id))) {
-    return { error: json(403, { error: "That advertiser account is not tracked." }) };
+    if (!allowOrphan || !(await isOrphanGhostCampaign(supabase, campaign.campaign_id))) {
+      return { error: json(403, { error: "That advertiser account is not tracked." }) };
+    }
   }
 
   const { data: conn } = await supabase
@@ -303,7 +332,7 @@ exports.handler = async function (event) {
 
     if (action === "delete_campaign") {
       if (!body.campaign_id) return json(400, { error: "campaign_id is required" });
-      const r = await resolveTrackedCampaign(supabase, body.campaign_id);
+      const r = await resolveTrackedCampaign(supabase, body.campaign_id, { allowOrphan: true });
       if (r.error) return r.error;
 
       const campaignId = String(r.campaign.campaign_id);
