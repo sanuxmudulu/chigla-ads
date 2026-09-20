@@ -787,7 +787,6 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
   const now = new Date().toISOString();
   const rows = [];
   const seenCampaignIds = [];
-  const activeCampaignIds = []; // genuinely-Active campaigns this run (engagement trigger)
   const scannedAdvIds = []; // advertisers whose campaign list we actually read
   const perAdvertiser = {};
 
@@ -824,7 +823,6 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
           reviewByAdGroupId,
         });
         seenCampaignIds.push(cid);
-        if (eff.label === "Active") activeCampaignIds.push(cid);
         rows.push({
           campaign_id: cid,
           connection_id: connectionId,
@@ -879,11 +877,6 @@ async function discoverAndStoreCampaigns({ supabase, client, connectionId, track
     const del = await runDelete(true);
     if (del.error && /hidden/.test(del.error.message || "")) await runDelete(false);
   }
-
-  // Engagement FOUNDATION only: flip PENDING/FAILED -> READY for campaigns that
-  // are genuinely Active AND already have a TikTok post URL. Idempotent (the
-  // WHERE clause makes repeat runs a no-op) and never sends anything anywhere.
-  await markEngagementReadyIfActive(supabase, activeCampaignIds);
 
   return { campaignCount: rows.length, perAdvertiser };
 }

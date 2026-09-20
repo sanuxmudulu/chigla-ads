@@ -54,7 +54,6 @@ const {
   getBcBalance,
   getAdvertiserBudgets,
   setAdvertiserBudget,
-  markEngagementReadyIfActive,
   withoutTemporaryCampaigns,
   applyAppealOverlay,
   applyAppealOverlayByCampaignId,
@@ -1195,13 +1194,6 @@ async function campaignMetricsForScopedAdvertisers(supabase) {
   } catch (_) {
     /* no WH table — nothing to exclude */
   }
-
-  // Engagement FOUNDATION: on this ~60s tick, flip any campaign currently stored
-  // as "Active" that has a post URL to READY. Idempotent, no external calls.
-  await markEngagementReadyIfActive(
-    supabase,
-    (known || []).filter((c) => c.effective_status === "Active").map((c) => c.campaign_id)
-  );
 
   const byConnection = {};
   for (const t of tracked) (byConnection[t.connection_id] = byConnection[t.connection_id] || []).push(t);

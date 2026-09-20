@@ -61,7 +61,6 @@ const {
   connectMcp,
   loadCampaignDetail,
   applyAppealOverlay,
-  markEngagementReadyIfActive,
   json,
 } = require("./_shared/tiktok-mcp");
 const { duplicateForRow, registerForDuplication, DUPES_PER_CYCLE } = require("./_shared/campaign-creator.js");
@@ -429,14 +428,10 @@ async function patchRow(supabase, campaignId, patch) {
 // re-derive status, so this keeps a creator campaign's Detailed Metrics badge
 // current while it moves through review / appeal / Active.
 //
-// This is also the ONLY place that observes a Campaign Creator campaign
-// reaching "Active" on the automatic ~60s cycle — the full discovery `sync`
-// that normally flips engagement_status to READY (see
-// markEngagementReadyIfActive in _shared/tiktok-mcp.js) only runs on a manual
-// "Refresh Data" click, there is no server-side cron for it. So the auto
-// LIKES/SAVES trigger is wired in right here: the instant this tick sees a
-// campaign go Active, it's marked READY too — same idempotent flag the
-// pending-engagement worker below already treats as "add once, never again."
+// NOTE: this used to also auto-fire LIKES/SAVES engagement the instant a
+// campaign went Active (via markEngagementReadyIfActive). Removed by request
+// (2026-09-20) — engagement is now ALWAYS a manual action from the Engagement
+// button, never automatic.
 async function persistTiktokCampaignStatus(supabase, campaignId, detail) {
   if (!detail || !detail.effective_status) return;
   try {
@@ -453,9 +448,6 @@ async function persistTiktokCampaignStatus(supabase, campaignId, detail) {
         updated_at: new Date().toISOString(),
       })
       .eq("campaign_id", String(campaignId));
-    if (detail.effective_status === "Active") {
-      await markEngagementReadyIfActive(supabase, [campaignId]);
-    }
   } catch (err) {
     console.error(`[campaign-creator] status persist ${campaignId} failed: ${err.message}`);
   }
