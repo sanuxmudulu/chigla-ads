@@ -364,6 +364,9 @@ function renderFromCacheOrFallback() {
 
 function wireEvents() {
   document.getElementById("refreshBtn").addEventListener("click", () => refreshAll());
+  document.getElementById("signOutBtn").addEventListener("click", async () => {
+    try { await fetch("/api/logout", { method: "POST" }); } finally { location.href = "/login.html"; }
+  });
 
   // ---- Tools panel ----
   document.getElementById("toolsBtn").addEventListener("click", openToolsDrawer);

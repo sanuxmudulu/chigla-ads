@@ -8,6 +8,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@supabase/supabase-js": "^2.45.0",
+    "@vercel/functions": "^3.9.9",
     "ws": "^8.21.3"
   }
 }

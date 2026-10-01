@@ -28,6 +28,14 @@ const HANDLERS = {
   "campaign-creator-run": () => require("../netlify/functions/campaign-creator-run.js"),
   "tracker": () => require("../netlify/functions/tracker.js"),
   "tracker-run": () => require("../netlify/functions/tracker-run.js"),
+
+  // --- Organic dashboard (added 2026-10) ---
+  "login": () => require("../netlify/functions/login.js"),
+  "logout": () => require("../netlify/functions/logout.js"),
+  "organic-content": () => require("../netlify/functions/organic-content.js"),
+  "organic-test-post": () => require("../netlify/functions/organic-test-post.js"),
+  "organic-test-post-status": () => require("../netlify/functions/organic-test-post-status.js"),
+  "organic-schedule-preview": () => require("../netlify/functions/organic-schedule-preview.js"),
 };
 
 module.exports = async (req, res) => {

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="kuzan">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chigla — Sign in</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/themes.css" />
+<link rel="stylesheet" href="css/base.css" />
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .login-card {
+    width: min(360px, calc(100vw - 32px));
+    background: var(--panel-bg, rgba(20,20,28,0.75));
+    border: 1px solid var(--panel-border, rgba(255,255,255,0.08));
+    border-radius: 16px;
+    padding: 32px 28px;
+    backdrop-filter: blur(10px);
+  }
+  .login-brand {
+    font-family: "Orbitron", sans-serif;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    font-size: 22px;
+    margin: 0 0 4px;
+  }
+  .login-sub { margin: 0 0 24px; font-size: 13px; opacity: 0.6; }
+  .login-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--panel-border, rgba(255,255,255,0.12));
+    background: rgba(255,255,255,0.04);
+    color: inherit;
+    font-size: 15px;
+    margin-bottom: 14px;
+  }
+  .login-btn {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: none;
+    background: var(--accent, #6c5ce7);
+    color: #fff;
+    font-weight: 600;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .login-btn:disabled { opacity: 0.6; cursor: default; }
+  .login-error { color: #ff6b6b; font-size: 13px; margin: 10px 0 0; min-height: 16px; }
+</style>
+</head>
+<body>
+
+<div class="ambient ambient-kuzan">
+  <video class="ambient-kuzan-video" autoplay loop muted playsinline preload="auto">
+    <source src="assets/themes/kuzan-bg.mp4" type="video/mp4" />
+  </video>
+</div>
+
+<form class="login-card" id="loginForm">
+  <div class="login-brand">CHIGLA</div>
+  <p class="login-sub">Enter the dashboard password.</p>
+  <input class="login-input" type="password" id="pw" autocomplete="current-password" autofocus required placeholder="Password" />
+  <button class="login-btn" id="submitBtn" type="submit">Sign in</button>
+  <p class="login-error" id="err"></p>
+</form>
+
+<script>
+  const form = document.getElementById("loginForm");
+  const err = document.getElementById("err");
+  const btn = document.getElementById("submitBtn");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    btn.disabled = true;
+    btn.textContent = "Checking...";
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: document.getElementById("pw").value }),
+      });
+      if (!res.ok) {
+        err.textContent = "Wrong password.";
+        btn.disabled = false;
+        btn.textContent = "Sign in";
+        return;
+      }
+      const params = new URLSearchParams(location.search);
+      location.href = params.get("redirect") || "/";
+    } catch (e2) {
+      err.textContent = "Could not reach the server. Try again.";
+      btn.disabled = false;
+      btn.textContent = "Sign in";
+    }
+  });
+</script>
+</body>
+</html>
